@@ -1,13 +1,13 @@
 #!/bin/sh
-# Install Kestrel for the current user: ~/.local/bin/kestrel plus an application-menu entry.
+# Install Shotrover for the current user: ~/.local/bin/shotrover plus an application-menu entry.
 # Usage: ./install.sh        ./install.sh --uninstall
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
-BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"
+BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
 if [ "$1" = "--uninstall" ]; then
-  rm -f "$BIN/kestrel" "$APPS/kestrel.desktop"
+  rm -f "$BIN/shotrover" "$APPS/shotrover.desktop" "$ICONS/shotrover.svg"
   update-desktop-database "$APPS" 2>/dev/null || true
-  echo "Removed. Settings/cache left in ~/.config/kestrel and ~/.cache/kestrel."
+  echo "Removed. Settings/cache left in ~/.config/shotrover and ~/.cache/shotrover."
   exit 0
 fi
 if ! python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk" 2>/dev/null; then
@@ -17,10 +17,18 @@ if ! python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository 
   echo "  Arch/CachyOS:       sudo pacman -S python-gobject gtk3"
   exit 1
 fi
-mkdir -p "$BIN" "$APPS"
-cp "$HERE/kestrel.py" "$BIN/kestrel"; chmod +x "$BIN/kestrel"
-sed "s|^Exec=.*|Exec=$BIN/kestrel %U|" "$HERE/packaging/kestrel.desktop" > "$APPS/kestrel.desktop"
+mkdir -p "$BIN" "$APPS" "$ICONS"
+cp "$HERE/packaging/shotrover.svg" "$ICONS/shotrover.svg"
+gtk-update-icon-cache -q -t "$HOME/.local/share/icons/hicolor" 2>/dev/null || true
+cp "$HERE/shotrover.py" "$BIN/shotrover"; chmod +x "$BIN/shotrover"
+sed "s|^Exec=.*|Exec=$BIN/shotrover %U|" "$HERE/packaging/shotrover.desktop" > "$APPS/shotrover.desktop"
+# the app was called Kestrel before: replace that install rather than leaving two menu entries
+if [ -f "$APPS/kestrel.desktop" ] || [ -f "$BIN/kestrel" ]; then
+  [ "$(xdg-mime query default inode/directory 2>/dev/null)" = "kestrel.desktop" ] && xdg-mime default shotrover.desktop inode/directory 2>/dev/null || true
+  rm -f "$BIN/kestrel" "$APPS/kestrel.desktop"
+  echo "Replaced the old Kestrel install (settings carry over on first start)."
+fi
 update-desktop-database "$APPS" 2>/dev/null || true
-echo "Installed: kestrel [folder]   (app menu: 'Kestrel File Browser')"
-echo "Default folder handler:  xdg-mime default kestrel.desktop inode/directory"
+echo "Installed: shotrover [folder]   (app menu: 'Shotrover')"
+echo "Default folder handler:  xdg-mime default shotrover.desktop inode/directory"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "Note: $BIN is not on your PATH yet.";; esac

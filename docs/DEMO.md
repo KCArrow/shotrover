@@ -1,11 +1,11 @@
 # Demo mode
 
-`kestrel --demo /path/to/KestrelDemo` starts Kestrel on a **fictional machine** so you can take
+`shotrover --demo /path/to/ShotroverDemo` starts Shotrover on a **fictional machine** so you can take
 screenshots or give demos without exposing your own files, drives or user name.
 
 ```bash
-unzip kestrel-demo.zip -d ~/          # → ~/KestrelDemo
-kestrel --demo ~/KestrelDemo          # or: python3 kestrel.py --demo ~/KestrelDemo
+unzip shotrover-demo.zip -d ~/          # → ~/ShotroverDemo
+shotrover --demo ~/ShotroverDemo          # or: python3 shotrover.py --demo ~/ShotroverDemo
 ```
 
 What is faked while the flag is on (everything else is the real application):
@@ -15,10 +15,10 @@ What is faked while the flag is on (everything else is the real application):
 | Drives in This PC / nav pane | your mounts | Local Disk (/), Projects, Archive, KINGSTON (USB, removable), studio (NFS share) |
 | Physical disks (This PC sections, tooltips) | `lsblk` | Samsung 980 PRO · WD Black SN850X · Seagate IronWolf (with an unmounted Windows partition, for the dual-boot rule) · Kingston DataTraveler |
 | Free space bars | `statvfs` | fixed fictional numbers |
-| User folders (Desktop, Documents, …) | XDG dirs | `KestrelDemo/Home/*` |
+| User folders (Desktop, Documents, …) | XDG dirs | `ShotroverDemo/Home/*` |
 | File owner in Details / Properties | your user name | `artist` |
 | Quick access pins, Frequent, Recent | your config | pre-filled with demo paths |
-| Settings | `~/.config/kestrel/config.json` | fresh defaults, **never read or written** |
+| Settings | `~/.config/shotrover/config.json` | fresh defaults, **never read or written** |
 
 Not faked: the Recycle Bin (it is your real trash — empty it or avoid that page), window title bar,
 theme, and the file index (leave it off in demo mode).
@@ -26,7 +26,7 @@ theme, and the file index (leave it off in demo mode).
 ## The demo folder
 
 ```
-KestrelDemo/
+ShotroverDemo/
 ├── System/      fake root filesystem (etc/os-release, fstab, …)               → "Local Disk (/)"
 ├── Projects/    Hollowmere/ short-film project + Saltmarsh_Spot_S2/            → "Projects"
 ├── Archive/     four archived shows                                            → "Archive"

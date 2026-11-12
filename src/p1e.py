@@ -1,7 +1,7 @@
 
 # --------------------------------------------------------------------------- crash detection and error reports
-# Three kinds of trouble are caught and turned into a report file under ~/.cache/kestrel/reports/:
-#   error  — an unhandled Python exception (GTK callback, worker thread). Kestrel keeps running; the window
+# Three kinds of trouble are caught and turned into a report file under ~/.cache/shotrover/reports/:
+#   error  — an unhandled Python exception (GTK callback, worker thread). Shotrover keeps running; the window
 #            shows a bar with "Review & report…". Each distinct failure is reported once per session.
 #   crash  — the process died (segfault in a C library, abort, killed). faulthandler writes the stacks of
 #            every thread to a per-process file on fatal signals; a per-process session marker that is only
@@ -10,8 +10,8 @@
 # Nothing is ever sent automatically: the user reviews (and can edit) the report, then opens it as a
 # pre-filled GitHub issue (or copies it). Home folder and user name are replaced with "~" / "<user>" before anything is shown.
 
-REPORT_ISSUES_URL = "https://github.com/KCArrow/kestrel/issues/new"
-REPORT_DIR = os.path.join(GLib.get_user_cache_dir(), "kestrel", "reports")
+REPORT_ISSUES_URL = "https://github.com/KCArrow/shotrover/issues/new"
+REPORT_DIR = os.path.join(GLib.get_user_cache_dir(), "shotrover", "reports")
 
 
 class CrashReporter:
@@ -48,7 +48,7 @@ class CrashReporter:
             self._fault_fh = open(self._fault_file(self.pid), "w")
             faulthandler.enable(file=self._fault_fh, all_threads=True)
         except Exception as ex:
-            sys.stderr.write(f"kestrel: crash reporter unavailable: {ex}\n")
+            sys.stderr.write(f"shotrover: crash reporter unavailable: {ex}\n")
         sys.excepthook = self._excepthook
         if self._prev_thread_hook is not None:
             threading.excepthook = self._thread_hook
@@ -80,7 +80,7 @@ class CrashReporter:
             return True
         try:
             with open(f"/proc/{pid}/cmdline", "rb") as f:
-                return b"kestrel" in f.read()            # a recycled pid belongs to something else
+                return b"shotrover" in f.read()            # a recycled pid belongs to something else
         except OSError:
             return True
 
@@ -95,7 +95,7 @@ class CrashReporter:
                 continue
             pid = int(m.group(1))
             if pid == self.pid or self._alive(pid):
-                continue                                 # another Kestrel window process, still running
+                continue                                 # another Shotrover window process, still running
             try:
                 with open(self._session_file(pid)) as f:
                     info = json.load(f)
@@ -120,16 +120,16 @@ class CrashReporter:
                         pass
             when = _dt.datetime.fromtimestamp(started).strftime("%Y-%m-%d %H:%M") if started else "?"
             if fault:
-                summary = f"Kestrel {info.get('version', '?')} crashed (run started {when})"
+                summary = f"Shotrover {info.get('version', '?')} crashed (run started {when})"
                 body = "Fatal signal — stacks of every thread at the moment of the crash:\n\n" + fault
                 if freeze:
                     body += "\n\nThe interface had frozen before the crash:\n\n" + freeze
                 prompt.append(self._write("crash", summary, body))
             elif freeze:
-                summary = f"Kestrel {info.get('version', '?')} froze and was closed (run started {when})"
+                summary = f"Shotrover {info.get('version', '?')} froze and was closed (run started {when})"
                 prompt.append(self._write("freeze", summary, freeze))
             else:
-                self._write("ended", f"Kestrel {info.get('version', '?')} ended unexpectedly (run started {when})",
+                self._write("ended", f"Shotrover {info.get('version', '?')} ended unexpectedly (run started {when})",
                             "No stack trace: the process was killed (out of memory, SIGKILL, logout without "
                             "a clean quit, power loss).")
             for p in (self._session_file(pid), self._fault_file(pid)):
@@ -148,7 +148,7 @@ class CrashReporter:
         try:
             with open(dump_path) as f:
                 text = f.read()
-            path = self._write("freeze", "Kestrel's window stopped responding", text, "MainThread")
+            path = self._write("freeze", "Shotrover's window stopped responding", text, "MainThread")
             sess = self._session_file(self.pid)
             with open(sess) as f:
                 info = json.load(f)
@@ -212,7 +212,7 @@ class CrashReporter:
 
     @staticmethod
     def environment() -> str:
-        rows = [("Kestrel", VERSION), ("Python", sys.version.split()[0]),
+        rows = [("Shotrover", VERSION), ("Python", sys.version.split()[0]),
                 ("PyGObject", getattr(gi, "__version__", "?")),
                 ("GTK", f"{Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()}"),
                 ("GLib", ".".join(str(x) for x in GLib.glib_version))]
@@ -247,7 +247,7 @@ class CrashReporter:
 
     def _write(self, kind: str, summary: str, body: str, thread: str = "") -> str:
         now = _dt.datetime.now()
-        lines = [f"Kestrel {kind} report", f"summary  {summary}", f"time     {now:%Y-%m-%d %H:%M:%S}"]
+        lines = [f"Shotrover {kind} report", f"summary  {summary}", f"time     {now:%Y-%m-%d %H:%M:%S}"]
         if thread:
             lines.append(f"thread   {thread}")
         lines += ["", "== Environment", self.environment(), "", "== Details", body.rstrip()]
@@ -312,7 +312,7 @@ class CrashReporter:
     # ---- sending (always user-initiated)
     @staticmethod
     def github_issue(path: str, text: str) -> Optional[str]:
-        """Open a new issue on the Kestrel repository in the browser, title and body pre-filled. Returns an
+        """Open a new issue on the Shotrover repository in the browser, title and body pre-filled. Returns an
         error or None. Long reports are truncated to fit a URL; the user can paste the rest from Copy."""
         import urllib.parse
         title = CrashReporter.summary_of(path)[:120]

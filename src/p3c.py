@@ -742,7 +742,7 @@ def _render_worker_main(conn):
                 res = software_render(V, F, N, VN, msg[1], EX)
             except Exception as ex:          # never let a bad frame kill the worker
                 res = None
-                print("kestrel: render failed —", ex, file=sys.stderr)
+                print("shotrover: render failed —", ex, file=sys.stderr)
             try:
                 conn.send((msg[1], res))
             except (OSError, ValueError):
@@ -1097,7 +1097,7 @@ GL_ATTEMPTS = [("core 3.2", False, (3, 2)), ("core 3.0", False, (3, 0)), ("GLES 
 def gl_try_contexts(gdk_window, log: Optional[list] = None):
     """Create a GdkGLContext on gdk_window, trying each flavour in GL_ATTEMPTS. Returns (ctx, label) or
     (None, None); each attempt's outcome is appended to log when given. Shared by GLModelView and
-    `kestrel.py --probe-gl`, so the probe tests exactly what the viewer does."""
+    `shotrover.py --probe-gl`, so the probe tests exactly what the viewer does."""
     for label, use_es, ver in GL_ATTEMPTS:
         try:
             ctx = gdk_window.create_gl_context()
@@ -1574,7 +1574,7 @@ class GLModelView(ModelNav, Gtk.GLArea):
         msg = f"{where}: {ex}".replace("\n", " ")[:400]
         self.gl_error = msg
         GL_STATUS[:] = [f"OpenGL FAILED ({self.gl_info or 'no context'}): {msg}"]
-        print("kestrel: OpenGL preview failed —", msg, file=sys.stderr)
+        print("shotrover: OpenGL preview failed —", msg, file=sys.stderr)
         if self.on_error:
             GLib.idle_add(lambda: (self.on_error(msg), False)[1])
 
@@ -1583,7 +1583,7 @@ class GLModelView(ModelNav, Gtk.GLArea):
         log: list = []
         ctx, label = gl_try_contexts(self.get_window(), log)
         if ctx is None:
-            self._fail("context", " | ".join(log) + "   (run: python3 kestrel.py --probe-gl)")
+            self._fail("context", " | ".join(log) + "   (run: python3 shotrover.py --probe-gl)")
             return None
         self.gl_flavour = label
         return ctx
@@ -1633,7 +1633,7 @@ class GLModelView(ModelNav, Gtk.GLArea):
         (meshes keep using OpenGL)."""
         m = self.model
         msg = str(ex).replace("\n", " ")[:300]
-        print("kestrel: OpenGL can't draw this cache, using the software renderer —", msg, file=sys.stderr)
+        print("shotrover: OpenGL can't draw this cache, using the software renderer —", msg, file=sys.stderr)
         self.model = None
         self._dirty = True
         if self.on_cache_failed and m is not None:
@@ -1689,7 +1689,7 @@ except Exception as _ex:                 # typelib missing (gstreamer1 / python3
 
 def gst_sink_available(refresh: bool = False) -> bool:
     """gtksink lives in gstreamer1-plugins-good-gtk on Rocky; without it we can't embed video in the pane.
-    refresh=True re-scans the plugin registry so a package installed while Kestrel runs is picked up."""
+    refresh=True re-scans the plugin registry so a package installed while Shotrover runs is picked up."""
     if not HAVE_GST:
         return False
     if refresh:
@@ -1742,7 +1742,7 @@ class VideoPreview(Gtk.Box):
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
-        self.player = Gst.ElementFactory.make("playbin", "kestrel-player")
+        self.player = Gst.ElementFactory.make("playbin", "shotrover-player")
         sink = Gst.ElementFactory.make("gtksink", None)
         self.player.set_property("video-sink", sink)
         self.sink_widget = sink.get_property("widget")
@@ -1811,7 +1811,7 @@ class VideoPreview(Gtk.Box):
         # (stop() then load()) could reorder and leave a fresh load stuck at NULL.
         import queue
         self._ops: "queue.Queue" = queue.Queue()
-        threading.Thread(target=self._op_loop, daemon=True, name="kestrel-video-state").start()
+        threading.Thread(target=self._op_loop, daemon=True, name="shotrover-video-state").start()
         self.set_can_focus(True)
         self.connect("key-press-event", self._key)
 
@@ -1821,7 +1821,7 @@ class VideoPreview(Gtk.Box):
             try:
                 fn()
             except Exception as ex:
-                print("kestrel: video state change failed —", ex, file=sys.stderr)
+                print("shotrover: video state change failed —", ex, file=sys.stderr)
 
     # ---- control
     def load(self, path: str):

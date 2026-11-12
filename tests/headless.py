@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run kestrel.py without a display or GTK: real GLib/Gio (file ops, content types, cancellables) but
+"""Run shotrover.py without a display or GTK: real GLib/Gio (file ops, content types, cancellables) but
 GTK/GDK/Pango stubbed out. Used for `--selftest` in CI and sandboxes:
 
     python3 tests/headless.py --selftest [--bench]
@@ -51,7 +51,7 @@ for ns in ("Gtk", "Gdk", "GdkPixbuf", "Pango", "PangoCairo", "GtkSource", "Gst")
     setattr(gi.repository, ns, m)
 
 here = os.path.dirname(os.path.abspath(__file__))
-target = os.path.join(os.path.dirname(here), "kestrel.py")
+target = os.path.join(os.path.dirname(here), "shotrover.py")
 sys.argv = [target] + sys.argv[1:]
 import runpy  # noqa: E402
 

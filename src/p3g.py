@@ -1046,9 +1046,9 @@ def maya_object_model_arrays(path: str, node: str, stats: Optional[dict] = None)
         stats["approx"] = approx
         stats["rigged"] = any(nd.get("type") in _MAYA_DEFORMERS for nd in nodes.values())
     if not Vs:
-        raise ValueError("no mesh geometry stored for this node" + (" (its meshes come from history Kestrel can't rebuild)" if unread else ""))
+        raise ValueError("no mesh geometry stored for this node" + (" (its meshes come from history Shotrover can't rebuild)" if unread else ""))
     if unread:
-        notes.append(f"{unread} mesh{'es' if unread > 1 else ''} built by history Kestrel can't rebuild left out.")
+        notes.append(f"{unread} mesh{'es' if unread > 1 else ''} built by history Shotrover can't rebuild left out.")
     notes.append("Deformers, smooth preview and history steps after the primitive aren't applied.")
     return np.concatenate(Vs).astype(np.float32), np.concatenate(Fs).astype(np.int32), names, notes
 
@@ -1092,10 +1092,10 @@ try:
             it.next()
     import os
     os.replace(out + ".part", out)
-    print("KESTREL-OK")
+    print("SHOTROVER-OK")
 except Exception:
     traceback.print_exc(file=sys.stdout)
-    print("KESTREL-FAIL")
+    print("SHOTROVER-FAIL")
 '''
 
 
@@ -1107,7 +1107,7 @@ def _scene_geo_cache_file(path: str) -> str:
     st = os.stat(path)
     import hashlib
     h = hashlib.sha1(f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}".encode()).hexdigest()[:24]
-    return os.path.join(root, "kestrel", "scene-geo", h + ".ksg")
+    return os.path.join(root, "shotrover", "scene-geo", h + ".ksg")
 
 
 _MB_FAILED: Dict[str, str] = {}
@@ -1123,7 +1123,7 @@ def maya_mb_cached(path: str) -> bool:
 def maya_mb_meshes(path: str):
     """[(dag path of the shape, visible, V, F)] of every mesh in a Maya binary scene, read by mayapy (the
     file's real result: history, deformers and instances evaluated, world space). The first look at a file
-    starts Maya (tens of seconds, a licence); the result is cached under ~/.cache/kestrel/scene-geo."""
+    starts Maya (tens of seconds, a licence); the result is cached under ~/.cache/shotrover/scene-geo."""
     cache = _scene_geo_cache_file(path)
     if cache in _MB_FAILED:                                           # don't boot Maya again for a file it couldn't open
         raise ValueError(_MB_FAILED[cache])
@@ -1134,7 +1134,7 @@ def maya_mb_meshes(path: str):
                              "/usr/autodesk/maya*). Save as .ma to preview without Maya.")
         import tempfile
         os.makedirs(os.path.dirname(cache), exist_ok=True)
-        tmp = tempfile.mkdtemp(prefix="kestrel-mb-")
+        tmp = tempfile.mkdtemp(prefix="shotrover-mb-")
         script = os.path.join(tmp, "geo.py")
         try:
             with open(script, "w") as f:
@@ -1142,7 +1142,7 @@ def maya_mb_meshes(path: str):
             rc, so, se = _run_streaming([mp, script, os.path.abspath(path), cache], timeout=300)
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
-        if "KESTREL-OK" not in so or not os.path.exists(cache):
+        if "SHOTROVER-OK" not in so or not os.path.exists(cache):
             tail = [l for l in so + se if l.strip() and ("rror" in l or "icense" in l or "timed out" in l)][-2:]
             _MB_FAILED[cache] = "Maya couldn't open the scene" + (": " + " | ".join(x.strip()[:160] for x in tail) if tail else f" (exit {rc})")
             raise ValueError(_MB_FAILED[cache])
@@ -1207,7 +1207,7 @@ def scene_object_model(path: str, key: str, max_faces: int = 400000, maya: str =
             via_maya = True
         elif maya_mb_cached(path):
             # Maya has already evaluated this file once: its result is exact and already on disk, so every
-            # pick uses it (otherwise children of a rig would show Kestrel's approximation while the whole
+            # pick uses it (otherwise children of a rig would show Shotrover's approximation while the whole
             # scene showed Maya's)
             try:
                 V, F, names, notes = maya_scene_maya_arrays(path, ident)

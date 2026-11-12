@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+- **Kestrel is now Shotrover.** Another file browser on GitHub already uses the name Kestrel, so the app,
+  the launcher (`shotrover`, `shotrover.py`), the app-menu entry and the repository are renamed. Settings,
+  pinned folders, folder drives, the file index (and its keyring key) and the scene-geometry cache move
+  over automatically the first time Shotrover starts (`~/.config/kestrel` → `~/.config/shotrover`, same for
+  `~/.cache`). `./install.sh` replaces an old Kestrel install, including the default-folder-handler
+  setting. Studio licences bought for Kestrel 1.x cover Shotrover 1.x.
+- Show any folder in This PC as a drive: right-click a folder → *Show in This PC as a drive*, give it a name;
+  it gets a drive tile next to the drive it lives on (same disk section, same capacity bar) and an entry
+  after that drive in the navigation pane. Rename or remove it from its tile (the folder itself is never touched); greyed out while the folder
+  isn't there (share not mounted)
+- Tools → Find large files…: scan a folder or drive in the background for the biggest files; frame
+  sequences (renders, caches) count as one item with their total size; filter by type, age and name;
+  optional duplicate check (size, then head/tail, then full SHA-256); tick items and move them to the
+  Recycle Bin (undoable). Stays on one drive by default, never lists the Recycle Bin itself but says how much
+  it holds. System files (OS, installed programs, package caches, logs, active swap, files owned by another
+  account or in read-only folders) are marked ⚠ with the reason and the right cleanup tool, can be hidden,
+  and removing them asks first — "Skip system files" is the default
+
 ## 1.1 — 2026-10-27
 
 **Houdini caches and VDBs**
@@ -23,8 +43,8 @@
 - Pick an object in a Blender (2.7x–5.x) or Maya (.ma / .mb) outliner to see its geometry in a 3D view, with
   everything parented under it, in place — read from the file itself, no Maya or Blender needed. Pick a
   texture to see the image (first UDIM tile)
-- When a Maya scene has meshes Kestrel can't rebuild (long modelling history) or deformers it doesn't
-  apply (skinning, blend shapes), and Maya is installed, the preview shows Kestrel's version at once and then
+- When a Maya scene has meshes Shotrover can't rebuild (long modelling history) or deformers it doesn't
+  apply (skinning, blend shapes), and Maya is installed, the preview shows Shotrover's version at once and then
   Maya's own evaluation of the scene (read once per file with mayapy, cached); once Maya has read a file,
   every pick in it uses Maya's result. Rigs (skinning, blend shapes…) always get Maya's evaluation
 - Pick the Outliner heading (Maya) or a scene (Blender) to see everything visible at once
@@ -51,7 +71,7 @@
 - Maya (`mayapy`) as a fallback importer for FBX, Alembic and USD when Blender isn't available
 - Batch rename: frame-number offsets (padding kept, overlapping ranges safe), repathing into another
   folder (created if missing, works across drives), and a much faster live preview
-- Home folder listed first under This PC in the navigation pane; Browse… buttons use Kestrel's own folder
+- Home folder listed first under This PC in the navigation pane; Browse… buttons use Shotrover's own folder
   picker instead of the GTK/Nautilus chooser
 - Animated GIFs (and animated WebP) play in the preview pane; click to pause. Frame count, length and
   loop setting in the details

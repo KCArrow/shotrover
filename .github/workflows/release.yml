@@ -14,4 +14,4 @@ jobs:
         with:
           files: |
             dist/*.zip
-            kestrel.py
+            shotrover.py

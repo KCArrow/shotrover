@@ -3,19 +3,19 @@
 ## Setup
 
 ```bash
-git clone https://github.com/<you>/kestrel.git && cd kestrel
+git clone https://github.com/<you>/shotrover.git && cd shotrover
 sudo dnf install python3-gobject gtk3 python3-numpy      # or the apt/pacman equivalents in README
-./build.sh && python3 kestrel.py
+./build.sh && python3 shotrover.py
 ```
 
 ## Workflow
 
-1. Edit the parts in `src/` — never `kestrel.py`, it is generated. `docs/ARCHITECTURE.md` says what
+1. Edit the parts in `src/` — never `shotrover.py`, it is generated. `docs/ARCHITECTURE.md` says what
    lives where and the order the parts are concatenated in.
 2. `./build.sh` (also byte-compiles as a syntax check).
-3. `python3 tests/headless.py --selftest` must pass; run `python3 kestrel.py --preview-bench --quick`
+3. `python3 tests/headless.py --selftest` must pass; run `python3 shotrover.py --preview-bench --quick`
    if you touched decoders or the model pipeline, and `--stress` for anything in the window code.
-4. Commit `src/` **and** the rebuilt `kestrel.py` together, so the single-file download on the
+4. Commit `src/` **and** the rebuilt `shotrover.py` together, so the single-file download on the
    default branch always matches the source.
 
 ## Rules of the house
@@ -32,7 +32,7 @@ sudo dnf install python3-gobject gtk3 python3-numpy      # or the apt/pacman equ
 
 ## Licensing of contributions
 
-Kestrel is licensed under the PolyForm Noncommercial License with commercial licences sold
+Shotrover is licensed under the PolyForm Noncommercial License with commercial licences sold
 separately (see COMMERCIAL-LICENSE.md). So that this remains possible, by submitting a pull
 request you agree that your contribution is provided under the same terms **and** that you grant
 the project author a perpetual, irrevocable, royalty-free licence to use, modify and relicense it,
@@ -43,6 +43,6 @@ please open an issue describing the change instead of a PR.
 
 ```bash
 # bump VERSION in src/p1.py, update CHANGELOG.md
-./build.sh && ./make-portable.sh         # dist/kestrel-<ver>-portable.zip
+./build.sh && ./make-portable.sh         # dist/shotrover-<ver>-portable.zip
 git tag v<ver> && git push --tags        # the release workflow attaches the zip
 ```

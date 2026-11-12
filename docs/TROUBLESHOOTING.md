@@ -8,9 +8,9 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 - `ModuleNotFoundError: No module named 'gi'` → install PyGObject:
   `sudo dnf install python3-gobject gtk3` (Rocky/Fedora), `sudo apt install python3-gi gir1.2-gtk-3.0` (Debian/Ubuntu).
 - `Namespace Gtk not available` → the GTK 3 typelib is missing: `gtk3` / `gir1.2-gtk-3.0`.
-- Running `kestrel` prints "command not found" after `install.sh` → `~/.local/bin` is not on your
+- Running `shotrover` prints "command not found" after `install.sh` → `~/.local/bin` is not on your
   PATH; log out/in or `export PATH="$HOME/.local/bin:$PATH"`.
-- Wrong Python picked up → run `python3 kestrel.py` explicitly; Python 3.9+ is required.
+- Wrong Python picked up → run `python3 shotrover.py` explicitly; Python 3.9+ is required.
 
 ## Video / audio preview
 
@@ -28,13 +28,13 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 
 ## 3D previews
 
-- `.vdb` volumes are read by Kestrel itself — no Houdini, licence or library needed — and shown as smoke
+- `.vdb` volumes are read by Shotrover itself — no Houdini, licence or library needed — and shown as smoke
   (fog volumes; the `density` grid when there are several) or as a surface (level sets). Houdini, EmberGen,
   Blender and Maya VDBs are supported (float grids, zip/blosc compression, half-float). Blosc decoding is
   faster with `python3-blosc` or Houdini installed but works without either. EmberGen and Blender volumes
   are Z-up and are stood upright. Anything the built-in reader can't parse (vector-only files, frustum
   transforms) falls back to Houdini, `python3-openvdb`, then Blender (surface only).
-- `.bgeo`, `.bgeo.sc`, `.geo` need Houdini: Kestrel runs `hython` from PATH, `$HFS/bin` or the newest
+- `.bgeo`, `.bgeo.sc`, `.geo` need Houdini: Shotrover runs `hython` from PATH, `$HFS/bin` or the newest
   `/opt/hfs*`. The first preview takes a few seconds while Houdini starts and checks out a licence; if no
   licence is free it tries `gconvert` (geometry only).
 - No Blender at your studio? FBX, Alembic and USD fall back to Maya's `mayapy` when it's installed
@@ -44,12 +44,12 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
   - `.fbx .gltf .glb .dae .3ds` and friends: Blender (any install, including Flatpak
     `org.blender.Blender`) or `assimp`.
   - `.abc`: Ogawa files need Blender; **legacy HDF5 Alembic** (older Maya exports) can't be read by
-    Blender or current Alembic builds — Kestrel reads them directly with `h5py`
-    (`sudo dnf install python3-h5py`). `kestrel --probe-model file.abc` tells you which kind it is.
+    Blender or current Alembic builds — Shotrover reads them directly with `h5py`
+    (`sudo dnf install python3-h5py`). `shotrover --probe-model file.abc` tells you which kind it is.
   - `.usd .usda .usdc .usdz`: Blender, or `pip install --user usd-core`.
   - `.blend`: Blender.
 - Flatpak Blender not detected → `flatpak info org.blender.Blender` must succeed for your user.
-  Kestrel runs it with filesystem grants for the file's folder; a file on a path Flatpak can't see
+  Shotrover runs it with filesystem grants for the file's folder; a file on a path Flatpak can't see
   (some network mounts) will fail — copy it locally to test.
 - Import hangs → the Blender bridge is killed after a timeout (process group), the preview reports
   it. Very large scenes can exceed it; raise the model face cap or use the software renderer.
@@ -62,16 +62,16 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 
 ## OpenGL
 
-- "Unable to create GL context" → run `kestrel --probe-gl`. It tries x11 and wayland backends and
+- "Unable to create GL context" → run `shotrover --probe-gl`. It tries x11 and wayland backends and
   every GL/GLES version, saves the one that works, and reports the system state.
 - Probe says *NVML/driver version mismatch* → the NVIDIA kernel module and the user-space driver
   differ (happens after a driver update). **Reboot.**
 - Under Wayland with NVIDIA, x11 (XWayland) is often the backend that works; the probe stores it as
-  `gdk_backend` in the config and Kestrel sets `GDK_BACKEND` on startup.
+  `gdk_backend` in the config and Shotrover sets `GDK_BACKEND` on startup.
 - Models render white in GL mode by design (flat lighting only). Turn OpenGL off in Preferences →
   Optional to get the shaded software renderer back.
 - Volumes (smoke) in OpenGL need float render targets (any desktop GL 3; on GLES the
-  `EXT_color_buffer_float` extension). Without them Kestrel says so once and draws caches with the
+  `EXT_color_buffer_float` extension). Without them Shotrover says so once and draws caches with the
   software renderer; meshes stay on OpenGL.
 
 ## Scene breakdowns
@@ -97,9 +97,9 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
   the caption's tooltip says what was left out.
 - `.ma` and `.mb` meshes are read from the file itself. A mesh that exists only as a long modelling
   history, or one deformed by skinning / blend shapes, can't be rebuilt exactly that way. If Maya is installed
-  (`mayapy` on PATH, `$MAYA_LOCATION` or `/usr/autodesk/maya*`), Kestrel then opens the scene once in Maya in
+  (`mayapy` on PATH, `$MAYA_LOCATION` or `/usr/autodesk/maya*`), Shotrover then opens the scene once in Maya in
   the background and swaps in Maya's result (the caption ends in "via Maya"); every mesh is cached under
-  `~/.cache/kestrel/scene-geo`, so the first time takes as long as Maya needs to start (and uses a licence)
+  `~/.cache/shotrover/scene-geo`, so the first time takes as long as Maya needs to start (and uses a licence)
   and later picks are instant. Once Maya has read a file, every object picked in it uses Maya's result. Scenes
   with deformers (a rig) always ask Maya, since stored positions there don't match what Maya shows.
 - Pick the **Outliner** heading of a Maya breakdown (or a scene row in a Blender one) to see every visible
@@ -141,14 +141,34 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
   1M volume samples, and the whole sequence uses the first frame's box, brightness and detail level so
   nothing jumps while it plays.
 
+## Find large files
+
+- Tools → **Find large files…** starts in the folder you're viewing (or the selected folder). Point it at `/`
+  or a drive to look at everything; **Stay on this drive** keeps it from walking into network shares and other
+  disks mounted inside.
+- Sizes are what deleting would free: a sparse file counts the blocks it really uses. Files smaller than the
+  limit still count when they're frames of a sequence (three or more numbered files with the same name and
+  extension in one folder) whose total passes it.
+- Nothing is deleted from this window: ticked items go to the Recycle Bin (Ctrl+Z or the Recycle Bin restores
+  them), and the space comes back once you empty it. Files in the Recycle Bin are never listed; the status line
+  says how much it holds.
+- **Look for duplicates** only compares files that made the list, so lower the size limit to catch smaller copies.
+- Rows marked **⚠ System** (orange) belong to the operating system or installed software: anything under
+  `/usr`, `/boot`, `/etc`, `/opt`, `/var/lib`, `/var/cache`, `/var/log`…, an active swap file, a file owned by
+  root or another account, or one in a folder you can't write to. The Notes column says why, and for package
+  caches, logs, Flatpak, Docker/Podman it names the command that cleans them up properly. Removing ticked system
+  files asks first; **Skip system files** is the default. **Hide system files** takes them out of the list.
+- Plain hints (no ⚠) mark things an app manages — `~/.cache` (safe to clear), Flatpak app data, Steam
+  libraries, virtual machine disks — so you know where a file comes from before removing it.
+
 ## Slow folders / freezes
 
 - Navigation into a network folder is slow the first time: names appear instantly, sizes and
-  dates fill in. If names don't appear instantly, run `kestrel --nav-bench /that/path` and attach
+  dates fill in. If names don't appear instantly, run `shotrover --nav-bench /that/path` and attach
   the output to a report.
 - A dead network mount (`/mnt/nas` with the NAS off) must not freeze the window; if it does,
   **Tools → Performance report…** will show which call stalled.
-- The window froze completely → look in `~/.cache/kestrel/` for `freeze-*.txt`; it holds every
+- The window froze completely → look in `~/.cache/shotrover/` for `freeze-*.txt`; it holds every
   thread's stack at the moment of the freeze. Attach it to an issue.
 - The spinner bottom-left appears after 250 ms of waiting on a listing; it is informational, not
   a hang.
@@ -161,12 +181,16 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
   from disk as you enter it and the view is replaced by what the disk says ("Verifying against the
   disk…" in the status bar). Search hits are checked before being shown.
 - Key storage: the keyring via `secret-tool` (install `libsecret-tools`); otherwise a 0600 key
-  file at `~/.config/kestrel/index.key`. *Wipe index* in Preferences deletes the data and key.
+  file at `~/.config/shotrover/index.key`. *Wipe index* in Preferences deletes the data and key.
 - Index size: a few MB per 100k files, encrypted. It is excluded from itself.
 
 ## Drives
 
-- A plugged-in USB stick doesn't show up → Kestrel listens to `Gio.VolumeMonitor`; if GVFS isn't
+- Folder drives (right-click a folder → *Show in This PC as a drive*) appear in the same section of This PC as
+  the drive they live on, right after its tile (network folders under *Network locations*), and after that
+  drive in the navigation pane. The bar and "free of" figures are for the disk the folder is on. Renaming or removing one only changes the tile, never the folder. If the folder isn't
+  there (a share that isn't mounted yet) the tile is greyed out in the section it was last seen in until it is.
+- A plugged-in USB stick doesn't show up → Shotrover listens to `Gio.VolumeMonitor`; if GVFS isn't
   running (minimal installs), start `gvfs-udisks2-volume-monitor` or install `gvfs`.
 - Eject / Format are greyed out → needs `udisks2` and a polkit agent (standard on GNOME); the
   Format dialog lists only filesystems whose `mkfs` is installed (`exfatprogs`, `dosfstools`,
@@ -185,11 +209,11 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 The quickest way: **Help → Report a problem…**, or *Review & report…* on the error bar after a crash.
 The report already contains the version, distro, desktop, the stack trace and recent activity;
 describe what you were doing at the top and press *Report on GitHub…*.
-Reports live in `~/.cache/kestrel/reports/` if you'd rather attach the file yourself.
+Reports live in `~/.cache/shotrover/reports/` if you'd rather attach the file yourself.
 
 If you report by hand, include:
 
-Kestrel version (Help → About), distro and desktop (Wayland or X11), the diagnostics
-report from Preferences → Optional, and for freezes the newest `~/.cache/kestrel/freeze-*.txt`
+Shotrover version (Help → About), distro and desktop (Wayland or X11), the diagnostics
+report from Preferences → Optional, and for freezes the newest `~/.cache/shotrover/freeze-*.txt`
 or the Performance report. For a preview problem with a specific file type, the output of
-`kestrel --probe-model <file>` (3D) or the file's `file --mime-type` result.
+`shotrover --probe-model <file>` (3D) or the file's `file --mime-type` result.

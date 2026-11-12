@@ -136,6 +136,7 @@
         if key == "tools":
             multi = len(sel) >= 1 and real
             return [{"label": "_Batch rename…", "cb": self.batch_rename, "accel": "<Control>F2", "sensitive": multi},
+                    ("Find _large files…", self.find_large_files),
                     {"label": "Copy SHA-256 c_hecksum", "cb": self.copy_checksum, "sensitive": bool(e and not e.is_dir)},
                     {"label": "_Run in terminal", "cb": lambda: self.run_script(e, True), "sensitive": looks_runnable(e)}, "-",
                     ("Empty Recycle _Bin", self.empty_trash), "-",
@@ -145,7 +146,7 @@
                     ("_Preferences…", lambda: self.folder_options(0))]
         return [("_View help (keyboard shortcuts)", lambda: show_shortcuts(self), "F1"), "-",
                 ("_Report a problem…", lambda: open_report(self)), "-",
-                ("_About Kestrel", lambda: show_about(self))]
+                ("_About Shotrover", lambda: show_about(self))]
 
     def _new_item_spec(self):
         return [("_Folder", lambda: self.new_item("folder")), ("_Shortcut", lambda: self.new_item("shortcut")),
@@ -172,10 +173,26 @@
                 spec += [("_Eject", lambda: self.eject(e.path)), ("_Format…", lambda: self.format_drive(e.path, e.name)), "-"]
             if t.path == THISPC and getattr(e, "volume", None) is not None:
                 spec = [("_Mount", lambda: self.mount_volume(e.volume))]
-            if e.is_dir and e.path:
+            if t.path == THISPC and self.is_folder_drive(e.path):
+                # a folder shown as a drive: the tile is a shortcut, so rename / remove act on the tile only
+                spec = ([("_Open", lambda: self.activate_entry(e)), ("Open in new _tab", lambda: self.new_tab(e.path))]
+                        if os.path.isdir(e.path) else [])
+                spec += [("Re_name drive…", lambda: self.rename_folder_drive(e.path)),
+                         ("_Remove from This PC", lambda: self.remove_folder_drive(e.path)), "-",
+                         {"label": "Copy as _path", "cb": self.copy_path, "sensitive": True},
+                         {"label": "P_roperties", "cb": self.properties, "sensitive": os.path.isdir(e.path)}]
+                drive_spec, menu_spec_done = spec, True
+            else:
+                menu_spec_done = False
+            if menu_spec_done:
+                pass
+            elif e.is_dir and e.path:
+                as_drive = self.is_folder_drive(e.path)
                 spec += [("Open in new _tab", lambda: self.new_tab(e.path)), ("Open in new _window", lambda: self.app.new_window(e.path)),
                          ("Open in t_erminal", lambda: self.open_terminal(e.path)),
-                         ("_Unpin from Quick access" if pinned else "_Pin to Quick access", (lambda: self.unpin(e.path)) if pinned else (lambda: self.pin(e.path)))]
+                         ("_Unpin from Quick access" if pinned else "_Pin to Quick access", (lambda: self.unpin(e.path)) if pinned else (lambda: self.pin(e.path))),
+                         ("Remove from This _PC" if as_drive else "Show in This _PC as a drive",
+                          (lambda: self.remove_folder_drive(e.path)) if as_drive else (lambda: self.add_folder_drive(e.path)))]
             else:
                 spec += [("Open _with…", self.open_with), ("_Edit", self.edit_file)]
                 if self.cfg.get("rv_enabled") and any((x.ext or "").lower() in RV_IMAGE_EXTS for x in sel if not x.is_dir):
@@ -196,6 +213,8 @@
                      {"label": "Create _shortcut", "cb": lambda: self.shortcut_here(e), "sensitive": real},
                      {"label": "Unpin from Quick access" if t.path == QUICK and e.is_dir else "_Delete", "cb": lambda: self.delete(), "sensitive": item and t.path != THISPC},
                      {"label": "_Rename" if len(sel) == 1 else "_Batch rename…", "cb": lambda: t.start_rename(), "sensitive": real}, "-", ("P_roperties", self.properties)]
+            if menu_spec_done:
+                spec = drive_spec                                 # folder-drive tile: only its own items
         elif t.path == NETWORK:
             spec += [("_Connect to server…", self.connect_to_server), ("Re_fresh", lambda: (self.rebuild_nav(), self.reload_all())), "-",
                      {"label": "_View", "sub": self.menu_spec("view")[5]["sub"]}]
@@ -310,7 +329,7 @@
         if dest in VIRTUAL:
             self.flash("Can't paste here.")
             return
-        # Kestrel's own copy is used only while Kestrel still owns the clipboard: once another app copies
+        # Shotrover's own copy is used only while Shotrover still owns the clipboard: once another app copies
         # something, paste must take that instead of the stale list
         mode, paths = self.clipboard["mode"], list(self.clipboard["paths"])
         if paths and file_clipboard().paths:
@@ -384,6 +403,7 @@
         title = f"{verb} {len(paths)} item{'s' if len(paths) != 1 else ''}" + (f" to {self.display_path(dest)}" if dest else "")
         op = FileOp(kind, paths, dest, plan or {}, self._op_done)
         self._start_op(op, title)
+        return op
 
     def _start_op(self, op, title: str):
         op.title = title
@@ -409,6 +429,59 @@
         self.reload_all()
         self.flash(f"{op.title} — {'cancelled' if op.cancel.is_cancelled() else 'done'}")
         return False
+
+    # ---- folders shown as drives in This PC
+    def is_folder_drive(self, path: Optional[str]) -> bool:
+        p = (path or "").rstrip("/") or "/"
+        return any((d.get("path") or "").rstrip("/") == p for d in self.cfg.get("pc_drives") or [] if isinstance(d, dict))
+
+    def add_folder_drive(self, path: str):
+        """Show a folder as a drive tile in This PC (and under This PC in the navigation pane)."""
+        if not path or path in VIRTUAL or not os.path.isdir(path) or self.is_folder_drive(path):
+            return
+        label = ask_text(self, "Show in This PC as a drive", "Drive name:", os.path.basename(path.rstrip("/")) or path)
+        if label is None:
+            return
+        self.cfg.setdefault("pc_drives", []).append({"path": path.rstrip("/") or "/", "label": label.strip() or os.path.basename(path)})
+        save_config(self.cfg)
+        self._folder_drives_changed(f"“{label}” now shows in This PC")
+
+    def remove_folder_drive(self, path: str):
+        p = (path or "").rstrip("/") or "/"
+        self.cfg["pc_drives"] = [d for d in self.cfg.get("pc_drives") or [] if not (isinstance(d, dict) and (d.get("path") or "").rstrip("/") == p)]
+        save_config(self.cfg)
+        self._folder_drives_changed("Removed from This PC (the folder itself is untouched)")
+
+    def rename_folder_drive(self, path: str):
+        p = (path or "").rstrip("/") or "/"
+        for d in self.cfg.get("pc_drives") or []:
+            if isinstance(d, dict) and (d.get("path") or "").rstrip("/") == p:
+                label = ask_text(self, "Rename drive", "Drive name:", d.get("label") or os.path.basename(p))
+                if label and label.strip():
+                    d["label"] = label.strip()
+                    save_config(self.cfg)
+                    self._folder_drives_changed(f"Renamed to “{d['label']}” (the folder keeps its name)")
+                return
+
+    def _folder_drives_changed(self, msg: str):
+        self.rebuild_nav()
+        for t in self._tabs():
+            if t.path == THISPC:
+                t.load()
+        self.flash(msg)
+
+    def find_large_files(self, folder: Optional[str] = None):
+        """Tools → Find large files…: the selected folder, else the one being viewed, else home."""
+        if folder is None:
+            t = self.tab
+            sel = t.selected_entries() if t is not None else []
+            if sel and sel[0].is_dir and sel[0].path and os.path.isdir(sel[0].path):
+                folder = sel[0].path
+            elif t is not None and t.path not in VIRTUAL and os.path.isdir(t.path or ""):
+                folder = t.path
+            else:
+                folder = HOME
+        LargeFilesWindow(self, folder)
 
     def delete(self, permanent: bool = False):
         t = self.tab
@@ -527,7 +600,7 @@
         BatchRenameDialog(self, sel, done)
 
     def preview_diagnostics(self):
-        """Which converters / VFX Python modules Kestrel can find for previews."""
+        """Which converters / VFX Python modules Shotrover can find for previews."""
         d = Gtk.Dialog(title="Dependencies — status and diagnostics", transient_for=self, modal=True)
         d.add_button("_Close", Gtk.ResponseType.CLOSE)
         d.set_default_size(720, 420)
@@ -595,8 +668,8 @@
         d.get_content_area().pack_start(sw, True, True, 0)
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_markup("<small>Stalls are moments the interface thread was blocked for more than 120 ms; the stack shows what it was doing. "
-                        "Run <tt>python3 kestrel.py --profile</tt> for a full cProfile of everything on the interface thread, "
-                        "and <tt>python3 kestrel.py --selftest</tt> for timed unit/benchmark tests.</small>")
+                        "Run <tt>python3 shotrover.py --profile</tt> for a full cProfile of everything on the interface thread, "
+                        "and <tt>python3 shotrover.py --selftest</tt> for timed unit/benchmark tests.</small>")
         d.get_content_area().pack_start(hint, False, False, 6)
 
         def refresh():
@@ -613,7 +686,7 @@
         while True:
             r = d.run()
             if r == 1:
-                out = os.path.join(GLib.get_user_cache_dir(), "kestrel", f"performance-{_dt.datetime.now():%Y%m%d-%H%M%S}.txt")
+                out = os.path.join(GLib.get_user_cache_dir(), "shotrover", f"performance-{_dt.datetime.now():%Y%m%d-%H%M%S}.txt")
                 os.makedirs(os.path.dirname(out), exist_ok=True)
                 with open(out, "w") as f:
                     f.write(WATCHDOG.report() + ("\n\n" + profiling_report(60) if PROFILE is not None else ""))
@@ -641,7 +714,7 @@
         box.pack_start(sw, True, True, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
-                        "EPEL is enabled automatically when needed. Restart Kestrel afterwards.</small>")
+                        "EPEL is enabled automatically when needed. Restart Shotrover afterwards.</small>")
         box.pack_start(note, False, False, 0)
         checks: List[Tuple[Gtk.CheckButton, dict]] = []
         d.show_all()
@@ -679,7 +752,7 @@
                 self.flash("Install commands copied")
                 continue
             if resp == Gtk.ResponseType.OK and chosen:
-                script = os.path.join(GLib.get_user_cache_dir(), "kestrel", "install-deps.sh")
+                script = os.path.join(GLib.get_user_cache_dir(), "shotrover", "install-deps.sh")
                 os.makedirs(os.path.dirname(script), exist_ok=True)
                 with open(script, "w") as f:
                     f.write(install_script(chosen))
@@ -1173,7 +1246,12 @@ class ExplorerApp(Gtk.Application):
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
-        WATCHDOG.start(os.path.join(GLib.get_user_cache_dir(), "kestrel", "stalls.log") if PROFILE is not None else None)
+        icons = [p for p in (app_icon(s) for s in (16, 24, 32, 48, 64, 128, 256)) if p is not None]
+        if icons:
+            Gtk.Window.set_default_icon_list(icons)
+        else:
+            Gtk.Window.set_default_icon_name("shotrover")
+        WATCHDOG.start(os.path.join(GLib.get_user_cache_dir(), "shotrover", "stalls.log") if PROFILE is not None else None)
         GLib.timeout_add(400, lambda: (threading.Thread(target=warm_workers, daemon=True).start(), False)[1])
         GLib.timeout_add(1500, self._index_startup)
 
@@ -1240,7 +1318,7 @@ def _probe_gl_child() -> int:
     import json
     out = {"backend": os.environ.get("GDK_BACKEND", "(default)"), "ok": False, "attempts": [], "renderer": "", "error": ""}
     try:
-        win = Gtk.Window(title="kestrel gl probe", default_width=64, default_height=64)
+        win = Gtk.Window(title="shotrover gl probe", default_width=64, default_height=64)
         area = Gtk.GLArea()
         area.set_has_depth_buffer(True)
         result = {}
@@ -1276,17 +1354,17 @@ def _probe_gl_child() -> int:
         win.destroy()
     except Exception as ex:
         out["error"] = f"{ex}"[:400]
-    print("KESTREL-GL " + json.dumps(out))
+    print("SHOTROVER-GL " + json.dumps(out))
     return 0
 
 
 def probe_gl(args: List[str]) -> int:
-    """kestrel.py --probe-gl: system GL facts, then the GLArea test under each GDK backend. If the default
+    """shotrover.py --probe-gl: system GL facts, then the GLArea test under each GDK backend. If the default
     backend fails but another works, that backend is saved to the config (--no-save to only report)."""
     import json
     if args and args[0] == "--child":
         return _probe_gl_child()
-    print("Kestrel OpenGL probe")
+    print("Shotrover OpenGL probe")
     print("=" * 60)
     env = os.environ
     print(f"session:      XDG_SESSION_TYPE={env.get('XDG_SESSION_TYPE', '?')}  WAYLAND_DISPLAY={env.get('WAYLAND_DISPLAY', '-')}  DISPLAY={env.get('DISPLAY', '-')}")
@@ -1327,7 +1405,7 @@ def probe_gl(args: List[str]) -> int:
     if shutil.which("glxinfo"):
         r = subprocess.run(["glxinfo", "-B"], capture_output=True, text=True, timeout=10)
         if r.returncode != 0 or "OpenGL renderer" not in r.stdout:
-            verdicts.append("glxinfo itself fails on this X display, so GLX is broken system-wide, not just in Kestrel:\n  " +
+            verdicts.append("glxinfo itself fails on this X display, so GLX is broken system-wide, not just in Shotrover:\n  " +
                             " | ".join((r.stderr.strip() + "\n" + r.stdout.strip()).strip().splitlines()[-3:]))
     if not HAVE_GL:
         print("\nPyOpenGL is missing, so the viewer cannot use the GPU at all. Install it and run the probe again.")
@@ -1346,7 +1424,7 @@ def probe_gl(args: List[str]) -> int:
             cenv.pop("GDK_BACKEND", None)
         try:
             r = subprocess.run([sys.executable, os.path.abspath(sys.argv[0]), "--probe-gl", "--child"], env=cenv, capture_output=True, text=True, timeout=30)
-            line = [l for l in r.stdout.splitlines() if l.startswith("KESTREL-GL ")]
+            line = [l for l in r.stdout.splitlines() if l.startswith("SHOTROVER-GL ")]
             res = json.loads(line[-1][11:]) if line else {"ok": False, "error": (r.stderr.strip().splitlines() or ["no output"])[-1][:300], "attempts": []}
         except (OSError, subprocess.TimeoutExpired, ValueError) as ex:
             res = {"ok": False, "error": str(ex), "attempts": []}
@@ -1367,9 +1445,9 @@ def probe_gl(args: List[str]) -> int:
             cfg = load_config()
             cfg["gdk_backend"] = b
             save_config(cfg)
-            print(f"Saved gdk_backend={b} to the Kestrel config: the app will start with that backend from now on.")
+            print(f"Saved gdk_backend={b} to the Shotrover config: the app will start with that backend from now on.")
         else:
-            print(f"Run Kestrel as:  GDK_BACKEND={b} python3 kestrel.py   (or drop --no-save to make it permanent)")
+            print(f"Run Shotrover as:  GDK_BACKEND={b} python3 shotrover.py   (or drop --no-save to make it permanent)")
         return 0
     if verdicts:
         print("Diagnosis:")
@@ -1414,14 +1492,14 @@ def main():
         sys.argv.remove("--profile")
         globals()["PROFILE"] = cProfile.Profile()
         PROFILE.enable()
-        log = os.path.join(GLib.get_user_cache_dir(), "kestrel", "stalls.log")
+        log = os.path.join(GLib.get_user_cache_dir(), "shotrover", "stalls.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
         open(log, "w").close()
-        print(f"kestrel: profiling — stalls are logged live to {log}; a summary prints at exit (Tools → Performance report… while running)", file=sys.stderr)
+        print(f"shotrover: profiling — stalls are logged live to {log}; a summary prints at exit (Tools → Performance report… while running)", file=sys.stderr)
     if len(sys.argv) > 1 and sys.argv[1] == "--probe-gl":
         return probe_gl(sys.argv[2:])
     if len(sys.argv) > 2 and sys.argv[1] == "--probe-model":
-        # terminal self-test for the 3D preview chain: kestrel.py --probe-model file.abc
+        # terminal self-test for the 3D preview chain: shotrover.py --probe-model file.abc
         print(preview_tool_report())
         print("-" * 60)
         globals()["BLENDER_VERBOSE"] = True
@@ -1433,16 +1511,18 @@ def main():
         print("FAILED:", (m or {}).get("error", "no result"))
         return 1
     if "--demo" in sys.argv[1:]:
-        # kestrel --demo /path/to/KestrelDemo : a fictional machine for screenshots (see docs/DEMO.md)
+        # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (see docs/DEMO.md)
         i = sys.argv.index("--demo")
         if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
             root = sys.argv[i + 1]
             del sys.argv[i:i + 2]
         else:
-            root = os.path.join(HOME, "KestrelDemo")
+            root = os.path.join(HOME, "ShotroverDemo")
+            if not os.path.isdir(root) and os.path.isdir(os.path.join(HOME, "KestrelDemo")):
+                root = os.path.join(HOME, "KestrelDemo")     # demo folder unzipped before the rename
             del sys.argv[i]
         if not os.path.isdir(root):
-            print(f"kestrel: demo folder not found: {root}", file=sys.stderr)
+            print(f"shotrover: demo folder not found: {root}", file=sys.stderr)
             return 2
         globals()["DEMO"] = demo_setup(root)
         globals()["HOME"] = DEMO["home"]
@@ -1468,11 +1548,11 @@ def main():
         shutdown_workers()
         CRASH.shutdown()
         if PROFILE is not None:
-            out = os.path.join(GLib.get_user_cache_dir(), "kestrel", "profile.prof")
+            out = os.path.join(GLib.get_user_cache_dir(), "shotrover", "profile.prof")
             PROFILE.disable()
             PROFILE.dump_stats(out)
             print("\n" + WATCHDOG.report() + "\n\n" + profiling_report(40), file=sys.stderr)
-            print(f"\nkestrel: full profile saved to {out}  (python3 -m pstats {out})", file=sys.stderr)
+            print(f"\nshotrover: full profile saved to {out}  (python3 -m pstats {out})", file=sys.stderr)
 
 
 if __name__ == "__main__":

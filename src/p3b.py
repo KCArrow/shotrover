@@ -1,12 +1,12 @@
 
 
 # --------------------------------------------------------------------------- input diagnostics
-DEBUG_INPUT = bool(os.environ.get("KESTREL_DEBUG_INPUT"))
+DEBUG_INPUT = bool(os.environ.get("SHOTROVER_DEBUG_INPUT"))
 _INPUT_T0 = time.monotonic()
 
 
 def input_log(msg: str):
-    """KESTREL_DEBUG_INPUT=1: one line per click / selection event on stderr (and in error reports)."""
+    """SHOTROVER_DEBUG_INPUT=1: one line per click / selection event on stderr (and in error reports)."""
     line = f"[input {time.monotonic() - _INPUT_T0:8.3f}] {msg}"
     print(line, file=sys.stderr, flush=True)
     RECENT_LOG.append(line)
@@ -974,14 +974,14 @@ class FileClipboard:
     """Puts copied/cut files on the system clipboard in every form other applications look for.
 
     Gtk.Clipboard.set_with_data() - the usual way to offer custom formats - is not callable from PyGObject
-    (it is marked non-introspectable), so Kestrel owns the CLIPBOARD selection through a hidden widget and
+    (it is marked non-introspectable), so Shotrover owns the CLIPBOARD selection through a hidden widget and
     answers format requests itself. Offered, in order of preference:
       image/png (+ the file's own image type)  a single picture: pastes as an image in any chat / web app
       x-special/gnome-copied-files             Nautilus and other GTK file managers (copy vs cut)
       text/uri-list                            Chromium, Firefox, Electron apps (Teams, Discord, Slack), KDE:
                                                web pages receive these as real files on paste
       UTF8_STRING / text/plain                 the paths, for terminals and text fields
-    The files stay on the clipboard while Kestrel runs (as with every X11/Wayland app)."""
+    The files stay on the clipboard while Shotrover runs (as with every X11/Wayland app)."""
     IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".gif": "image/gif",
                    ".webp": "image/webp", ".bmp": "image/bmp"}
     MAX_IMAGE = 40 << 20             # bigger pictures are offered as files only

@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
-# Kestrel File Browser — Copyright (c) 2026 Kalib Arrowsmith. https://github.com/KCArrow/kestrel
+# Shotrover — Copyright (c) 2026 Kalib Arrowsmith. https://github.com/KCArrow/shotrover
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
-# Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/kestrel)
+# Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/shotrover)
 # Free for individuals and noncommercial organizations; companies and studios need a commercial
 # licence — see COMMERCIAL-LICENSE.md in the repository.
 """
-Kestrel File Browser — a fast, Windows-Explorer-style file manager for Linux desktops.
+Shotrover — a fast, Windows-Explorer-style file manager for Linux desktops.
 
 Native GTK 3 application, no pip dependencies: needs only python3, python3-gobject
 and gtk3, which Rocky Linux 9 Workstation already has
 (otherwise: sudo dnf install python3-gobject gtk3).
 
-Usage:  kestrel [folder ...]
-        kestrel --demo [KestrelDemo folder]     fictional machine for screenshots (docs/DEMO.md)
-        kestrel --selftest | --preview-bench | --stress | --nav-bench | --profile | --probe-gl | --probe-model
+Usage:  shotrover [folder ...]
+        shotrover --demo [ShotroverDemo folder]     fictional machine for screenshots (docs/DEMO.md)
+        shotrover --selftest | --preview-bench | --stress | --nav-bench | --profile | --probe-gl | --probe-model
 """
 from __future__ import annotations
 
@@ -74,20 +74,79 @@ def bench(label: str):
         sys.stderr.flush()
 
 
-APP_ID = "io.github.kestrel_files"
-APP_NAME = "Kestrel"
-APP_FULL_NAME = "Kestrel File Browser"
+APP_ID = "io.github.KCArrow.Shotrover"
+APP_NAME = "Shotrover"
+APP_FULL_NAME = "Shotrover"
 VERSION = "1.1"
+# the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
+# file and the portable build show it in the title bar, task switcher and About box without installing
+APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Shotrover: a rover pup peeking out of a folder whose front is a film slate -->
+  <defs>
+    <clipPath id="band"><rect x="22" y="158" width="212" height="24" rx="10"/></clipPath>
+  </defs>
+  <!-- folder back + tab -->
+  <path d="M30 92 q0-12 12-12 h52 q8 0 12 7 l7 11 h101 q12 0 12 12 v104 h-196z" fill="#d98f2b"/>
+  <g transform="translate(0,-8)">
+  <!-- ears (behind head) -->
+  <path d="M74 66 C52 66 38 92 44 128 C48 150 66 154 76 140 C84 124 88 92 90 74z" fill="#6e4024"/>
+  <path d="M182 66 C204 66 218 92 212 128 C208 150 190 154 180 140 C172 124 168 92 166 74z" fill="#6e4024"/>
+  <!-- head -->
+  <ellipse cx="128" cy="112" rx="58" ry="54" fill="#d7a066"/>
+  <!-- forehead patch -->
+  <path d="M128 60 C116 60 112 78 114 92 C118 100 138 100 142 92 C144 78 140 60 128 60z" fill="#f2dcbc"/>
+  <!-- muzzle -->
+  <ellipse cx="128" cy="138" rx="34" ry="24" fill="#f2dcbc"/>
+  <!-- eyes -->
+  <circle cx="102" cy="110" r="10" fill="#22160f"/>
+  <circle cx="154" cy="110" r="10" fill="#22160f"/>
+  <circle cx="105.5" cy="106.5" r="3.6" fill="#fff"/>
+  <circle cx="157.5" cy="106.5" r="3.6" fill="#fff"/>
+  <!-- nose + mouth -->
+  <path d="M116 126 h24 q4 0 2 5 q-5 9 -14 9 q-9 0 -14 -9 q-2 -5 2 -5z" fill="#22160f"/>
+  <path d="M120 148.4 Q124 150.5 128 146 Q132 150.5 136 148.4 Q135 156.5 128 156.5 Q121 156.5 120 148.4z" fill="#e8737a"/>
+  <path d="M128 140 v5 M128 145 q-7 7 -13 1 M128 145 q7 7 13 1" stroke="#22160f" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  </g>
+  <!-- folder front -->
+  <rect x="22" y="158" width="212" height="76" rx="12" fill="#f5bf45"/>
+  <!-- clapper band across the top of the front -->
+  <g clip-path="url(#band)">
+    <!-- everything overshoots the band; the clip makes the only edge, so no dark fringe behind the white stripes -->
+    <rect x="12" y="150" width="232" height="40" fill="#2a2a2e"/>
+    <g fill="#f4f1ea"><path d="M34.667 150 h18 l-23.333 40 h-18z"/><path d="M70.667 150 h18 l-23.333 40 h-18z"/><path d="M106.667 150 h18 l-23.333 40 h-18z"/><path d="M142.667 150 h18 l-23.333 40 h-18z"/><path d="M178.667 150 h18 l-23.333 40 h-18z"/><path d="M214.667 150 h18 l-23.333 40 h-18z"/></g>
+  </g>
+  <!-- paws over the edge -->
+  <g fill="#e9c393">
+    <ellipse cx="78" cy="160" rx="19" ry="13"/>
+    <ellipse cx="178" cy="160" rx="19" ry="13"/>
+  </g>
+  <path d="M72 156 v9 M84 156 v9 M172 156 v9 M184 156 v9" stroke="#b07a45" stroke-width="3" stroke-linecap="round"/>
+</svg>'''
+_APP_ICONS: Dict[int, object] = {}
+
+
+def app_icon(size: int):
+    """The Shotrover icon as a GdkPixbuf at size×size, or None if the SVG loader (librsvg) isn't there."""
+    if size not in _APP_ICONS:
+        try:
+            loader = GdkPixbuf.PixbufLoader.new_with_type("svg")
+            loader.set_size(size, size)
+            loader.write(APP_ICON_SVG.encode())
+            loader.close()
+            _APP_ICONS[size] = loader.get_pixbuf()
+        except Exception:
+            _APP_ICONS[size] = None
+    return _APP_ICONS[size]
 HOME = os.path.expanduser("~")
 
-# --------------------------------------------------------------------------- demo mode (kestrel --demo folder)
+# --------------------------------------------------------------------------- demo mode (shotrover --demo folder)
 # A fictional machine for screenshots and demos: drives, disks, free space, user folders, user name, Quick access
 # and Recent all come from the demo folder; the real config is neither read nor written.
 DEMO: Optional[dict] = None
 
 
 def demo_setup(root: str) -> dict:
-    """Build the fake machine around `root` (the unzipped KestrelDemo folder). Returns the demo descriptor."""
+    """Build the fake machine around `root` (the unzipped ShotroverDemo folder). Returns the demo descriptor."""
     root = os.path.abspath(root)
     sub_ = lambda *a: os.path.join(root, *a)
     drives = [  # label, path, kind, device, fstype, total, used, source
@@ -177,7 +236,29 @@ def disk_usage(path: str):
             if path == mp or path.startswith(mp + os.sep):
                 return _Usage(total, used, total - used)
     return shutil.disk_usage(path)
-CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "kestrel")
+
+
+def _migrate_from_kestrel():
+    """The app was called Kestrel before the rename: carry its settings and caches (index, scene-geometry cache, reports)
+    over the first time Shotrover runs, by moving ~/.config/kestrel → ~/.config/shotrover and the same for
+    ~/.cache. Only when the new folder doesn't exist yet, never in demo mode or the self-test, and a failure
+    just means starting with fresh defaults."""
+    if any(a in ("--demo", "--selftest") for a in sys.argv[1:]):
+        return
+    for base in (GLib.get_user_config_dir(), GLib.get_user_cache_dir()):
+        old, new = os.path.join(base, "kestrel"), os.path.join(base, "shotrover")
+        if os.path.isdir(old) and not os.path.lexists(new):
+            try:
+                os.rename(old, new)
+            except OSError:
+                try:
+                    shutil.copytree(old, new, symlinks=True)
+                except OSError:
+                    pass
+
+
+_migrate_from_kestrel()
+CONFIG_DIR = os.path.join(GLib.get_user_config_dir(), "shotrover")
 CONFIG_FILE = os.path.join(CONFIG_DIR, "config.json")
 
 QUICK, THISPC, TRASH, NETWORK, RECENT = "quick://", "pc://", "trash:///", "net://", "recent://"
@@ -194,6 +275,7 @@ DEFAULT_CONFIG = {
     "search_subfolders": True, "search_contents": False,
     "window": [1100, 700], "nav_width": 220, "preview_width": 300, "side_width": 0, "side_split": 0,
     "pinned": [], "recent": [], "frequent": {},
+    "pc_drives": [],          # folders shown as drives in This PC: [{"path": …, "label": …}]
 }
 COLUMN_TITLES = {"name": "Name", "modified": "Date modified", "type": "Type", "size": "Size", "created": "Date created",
                  "accessed": "Date accessed", "owner": "Owner", "perms": "Permissions", "location": "Folder path",
@@ -352,6 +434,30 @@ def entry_from_info(info: Gio.FileInfo, parent: Gio.File) -> Entry:
         except Exception:
             pass
     return e
+
+
+FOLDER_DRIVE_ICON = ("drive-multidisk", "drive-harddisk", "folder")
+
+
+def folder_drives(cfg: dict) -> List[Tuple[str, str]]:
+    """(label, path) of the folders the user chose to show as drives in This PC, in their order."""
+    out = []
+    for d in cfg.get("pc_drives") or []:
+        if isinstance(d, dict) and d.get("path"):
+            out.append((d.get("label") or os.path.basename(d["path"].rstrip("/")) or d["path"], d["path"]))
+    return out
+
+
+def owning_mount(path: str, mountpoints: List[str]) -> Optional[str]:
+    """The mount point (from mountpoints) a path lives on: the longest one that contains it after resolving
+    symlinks, so a folder drive under /home/me/shots lands with /home rather than /. None if nothing fits."""
+    rp = os.path.realpath(path)
+    best, best_len = None, -1
+    for mp in mountpoints:
+        m = os.path.realpath(mp).rstrip("/") or "/"
+        if (rp == m or m == "/" or rp.startswith(m + "/")) and len(m) > best_len:
+            best, best_len = mp, len(m)
+    return best
 
 
 def entry_for_path(path: str, name: Optional[str] = None) -> Entry:

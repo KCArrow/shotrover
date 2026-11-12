@@ -1,13 +1,13 @@
 # Testing and benchmarking
 
-All tests are built into `kestrel.py`; there is no test framework to install.
+All tests are built into `shotrover.py`; there is no test framework to install.
 
 ## Unit / benchmark tests
 
 ```bash
-python3 kestrel.py --selftest            # with GTK available
+python3 shotrover.py --selftest            # with GTK available
 python3 tests/headless.py --selftest     # anywhere: no display, no GTK (CI, containers)
-python3 kestrel.py --selftest --bench    # scaled-up data: 50k-file listings, 5M-face mesh, table output
+python3 shotrover.py --selftest --bench    # scaled-up data: 50k-file listings, 5M-face mesh, table output
 ```
 
 Covers: listing/sorting/grouping, formatting, `unique_name`, `Entry` from dirents, the EXR / HDR /
@@ -25,7 +25,7 @@ Requires `python3-gobject` (`python3-gi` on Debian/Ubuntu); numpy optional.
 ## Preview benchmark
 
 ```bash
-python3 kestrel.py --preview-bench [--quick] [--keep]
+python3 shotrover.py --preview-bench [--quick] [--keep]
 ```
 
 Synthesises large files of every preview type (PNG, PSD, EXR, HDR, IFF, OBJ, STL, text, zip,
@@ -36,7 +36,7 @@ folder for inspection. Use it after touching anything under `p1b.py` / `p3c.py`.
 ## GUI stress test
 
 ```bash
-python3 kestrel.py --stress [folder] [--cycles N]
+python3 shotrover.py --stress [folder] [--cycles N]
 ```
 
 Opens the real window on `folder` (default: home) and drives it: navigate into random subfolders,
@@ -48,7 +48,7 @@ the Python stack each was stuck in. A healthy run reports ~1 % stalled steps or 
 ## Navigation benchmark
 
 ```bash
-python3 kestrel.py --nav-bench /path/to/slow/share
+python3 shotrover.py --nav-bench /path/to/slow/share
 ```
 
 Visits every subfolder of the path through the real window and prints per-folder listing time,
@@ -59,7 +59,7 @@ instantly and fill in sizes afterwards.
 ## Profiling a live session
 
 ```bash
-python3 kestrel.py --profile
+python3 shotrover.py --profile
 ```
 
 Then use the app normally and open **Tools → Performance report…**: the stall log (every main-loop
@@ -67,26 +67,26 @@ stall > 120 ms with its stack), navigation log, and a cProfile table of everythi
 thread. Works without `--profile` too, minus the cProfile section.
 
 If the window ever freezes for more than 4 s, a full thread dump is written automatically to
-`~/.cache/kestrel/freeze-*.txt` — attach it to a bug report.
+`~/.cache/shotrover/freeze-*.txt` — attach it to a bug report.
 
 ## Houdini / Maya integration test
 
 ```bash
-python3 kestrel.py --dcc-test [extra files…]
+python3 shotrover.py --dcc-test [extra files…]
 ```
 
 Uses the installed Houdini (`hython`) and Maya (`mayapy`) to generate test files — a polygon
 mesh and a 200k-point particle cache as `.bgeo.sc`, a fog VDB, an SDF VDB, Alembic from both,
-FBX / USD / OBJ from Maya — then reads every file back through each route Kestrel has (hython,
+FBX / USD / OBJ from Maya — then reads every file back through each route Shotrover has (hython,
 gconvert, mayapy, Houdini-for-Alembic, OpenVDB, Blender), renders a frame of each and writes
-`~/kestrel-dcc-test/report.txt` and `sheet.png`. Files given on the command line are tested too
+`~/shotrover-dcc-test/report.txt` and `sheet.png`. Files given on the command line are tested too
 (through the normal automatic route). Takes a few minutes: each route starts the application.
 
 ## OpenGL and 3D import probes
 
 ```bash
-python3 kestrel.py --probe-gl            # system GL facts + GLArea context test under x11 and wayland
-python3 kestrel.py --probe-model file.abc   # run the importer chain on one file, print what worked
+python3 shotrover.py --probe-gl            # system GL facts + GLArea context test under x11 and wayland
+python3 shotrover.py --probe-model file.abc   # run the importer chain on one file, print what worked
 ```
 
 `--probe-gl` saves the working backend to the config (`--no-save` to skip). It also detects the
@@ -96,5 +96,5 @@ update (fix: reboot).
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs `tests/headless.py --selftest` on Ubuntu with `python3-gi` and
-numpy, and byte-compiles `kestrel.py` with Python 3.9 (Rocky 9's version) to catch syntax that
+numpy, and byte-compiles `shotrover.py` with Python 3.9 (Rocky 9's version) to catch syntax that
 is too new.

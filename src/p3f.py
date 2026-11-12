@@ -1207,7 +1207,7 @@ def shader_preview(path: str) -> dict:
           "unity-graph": _shadergraph_preview, "unity-mat": _unity_mat_preview, "ies": ies_preview,
           "source": _shader_source_preview}.get(k)
     if fn is None:
-        return {"error": "not a shader or material file Kestrel can read"}
+        return {"error": "not a shader or material file Shotrover can read"}
     try:
         res = fn(path)
     except Exception as ex:
@@ -1261,14 +1261,14 @@ uniform sampler2D iChannel1;
 uniform sampler2D iChannel2;
 uniform sampler2D iChannel3;
 in vec2 _uv;
-out vec4 _kestrelOut;
+out vec4 _shotroverOut;
 #define texture2D texture
 """
 _SHADERTOY_TAIL = """
 void main() {
     vec4 c = vec4(0.0, 0.0, 0.0, 1.0);
     mainImage(c, gl_FragCoord.xy);
-    _kestrelOut = vec4(c.rgb, 1.0);
+    _shotroverOut = vec4(c.rgb, 1.0);
 }
 """
 
@@ -1283,7 +1283,7 @@ def glsl_build_fragment(src: str, style: str, header: str) -> Tuple[str, int]:
     else:
         pre = header + "in vec2 _uv;\n#define texture2D texture\n#define varying in\n"
         if not re.search(r"^\s*(?:layout\s*\([^)]*\)\s*)?out\s+(?:(?:lowp|mediump|highp)\s+)?vec4\s+\w+\s*;", _strip_c_comments(body), re.M):
-            pre += "out vec4 _kestrelOut;\n#define gl_FragColor _kestrelOut\n"
+            pre += "out vec4 _shotroverOut;\n#define gl_FragColor _shotroverOut\n"
         tail = ""
     # GLSL < 3.30 numbers the line after "#line N" as N+1; ES and 3.30+ as N.
     line = "#line 1\n" if (" es" in header or re.search(r"#version\s+(3[3-9]\d|[4-9]\d\d)", header)) else "#line 0\n"

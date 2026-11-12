@@ -7,9 +7,9 @@
 # without walking the disk. Because such a map is a complete inventory of the machine, it never touches the
 # disk in the clear: the index file is AES-256-CBC (via the system `openssl`, PBKDF2-stretched key) with an
 # HMAC-SHA256 over the ciphertext (encrypt-then-MAC), and the key lives in the desktop keyring through
-# libsecret's `secret-tool` when available, otherwise in a 0600 file in ~/.config/kestrel. Plaintext exists
+# libsecret's `secret-tool` when available, otherwise in a 0600 file in ~/.config/shotrover. Plaintext exists
 # only in this process's memory.
-INDEX_FILE = os.path.join(GLib.get_user_cache_dir(), "kestrel", "index.enc")
+INDEX_FILE = os.path.join(GLib.get_user_cache_dir(), "shotrover", "index.enc")
 INDEX_KEYFILE = os.path.join(CONFIG_DIR, "index.key")
 INDEX_EXCLUDE_DIRS = {".cache", ".git", ".svn", "node_modules", "__pycache__", ".Trash", ".local/share/Trash", "proc", "sys", "dev", "run",
                       ".thumbnails", ".mozilla", ".var", "snap", "lost+found", ".npm", ".cargo", ".rustup", ".conda", ".pyenv", "site-packages"}
@@ -27,13 +27,23 @@ class IndexKey:
         st = shutil.which("secret-tool")
         if st:
             try:
-                r = subprocess.run([st, "lookup", "application", "kestrel", "purpose", "index-key"], capture_output=True, text=True, timeout=15)
+                r = subprocess.run([st, "lookup", "application", "shotrover", "purpose", "index-key"], capture_output=True, text=True, timeout=15)
                 if r.returncode == 0 and len(r.stdout.strip()) == 64:
                     self.source = "desktop keyring"
                     return bytes.fromhex(r.stdout.strip())
+                # stored before the rename (Kestrel): move it to the new name so the existing index stays readable
+                r = subprocess.run([st, "lookup", "application", "kestrel", "purpose", "index-key"], capture_output=True, text=True, timeout=15)
+                if r.returncode == 0 and len(r.stdout.strip()) == 64:
+                    key = r.stdout.strip()
+                    w = subprocess.run([st, "store", "--label=Shotrover file index key", "application", "shotrover", "purpose", "index-key"],
+                                       input=key, capture_output=True, text=True, timeout=30)
+                    if w.returncode == 0:
+                        subprocess.run([st, "clear", "application", "kestrel", "purpose", "index-key"], capture_output=True, timeout=15)
+                    self.source = "desktop keyring"
+                    return bytes.fromhex(key)
                 if create:
                     key = os.urandom(32)
-                    r = subprocess.run([st, "store", "--label=Kestrel file index key", "application", "kestrel", "purpose", "index-key"],
+                    r = subprocess.run([st, "store", "--label=Shotrover file index key", "application", "shotrover", "purpose", "index-key"],
                                        input=key.hex(), capture_output=True, text=True, timeout=30)
                     if r.returncode == 0:
                         self.source = "desktop keyring"
@@ -62,7 +72,8 @@ class IndexKey:
     def forget(self):
         st = shutil.which("secret-tool")
         if st:
-            subprocess.run([st, "clear", "application", "kestrel", "purpose", "index-key"], capture_output=True, timeout=15)
+            for app in ("shotrover", "kestrel"):
+                subprocess.run([st, "clear", "application", app, "purpose", "index-key"], capture_output=True, timeout=15)
         try:
             os.remove(INDEX_KEYFILE)
         except OSError:
@@ -127,7 +138,7 @@ class FileIndex:
             with open(INDEX_FILE, "rb") as f:
                 blob = f.read()
             if not blob.startswith(self.MAGIC):
-                raise ValueError("not a Kestrel index")
+                raise ValueError("not a Shotrover index")
             mac, body = blob[len(self.MAGIC):len(self.MAGIC) + 32], blob[len(self.MAGIC) + 32:]
             import hmac as _h
             if not _h.compare_digest(mac, _mac(k, body)):
@@ -321,7 +332,7 @@ class FileIndex:
             self.crawling = False
             if self.on_status:
                 GLib.idle_add(lambda: (self.on_status(), False)[1])
-        threading.Thread(target=work, daemon=True, name="kestrel-indexer").start()
+        threading.Thread(target=work, daemon=True, name="shotrover-indexer").start()
 
     def stop(self):
         self.cancel.set()

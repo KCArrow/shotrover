@@ -348,7 +348,7 @@ def apply_renames(plan: List[Tuple[str, str]]) -> Tuple[List[Tuple[str, str]], L
     import uuid
     done, errors, temps = [], [], []
     for src, dst in plan:
-        tmp = os.path.join(os.path.dirname(src), f".kestrel-rename-{uuid.uuid4().hex}")
+        tmp = os.path.join(os.path.dirname(src), f".shotrover-rename-{uuid.uuid4().hex}")
         try:
             os.rename(src, tmp)
             temps.append((tmp, src, dst))

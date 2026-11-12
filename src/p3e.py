@@ -2494,7 +2494,7 @@ SCENE_BREAKDOWN_EXTS = {".umap": "unreal", ".uasset": "unreal", ".uproject": "un
 
 
 def scene_breakdown_kind(path: str) -> str:
-    """'unreal' / 'unity' / 'maya' / 'blender' if Kestrel can break this file down, else ''. Extensions shared
+    """'unreal' / 'unity' / 'maya' / 'blender' if Shotrover can break this file down, else ''. Extensions shared
     with other programs (.mat is also MATLAB) are only claimed when the file is Unity YAML."""
     ext = os.path.splitext(path)[1]
     k = SCENE_BREAKDOWN_EXTS.get(ext) or SCENE_BREAKDOWN_EXTS.get(ext.lower(), "")
@@ -2520,13 +2520,13 @@ def scene_breakdown(path: str) -> dict:
     k = scene_breakdown_kind(path)
     fn = {"unreal": breakdown_unreal, "unity": breakdown_unity, "maya": breakdown_maya, "blender": breakdown_blend}.get(k)
     if fn is None:
-        return {"error": "not a scene file Kestrel can read"}
+        return {"error": "not a scene file Shotrover can read"}
     try:
         if os.path.getsize(path) < 16:
             return {"error": "the file is empty"}
         res = fn(path)
     except struct.error:
-        return {"error": "the file is truncated or not in a format Kestrel understands"}
+        return {"error": "the file is truncated or not in a format Shotrover understands"}
     except Exception as ex:
         return {"error": f"{type(ex).__name__}: {ex}"}
     res["seconds"] = time.monotonic() - t0

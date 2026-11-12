@@ -96,7 +96,7 @@ class MainWindow(Gtk.ApplicationWindow):
         vbox.pack_start(self.report_bar, False, False, 0)
         self.notebook = Gtk.Notebook(scrollable=True)
         self.notebook.set_show_border(False)
-        self.notebook.set_group_name("kestrel-tabs")
+        self.notebook.set_group_name("shotrover-tabs")
         self.notebook.connect("switch-page", self._on_switch_page)
         self.notebook.connect("page-removed", self._on_page_removed)
         self.notebook.connect("page-added", self._on_page_added)
@@ -453,21 +453,37 @@ class MainWindow(Gtk.ApplicationWindow):
         for label, p, icon in xdg_user_dirs():
             it = self.nav_store.append(pc, [NavNode(label, p, Gio.ThemedIcon.new(icon))])
             self.nav_store.append(it, [None])
-        for label, p, icon, k in drives():
+        # folder drives sit right after the drive they live on (network ones under Network); missing ones last
+        all_drives = drives()
+        fd_after: Dict[str, List[Tuple[str, str]]] = {}
+        fd_loose: List[Tuple[str, str]] = []
+        for label, p in folder_drives(self.cfg):
+            mp = owning_mount(p, [d[1] for d in all_drives]) if os.path.isdir(p) else None
+            (fd_after.setdefault(mp, []) if mp else fd_loose).append((label, p))
+
+        def add_folder_drives(parent, mp):
+            for label, p in fd_after.get(mp, ()):
+                it = self.nav_store.append(parent, [NavNode(label, p, Gio.ThemedIcon.new_from_names(list(FOLDER_DRIVE_ICON)), True, "drive")])
+                self.nav_store.append(it, [None])
+        for label, p, icon, k in all_drives:
             if k == "network":
                 continue
             it = self.nav_store.append(pc, [NavNode(_short_drive_label(label), p, icon, True, "removable" if k == "removable" else "drive")])
             self.nav_store.append(it, [None])
+            add_folder_drives(pc, p)
+        for label, p in fd_loose:
+            self.nav_store.append(pc, [NavNode(label, p, Gio.ThemedIcon.new_from_names(list(FOLDER_DRIVE_ICON)), True, "drive")])
         for label, vol, vicon in volumes_unmounted():
             n = NavNode(f"{label}  (not mounted)", None, vicon, False, "volume")
             n.volume = vol
             self.nav_store.append(pc, [n])
         self.nav_store.append(None, [NavNode("", None, None, False, "spacer")])
         net = self.nav_store.append(None, [NavNode("Network", NETWORK, Gio.ThemedIcon.new("network-workgroup"), True, "root")])
-        nets = drives("network")
+        nets = [d for d in all_drives if d[3] == "network"]
         for label, p, icon, k in nets:
             it = self.nav_store.append(net, [NavNode(_short_drive_label(label), p, icon, True, "network")])
             self.nav_store.append(it, [None])
+            add_folder_drives(net, p)
         if not nets:
             self.nav_store.append(net, [NavNode("No network drives", None, Gio.ThemedIcon.new("network-offline"), False, "info")])
         self.nav_store.append(None, [NavNode("", None, None, False, "spacer")])
@@ -1754,7 +1770,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         buf = self.preview_text.get_buffer()
         text = buf.get_text(buf.get_start_iter(), buf.get_end_iter(), True)
-        tmp = self.edit_path + ".kestrel-tmp"
+        tmp = self.edit_path + ".shotrover-tmp"
         try:
             st = os.stat(self.edit_path)
             with open(tmp, "w", encoding="utf-8") as f:
@@ -2410,7 +2426,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     # some meshes only exist as modelling history (or the file's mesh data isn't readable
                     # here): let Maya evaluate the scene once; the result is cached for the next picks
                     first = not maya_mb_cached(e.path)
-                    msg = ("opening the scene in Maya for the meshes Kestrel can't rebuild (first time for this file, "
+                    msg = ("opening the scene in Maya for the meshes Shotrover can't rebuild (first time for this file, "
                            "can take a minute)…" if first else "reading Maya's copy of the scene…")
                     if ok:
                         self.bd_media_label.set_text(f"{name} · {mdl.get('label', '')} · {msg}")
@@ -2889,7 +2905,7 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _seq_focus_changed(self, win, pspec):
-        """Playback pauses when the Kestrel window loses focus (and stays paused until Play is pressed)."""
+        """Playback pauses when the Shotrover window loses focus (and stays paused until Play is pressed)."""
         if not self.is_active() and self._seq is not None and self._seq["playing"]:
             self._seq_set_playing(False)
 
@@ -3513,6 +3529,9 @@ class MainWindow(Gtk.ApplicationWindow):
         if getattr(e, "volume", None) is not None:
             self.mount_volume(e.volume)
             return
+        if t.path == THISPC and getattr(e, "drive_kind", "") == "unmounted" and e.path and not os.path.isdir(e.path):
+            self.flash(f"{e.path} isn't there right now (not mounted, or moved) — right-click to remove it from This PC")
+            return
         if e.path and not e.uri and t.path not in VIRTUAL and not os.path.lexists(e.path):
             self.flash(f"{e.name} is no longer there")       # e.g. opened from an index paint before the disk answered
             t.load()
@@ -3704,8 +3723,10 @@ class MainWindow(Gtk.ApplicationWindow):
                 out.extend((sec_entries or []) + extra)
         out.extend(loose)
         out.extend(nets)
+        folder_drive_entries = self._place_folder_drives(out, drive_entries + nets)
         # free-space queries can hang on a dead network mount: never do them on the main thread
         t = self.tab
+        drive_entries = folder_drive_entries + drive_entries
 
         def work():
             for e in drive_entries:
@@ -3718,6 +3739,53 @@ class MainWindow(Gtk.ApplicationWindow):
             GLib.idle_add(lambda: (t and t.path == THISPC and (touch_all(t.store), t.pcview.refresh())) or False)
         threading.Thread(target=work, daemon=True).start()
         return out
+
+    def _place_folder_drives(self, out: List[Entry], sources: List[Entry]) -> List[Entry]:
+        """Folders the user marked "Show in This PC as a drive" go into the SAME section as the drive they live
+        on, right after that drive's tile (like a mapped drive next to its disk), with that disk's capacity bar.
+        A folder that isn't there (share not mounted, disk unplugged) stays greyed in the section it was last
+        seen in, so it doesn't jump to the root disk just because its mount point is an empty directory."""
+        placed: List[Entry] = []
+        after: Dict[int, int] = {}       # id(source entry) -> index in out of the last tile placed after it
+        by_mount = {e.path: e for e in sources}
+        saved = [d for d in (self.cfg.get("pc_drives") or []) if isinstance(d, dict) and d.get("path")]
+        for (label, p), d in zip(folder_drives(self.cfg), saved):
+            if os.path.isdir(p):
+                e = entry_for_path(p, label)
+                e.drive_kind = "folder"
+                e.type = "…"
+                src = by_mount.get(owning_mount(p, list(by_mount)) or "")
+                placed.append(e)
+            else:
+                e = Entry()
+                e.name, e.path, e.is_dir = f"{label}  (not available)", p, False
+                e.type = "Folder not found — not mounted or moved"
+                e.drive_kind = "unmounted"
+                src = None
+            e.icon = Gio.ThemedIcon.new_from_names(list(FOLDER_DRIVE_ICON))
+            e.location = p
+            if src is not None:
+                e.section = src.section
+                d["section"] = src.section
+                i = after.get(id(src))
+                if i is None:
+                    i = next(k for k, x in enumerate(out) if x is src)
+                out.insert(i + 1, e)
+                for k, v in after.items():   # later insertion points shift down by one
+                    if v > i:
+                        after[k] = v + 1
+                after[id(src)] = i + 1
+                continue
+            e.section = d.get("section") or "Other mounts"
+            last = max((k for k, x in enumerate(out) if x.section == e.section), default=None)
+            if last is None:
+                out.append(e)
+            else:
+                out.insert(last + 1, e)
+                for k, v in after.items():
+                    if v > last:
+                        after[k] = v + 1
+        return placed
 
     # ------------------------------------------------------------------ view settings
     def sort_by(self, key: str):

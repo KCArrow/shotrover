@@ -1,7 +1,7 @@
 # Architecture
 
-Kestrel is one Python module. For editing it is split into parts under `src/`, which `build.sh`
-concatenates **in this exact order** into `kestrel.py`. The parts are not packages: they share one
+Shotrover is one Python module. For editing it is split into parts under `src/`, which `build.sh`
+concatenates **in this exact order** into `shotrover.py`. The parts are not packages: they share one
 namespace, so a part may use anything defined in an earlier part, and a class defined later
 (e.g. `MainWindow` in p4) may reference helpers from any earlier part at call time.
 
@@ -14,6 +14,7 @@ namespace, so a part may use anything defined in an earlier part, and a class de
 | `p1e.py` | ~400  | crash detection and error reports: `CrashReporter` (exception hooks, faulthandler + per-process session markers for hard crashes, report files, sanitising, pre-filled GitHub issues), `CRASH` |
 | `p2.py`  | ~850  | dialogs: message/ask helpers, `ProgressDialog`, Properties, `OptionsDialog` (Preferences: General / View / Search / Optional), shortcuts, about |
 | `p2b.py` | ~250  | Batch rename dialog and `apply_renames` |
+| `p2d.py` | ~610  | Find large files: `scan_large_files` (iterative scandir walk, frame-sequence grouping, one filesystem), `find_duplicates`, `cleanup_kind`, `LargeFilesWindow` |
 | `p2c.py` | ~90   | `ReportDialog` (review / edit / send a report), `open_report` |
 | `p3b.py` | ~850  | custom widgets: `FitImage`, row hover, soft grid lines, virtualised `IconGrid`, This PC tile view (`PCView`, `DriveBar`) |
 | `p3c.py` | ~1400 | 3D preview: `load_model` + `_finish_model_numpy` (triangulation, decimation, normals), software rasteriser (`_rasterize`, `software_render`) and its `RenderWorker` process, `ModelView` (cairo) and `GLModelView` (Gtk.GLArea), GStreamer `VideoPreview` |
@@ -151,9 +152,9 @@ animates through a tick callback only while mapped and while the window is activ
 
 ## Encrypted index (`p1d.py`)
 
-- Storage: `~/.cache/kestrel/index.enc` = AES-256-CBC via `openssl enc -pbkdf2` (key over an fd,
+- Storage: `~/.cache/shotrover/index.enc` = AES-256-CBC via `openssl enc -pbkdf2` (key over an fd,
   never argv) + HMAC-SHA256, encrypt-then-MAC. Key in the keyring through `secret-tool`, else a
-  0600 file in `~/.config/kestrel`.
+  0600 file in `~/.config/shotrover`.
 - Contents: `dir → (mtime, [(name, is_dir, size, mtime)])` for configured roots, excluding
   system prefixes unless a root is inside them; network and hidden entries are opt-in.
 - Rule: **the disk is the truth.** Index data paints first and is replaced by the real listing on
@@ -163,7 +164,7 @@ animates through a tick callback only while mapped and while the window is activ
 ## Diagnostics (`p1c.py`)
 
 `StallWatchdog` heartbeats the main loop from a thread; a gap > 120 ms is logged with the UI
-thread's Python stack, > 4 s dumps every thread (`faulthandler`) to `~/.cache/kestrel/freeze-*.txt`.
+thread's Python stack, > 4 s dumps every thread (`faulthandler`) to `~/.cache/shotrover/freeze-*.txt`.
 `NAV_LOG` records each navigation (listing time, paint time, source: index/disk). `--profile` wraps
 the main loop in cProfile. `StressDriver` drives the real window (navigate, select, preview,
 rename, zip, undo) and reports stalls per step; `--nav-bench` visits every subfolder of a path.
@@ -173,12 +174,12 @@ rename, zip, undo) and reports stalls per step; `--nav-bench` visits every subfo
 | Trouble | How it is caught | What the user sees |
 |---|---|---|
 | unhandled Python exception (GTK callback, worker thread) | `sys.excepthook`, `threading.excepthook` | error bar in the active window, once per distinct failure site |
-| hard crash (segfault, abort, fatal signal) | `faulthandler` writes every thread's stack to `reports/fault-<pid>.txt`; `reports/session-<pid>.json` exists while the process runs and is removed on a clean quit | at the next start, a bar: "Kestrel crashed…" |
+| hard crash (segfault, abort, fatal signal) | `faulthandler` writes every thread's stack to `reports/fault-<pid>.txt`; `reports/session-<pid>.json` exists while the process runs and is removed on a clean quit | at the next start, a bar: "Shotrover crashed…" |
 | freeze > 4 s | `StallWatchdog.dump_freeze` (p1c) | bar when the interface recovers; if the user killed it, at the next start |
 | process killed (OOM, SIGKILL, power loss) | stale session marker without a fault trace | recorded as `ended`, not prompted (nothing to diagnose) |
 
 SIGTERM, SIGHUP and SIGINT quit the application cleanly (`GLib.unix_signal_add`) so a logout isn't
-mistaken for a crash. Several Kestrel processes can run at once; markers are per pid and a marker
+mistaken for a crash. Several Shotrover processes can run at once; markers are per pid and a marker
 whose pid is still alive is left alone.
 
 Reports are plain text: summary, environment (versions, distro, desktop, RAM, a few settings),
@@ -190,5 +191,5 @@ is `REPORT_ISSUES_URL` at the top of `p1e.py`.
 
 ## Configuration
 
-`~/.config/kestrel/config.json`, keys in `DEFAULT_CONFIG` (p1). Saved on every change; sizes
+`~/.config/shotrover/config.json`, keys in `DEFAULT_CONFIG` (p1). Saved on every change; sizes
 (`nav_width`, `preview_width`, `side_width`, `side_split`, `window`) saved on close.

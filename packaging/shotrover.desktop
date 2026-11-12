@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Shotrover
+GenericName=File Manager
+Comment=Fast, Windows-Explorer-style file browser for VFX and everyday work
+Exec=shotrover %U
+Icon=shotrover
+Terminal=false
+Categories=System;FileTools;FileManager;Utility;
+MimeType=inode/directory;
+Keywords=files;folders;explorer;browser;shotrover;
+StartupNotify=true

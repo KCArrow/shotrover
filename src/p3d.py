@@ -375,7 +375,7 @@ def preview_tool_report() -> str:
             pass
         have = [n for n in ("gtksink",) + H264_DECODERS + ("avdec_h265", "vp8dec", "vp9dec", "av1dec", "dav1ddec", "avdec_prores", "theoradec", "jpegdec")
                 if Gst.ElementFactory.find(n)]
-        L.append("  elements   " + (", ".join(have) or "none of the ones Kestrel looks for"))
+        L.append("  elements   " + (", ".join(have) or "none of the ones Shotrover looks for"))
         dec, why = gst_h264_status()
         L.append("  H.264      " + (dec if dec else "NONE — " + why))
         if dec and dec.startswith("nv") and not Gst.ElementFactory.find("avdec_h264"):
@@ -457,20 +457,20 @@ try:
             vo.data.grids.load()
             names = [g.name for g in vo.data.grids]
             grid = next((n for n in ("density", "surface", "sdf") if n in names), names[0] if names else "density")
-            me = bpy.data.meshes.new("kestrel_v2m")
-            mo = bpy.data.objects.new("kestrel_v2m", me)
+            me = bpy.data.meshes.new("shotrover_v2m")
+            mo = bpy.data.objects.new("shotrover_v2m", me)
             bpy.context.scene.collection.objects.link(mo)
             md = mo.modifiers.new("v2m", "VOLUME_TO_MESH")
             md.object = vo
             md.grid_name = grid
             md.threshold = 0.0 if grid in ("surface", "sdf") else 0.1
-            print("KESTREL vdb grid:", grid, names)
+            print("SHOTROVER vdb grid:", grid, names)
     else:
         res = "unsupported"
-    print("KESTREL import:", res)
+    print("SHOTROVER import:", res)
     dg = bpy.context.evaluated_depsgraph_get()
     meshes = [o for o in bpy.data.objects if o.type == "MESH"]
-    print("KESTREL meshes:", len(meshes), "objects:", len(bpy.data.objects))
+    print("SHOTROVER meshes:", len(meshes), "objects:", len(bpy.data.objects))
     out = []
     base = 0
     for ob in meshes:
@@ -485,7 +485,7 @@ try:
         for pg in me.polygons:
             out.append("f " + " ".join(str(i + base + 1) for i in pg.vertices))
         base += len(me.vertices)
-    sys.stdout.write("KESTREL-BEGIN\n" + "\n".join(out) + "\nKESTREL-END\n")
+    sys.stdout.write("SHOTROVER-BEGIN\n" + "\n".join(out) + "\nSHOTROVER-END\n")
     sys.stdout.flush()
 except Exception:
     traceback.print_exc(file=sys.stdout)
@@ -584,13 +584,13 @@ def load_via_blender(path: str) -> Optional[Tuple[list, list, str]]:
     except OSError as ex:
         _vfx_err(f"Blender: {ex}")
         return None
-    if "KESTREL-BEGIN" in out and "KESTREL-END" in out:
-        body = out[out.index("KESTREL-BEGIN") + 1:out.index("KESTREL-END")]
+    if "SHOTROVER-BEGIN" in out and "SHOTROVER-END" in out:
+        body = out[out.index("SHOTROVER-BEGIN") + 1:out.index("SHOTROVER-END")]
         verts, faces = _parse_obj_lines(body)
         if verts:
             return verts, faces, "Blender"
     interesting = [l.strip() for l in out + err
-                   if l.strip() and not l.startswith(("v ", "f ")) and ("KESTREL" in l or "rror" in l or "Traceback" in l or "arning" in l or "annot" in l or "timed out" in l)]
+                   if l.strip() and not l.startswith(("v ", "f ")) and ("SHOTROVER" in l or "rror" in l or "Traceback" in l or "arning" in l or "annot" in l or "timed out" in l)]
     _vfx_err("Blender: " + (" | ".join(x[:160] for x in interesting[-4:]) or f"exit {rc}, no geometry; tail: " + " | ".join((out + err)[-3:])))
     return None
 
@@ -602,7 +602,7 @@ def load_via_assimp(path: str) -> Optional[Tuple[list, list, str]]:
     if not a:
         _vfx_err("assimp: not found (sudo dnf install assimp)")
         return None
-    out = os.path.join(tempfile.gettempdir(), f"kestrel-assimp-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.obj")
+    out = os.path.join(tempfile.gettempdir(), f"shotrover-assimp-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.obj")
     try:
         r = subprocess.run([a, "export", path, out, "-ptv", "-tri"], capture_output=True, text=True, timeout=120)
         if os.path.exists(out):
@@ -659,7 +659,7 @@ def _has_py_module(name: str) -> bool:
 
 
 def optional_deps() -> List[dict]:
-    """Everything Kestrel can use but doesn't require, with a check and the Rocky 9 install command.
+    """Everything Shotrover can use but doesn't require, with a check and the Rocky 9 install command.
     Each entry: {key, name, gives, found: str|None, cmd: str}. The commands are plain shell so the user sees
     exactly what runs (Preferences → Optional opens them in a terminal)."""
     bl = _find_blender()
@@ -701,10 +701,10 @@ def optional_deps() -> List[dict]:
              found=find_rv(load_config().get("rv_path", "")), cmd="echo 'Download OpenRV from https://github.com/AcademySoftwareFoundation/OpenRV/releases and unpack it under /opt or ~/, then set the path in Preferences → Optional'"),
         dict(key="houdini", name="Houdini (hython / gconvert)", gives=".bgeo / .bgeo.sc / .geo and .vdb previews: meshes, particles, volumes; also reads Alembic",
              found=(_find_houdini()["hython"] or _find_houdini()["gconvert"]),
-             cmd="echo 'Install Houdini from https://www.sidefx.com/download/ (it installs under /opt/hfs*; Kestrel finds it there or via $HFS)'"),
+             cmd="echo 'Install Houdini from https://www.sidefx.com/download/ (it installs under /opt/hfs*; Shotrover finds it there or via $HFS)'"),
         dict(key="maya", name="Maya (mayapy)", gives="FBX, Alembic and USD previews when Blender isn't available",
              found=_find_mayapy(),
-             cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Kestrel finds mayapy there or via $MAYA_LOCATION'"),
+             cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
         dict(key="openvdb", name="OpenVDB (Python)", gives=".vdb volume previews without Houdini",
              found="importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None,
              cmd="sudo dnf install -y python3-openvdb || echo 'python3-openvdb is not packaged for this release; Houdini or Blender also preview VDBs'"),
@@ -718,12 +718,12 @@ def optional_deps() -> List[dict]:
 
 def install_script(deps: List[dict]) -> str:
     """Shell script that installs the given deps one after another, continuing past failures and summarising."""
-    lines = ["#!/bin/bash", "# Kestrel optional dependencies — review before running", "set -u",
+    lines = ["#!/bin/bash", "# Shotrover optional dependencies — review before running", "set -u",
              "if ! rpm -q epel-release >/dev/null 2>&1; then echo '== enabling EPEL (needed for most of these)'; sudo dnf install -y epel-release; fi",
              "fail=()"]
     for d in deps:
         lines += [f"echo; echo '== {d['name']}: {d['gives']}'", f"if ! ( {d['cmd']} ); then fail+=('{d['name']}'); fi"]
-    lines += ["echo", "if [ ${#fail[@]} -eq 0 ]; then echo 'All done. Restart Kestrel to pick up the new tools.';",
+    lines += ["echo", "if [ ${#fail[@]} -eq 0 ]; then echo 'All done. Restart Shotrover to pick up the new tools.';",
               "else echo \"Failed: ${fail[*]}\"; fi"]
     return "\n".join(lines) + "\n"
 
@@ -797,7 +797,7 @@ try:
     import hou
     path, out, objout, maxpts, maxvox = sys.argv[1], sys.argv[2], sys.argv[3], int(sys.argv[4]), int(sys.argv[5])
     info = [["Houdini", hou.applicationVersionString()]]
-    node = hou.node("/obj").createNode("geo", "kestrel_preview")
+    node = hou.node("/obj").createNode("geo", "shotrover_preview")
     for c in node.children():
         c.destroy()
     fsop = node.createNode("file")
@@ -928,10 +928,10 @@ try:
         arrays["vP"], arrays["vD"], arrays["vS"] = P, D, np.array([max(vS)], np.float32)
     arrays["info"] = np.array([json.dumps(info)])
     np.savez(out, **arrays)
-    print("KESTREL-OK")
+    print("SHOTROVER-OK")
 except Exception:
     traceback.print_exc(file=sys.stdout)
-    print("KESTREL-FAIL")
+    print("SHOTROVER-FAIL")
 '''
 
 
@@ -946,7 +946,7 @@ def load_via_houdini(path: str, max_points: int = 2_000_000, max_voxels: int = 1
         _vfx_err("Houdini caches need numpy (sudo dnf install python3-numpy)")
         return None
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="kestrel-hou-")
+    tmp = tempfile.mkdtemp(prefix="shotrover-hou-")
     script = os.path.join(tmp, "read.py")
     out, objout = os.path.join(tmp, "out.npz"), os.path.join(tmp, "mesh.obj")
     try:
@@ -954,7 +954,7 @@ def load_via_houdini(path: str, max_points: int = 2_000_000, max_voxels: int = 1
             f.write(_HOU_SCRIPT)
         rc, so, se = _run_streaming([h["hython"], script, os.path.abspath(path), out, objout, str(max_points), str(max_voxels)],
                                     timeout=200, verbose=BLENDER_VERBOSE)
-        if "KESTREL-OK" not in so or not os.path.exists(out):
+        if "SHOTROVER-OK" not in so or not os.path.exists(out):
             tail = [l for l in so + se if l.strip() and ("rror" in l or "icense" in l or "timed out" in l)][-3:]
             _vfx_err("Houdini (hython): " + (" | ".join(x[:200] for x in tail) or f"exit {rc}"))
             return None
@@ -979,7 +979,7 @@ def load_via_gconvert(path: str) -> Optional[dict]:
     if not h["gconvert"] or np is None:
         return None
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="kestrel-gconv-")
+    tmp = tempfile.mkdtemp(prefix="shotrover-gconv-")
     out = os.path.join(tmp, "mesh.obj")
     try:
         rc, so, se = _run_streaming([h["gconvert"], os.path.abspath(path), out], timeout=120)
@@ -1606,7 +1606,7 @@ def load_vdb_native(path: str, max_voxels: int = VDB_MAX_VOXELS, step: Optional[
             mb = np.concatenate([mb, np.full((len(tree.tile_vals), 64), 255, np.uint8)])
             vals = np.concatenate([vals, np.repeat(tree.tile_vals.astype(np.float32), 512)])
         vs = float(np.linalg.norm(M[0, :3]))
-        # EmberGen and Blender write Z-up volumes; Kestrel's viewer (like Houdini and Maya) is Y-up
+        # EmberGen and Blender write Z-up volumes; Shotrover's viewer (like Houdini and Maya) is Y-up
         tags = " ".join(f"{k} {v}" for g in metas for k, v in g["meta"].items() if not isinstance(v, bytes)).lower()
         zup = "embergen" in tags or "blender" in tags
         if zup:
@@ -1695,10 +1695,10 @@ try:
         f.write(b"KSTM" + struct.pack("<QQ", len(V) // 3, len(F) // 3))
         f.write(V.tobytes())
         f.write(F.tobytes())
-    print("KESTREL-OK")
+    print("SHOTROVER-OK")
 except Exception:
     traceback.print_exc(file=sys.stdout)
-    print("KESTREL-FAIL")
+    print("SHOTROVER-FAIL")
 '''
 
 
@@ -1710,13 +1710,13 @@ def load_via_maya(path: str) -> Optional[Tuple[list, list, str]]:
         _vfx_err("Maya: mayapy not found (PATH, $MAYA_LOCATION or /usr/autodesk/maya*)")
         return None
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="kestrel-maya-")
+    tmp = tempfile.mkdtemp(prefix="shotrover-maya-")
     script, out = os.path.join(tmp, "read.py"), os.path.join(tmp, "mesh.bin")
     try:
         with open(script, "w") as f:
             f.write(_MAYA_SCRIPT)
         rc, so, se = _run_streaming([mp, script, os.path.abspath(path), out], timeout=200, verbose=BLENDER_VERBOSE)
-        if "KESTREL-OK" not in so or not os.path.exists(out):
+        if "SHOTROVER-OK" not in so or not os.path.exists(out):
             tail = [l for l in so + se if l.strip() and ("rror" in l or "icense" in l or "timed out" in l)][-3:]
             _vfx_err("Maya: " + (" | ".join(x[:200] for x in tail) or f"exit {rc}"))
             return None

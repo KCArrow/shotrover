@@ -29,7 +29,7 @@ class StallWatchdog:
         self._running = True
         self.log_path = log_path
         GLib.timeout_add(50, self._heartbeat)
-        threading.Thread(target=self._watch, daemon=True, name="kestrel-stall-watchdog").start()
+        threading.Thread(target=self._watch, daemon=True, name="shotrover-stall-watchdog").start()
 
     def _heartbeat(self):
         self._beat = time.monotonic()
@@ -79,11 +79,11 @@ class StallWatchdog:
         lock-up can be diagnosed after the fact — or while it's still frozen, from another terminal."""
         import faulthandler
         try:
-            d = os.path.join(GLib.get_user_cache_dir(), "kestrel")
+            d = os.path.join(GLib.get_user_cache_dir(), "shotrover")
             os.makedirs(d, exist_ok=True)
             path = os.path.join(d, f"freeze-{_dt.datetime.now():%Y%m%d-%H%M%S}.txt")
             with open(path, "w") as f:
-                f.write(f"Kestrel interface frozen for {age:.1f}s at {_dt.datetime.now():%H:%M:%S}\n")
+                f.write(f"Shotrover interface frozen for {age:.1f}s at {_dt.datetime.now():%H:%M:%S}\n")
                 f.write(f"threads: {[t.name for t in threading.enumerate()]}\n\n")
                 if samples:
                     stack, n = max(samples.items(), key=lambda kv: kv[1])
@@ -94,7 +94,7 @@ class StallWatchdog:
                 f.write("faulthandler, all threads:\n")
                 f.flush()
                 faulthandler.dump_traceback(file=f, all_threads=True)
-            sys.stderr.write(f"\nkestrel: INTERFACE FROZEN for {age:.0f}s — stacks written to {path}\n")
+            sys.stderr.write(f"\nshotrover: INTERFACE FROZEN for {age:.0f}s — stacks written to {path}\n")
             try:
                 CRASH.freeze_report(path)
             except NameError:
@@ -108,8 +108,8 @@ class StallWatchdog:
         if not samples:
             return
         stack, n = max(samples.items(), key=lambda kv: kv[1])
-        # innermost frame that belongs to Kestrel itself (its file is kestrel.py or one of the parts)
-        mine = [f for f in stack if f[0].startswith(("kestrel", "p1", "p2", "p3", "p4", "p5", "explorer"))]
+        # innermost frame that belongs to Shotrover itself (its file is shotrover.py or one of the parts)
+        mine = [f for f in stack if f[0].startswith(("shotrover", "p1", "p2", "p3", "p4", "p5", "explorer"))]
         where = mine[0] if mine else (stack[0] if stack else ("?", 0, "?"))
         rec = {"t": time.time(), "dur": dur, "where": f"{where[2]}  ({where[0]}:{where[1]})",
                "stack": [f"{f[2]}  ({f[0]}:{f[1]})" for f in stack], "share": n / max(1, sum(samples.values()))}
@@ -176,7 +176,7 @@ PROFILE = None            # cProfile.Profile when started with --profile
 def profiling_report(top: int = 40) -> str:
     """cProfile summary for --profile runs: top functions by own time and by cumulative time."""
     if PROFILE is None:
-        return "Start Kestrel with --profile to collect a cProfile of the interface thread."
+        return "Start Shotrover with --profile to collect a cProfile of the interface thread."
     import pstats, io
     PROFILE.disable()
     try:
@@ -223,7 +223,7 @@ def write_test_vdb(path: str):
 
 
 def run_selftest(bench: bool = False) -> int:
-    """`kestrel.py --selftest [--bench]`: unit tests for the non-GUI machinery (listing, sorting, decoders,
+    """`shotrover.py --selftest [--bench]`: unit tests for the non-GUI machinery (listing, sorting, decoders,
     mesh pipeline, rasteriser, archives, rename, helpers) with timings, so a slowdown can be pinned to a
     component without the GUI. --bench scales the data up (50k files, 5M-face mesh) and prints a table."""
     import unittest, tempfile, zipfile, struct as _st
@@ -245,7 +245,7 @@ def run_selftest(bench: bool = False) -> int:
     class T(unittest.TestCase):
         @classmethod
         def setUpClass(cls):
-            cls.tmp = tempfile.mkdtemp(prefix="kestrel-selftest-")
+            cls.tmp = tempfile.mkdtemp(prefix="shotrover-selftest-")
             cls.nfiles = 50000 if bench else 3000
             d = os.path.join(cls.tmp, "many")
             os.makedirs(d)
@@ -279,6 +279,16 @@ def run_selftest(bench: bool = False) -> int:
             self.assertIn("MB", fmt_size(5 << 20))
             self.assertEqual(MainWindow.archive_stem("a.tar.gz"), "a")
             self.assertEqual(MainWindow.archive_stem("b.7z"), "b")
+            # folders shown as drives in This PC: label defaults to the folder name, bad entries are ignored
+            cfg = {"pc_drives": [{"path": "/mnt/show/assets", "label": "Assets"}, {"path": "/srv/renders/"}, "junk", {"label": "x"}]}
+            self.assertEqual(folder_drives(cfg), [("Assets", "/mnt/show/assets"), ("renders", "/srv/renders/")])
+            self.assertTrue(MainWindow.is_folder_drive(type("W", (), {"cfg": cfg})(), "/srv/renders"))
+            mps = ["/", "/home", "/mnt/show", "/mnt/showroom"]
+            self.assertEqual(owning_mount("/mnt/show/assets/tex", mps), "/mnt/show")
+            self.assertEqual(owning_mount("/mnt/showroom", mps), "/mnt/showroom")
+            self.assertEqual(owning_mount("/home/me/shots", mps), "/home")
+            self.assertEqual(owning_mount("/srv/renders", mps), "/")
+            self.assertIsNone(owning_mount("/srv/renders", ["/mnt/show"]))
 
         @timed("rv sequence")
         def test_rv_sequence(self):
@@ -411,6 +421,52 @@ def run_selftest(bench: bool = False) -> int:
             self.assertEqual(scene_tile_path(os.path.join(self.tmp, "nope.<UDIM>.png")), os.path.join(self.tmp, "nope.<UDIM>.png"))
             open(os.path.join(self.tmp, "tile.1002.png"), "w").close()
             self.assertTrue(scene_tile_path(os.path.join(self.tmp, "tile.<UDIM>.png")).endswith("tile.1002.png"))
+
+        @timed("large files scan")
+        def test_large_files(self):
+            root = os.path.join(self.tmp, "cleanup")
+            os.makedirs(os.path.join(root, "renders"), exist_ok=True)
+            os.makedirs(os.path.join(root, ".Trash-1000", "files"), exist_ok=True)
+            blob = os.urandom(200 << 10)
+            for name in ("movie.mov", "copy_of_movie.mov"):
+                with open(os.path.join(root, name), "wb") as f:
+                    f.write(blob)                                             # two identical 200 KB files
+            with open(os.path.join(root, "notes.txt"), "wb") as f:
+                f.write(os.urandom(10 << 10))
+            for n in range(1001, 1006):                                       # 5 × 40 KB frames = one 200 KB item
+                with open(os.path.join(root, "renders", f"beauty.{n:04d}.exr"), "wb") as f:
+                    f.write(os.urandom(40 << 10))
+            for v in ("v001", "v002"):                                        # versions, not a sequence
+                with open(os.path.join(root, f"shot_{v}.ma"), "wb") as f:
+                    f.write(os.urandom(150 << 10))
+            with open(os.path.join(root, ".Trash-1000", "files", "old.bin"), "wb") as f:
+                f.write(os.urandom(300 << 10))
+            items, stats = scan_large_files(root, 100 << 10)
+            by = {x.name: x for x in items}
+            self.assertEqual(set(by), {"movie.mov", "copy_of_movie.mov", "beauty.####.exr", "shot_v001.ma", "shot_v002.ma"})
+            seq = by["beauty.####.exr"]
+            self.assertEqual((seq.frames[:3], len(seq.paths), seq.kind), ((1001, 1005, 5), 5, "Renders & images"))
+            self.assertGreaterEqual(seq.size, 5 * (40 << 10))
+            self.assertEqual(by["movie.mov"].kind, "Video")
+            self.assertGreaterEqual(stats["trash_bytes"], 300 << 10)          # measured, never listed
+            self.assertEqual(find_duplicates(items), 1)
+            self.assertTrue(by["movie.mov"].dup and by["movie.mov"].dup == by["copy_of_movie.mov"].dup)
+            self.assertFalse(by["shot_v001.ma"].dup)
+            flat, _ = scan_large_files(root, 100 << 10, group_sequences=False)
+            self.assertNotIn("beauty.####.exr", {x.name for x in flat})       # frames alone are under the limit
+            # system files are flagged (warned about before removal); app caches get a hint; own files nothing
+            cache = os.path.join(root, ".cache", "thumbs.db")
+            os.makedirs(os.path.dirname(cache), exist_ok=True)
+            open(cache, "w").close()
+            sysfile = next((p for p in ("/usr/bin/env", "/bin/sh", "/etc/hostname") if os.path.exists(p)), "/usr/bin/env")
+            mk = lambda p: CleanupItem(os.path.basename(p), os.path.dirname(p), [p], 1, 0, 0, "Other")
+            probe = [mk(sysfile), mk(cache), mk(by["movie.mov"].paths[0]), mk("/var/log/messages"), mk("/boot/vmlinuz")]
+            classify_cleanup_items(probe, home=root)
+            self.assertEqual([x.flag for x in probe], ["system", "info", "", "system", "system"])
+            self.assertIn("journalctl", probe[3].reason)
+            self.assertIn("Boot", probe[4].reason)
+            self.assertEqual(cleanup_kind("core.12345"), "Logs, dumps & temp")
+            self.assertEqual(cleanup_kind("scene.blend1"), "Scenes & projects")
 
         @timed("GIF info")
         def test_gif_info(self):
@@ -953,7 +1009,7 @@ def _synth_zip(path: str, nfiles: int):
 def _synth_pdf(path: str, pages: int):
     objs = []
     kids = []
-    content = b"BT /F1 24 Tf 72 720 Td (Kestrel preview benchmark) Tj ET " + b"".join(
+    content = b"BT /F1 24 Tf 72 720 Td (Shotrover preview benchmark) Tj ET " + b"".join(
         b"BT /F1 10 Tf 72 %d Td (line of text number %d for the renderer to lay out) Tj ET " % (700 - 12 * k, k) for k in range(50))
     for p in range(pages):
         kids.append(len(objs) + 4)
@@ -975,13 +1031,13 @@ def _synth_pdf(path: str, pages: int):
 
 
 def run_preview_bench(big: bool = True) -> int:
-    """`kestrel.py --preview-bench`: write a large synthetic file of every previewable type into a temp
+    """`shotrover.py --preview-bench`: write a large synthetic file of every previewable type into a temp
     folder, run the exact code path the preview pane uses (generate_preview in the worker process, load_model
     + a software frame for meshes), and log a timing table. Types needing an external tool (video, 7z, PDF,
     Alembic) are generated only when that tool is present and reported as 'skipped' otherwise. Results are
-    appended to ~/.cache/kestrel/preview-bench.log so runs can be compared over time."""
+    appended to ~/.cache/shotrover/preview-bench.log so runs can be compared over time."""
     import tempfile
-    tmp = tempfile.mkdtemp(prefix="kestrel-preview-bench-")
+    tmp = tempfile.mkdtemp(prefix="shotrover-preview-bench-")
     S = 1 if big else 4          # size divisor for --quick
     specs = [
         ("PNG 4096²", "big.png", lambda p: _synth_png(p, 4096 // S, 4096 // S), "image/png"),
@@ -1030,7 +1086,7 @@ def run_preview_bench(big: bool = True) -> int:
             specs.append(("Alembic HDF5 2M faces", "big.abc", mkabc, "application/octet-stream"))
         except ImportError:
             tools.append("h5py (Alembic)")
-    print(f"Kestrel preview benchmark — files in {tmp}")
+    print(f"Shotrover preview benchmark — files in {tmp}")
     if tools:
         print("skipped (tool not installed): " + ", ".join(tools))
     print(f"{'type':<24} {'size':>9} {'generate':>9} {'preview':>9}  result")
@@ -1080,7 +1136,7 @@ def run_preview_bench(big: bool = True) -> int:
         flag = "  <-- slow" if tp > 2.0 else ""
         print(f"{label:<24} {fmt_size(size):>9} {tg * 1000:7.0f}ms {tp * 1000:7.0f}ms  {res}{flag}")
     try:
-        log = os.path.join(GLib.get_user_cache_dir(), "kestrel", "preview-bench.log")
+        log = os.path.join(GLib.get_user_cache_dir(), "shotrover", "preview-bench.log")
         os.makedirs(os.path.dirname(log), exist_ok=True)
         with open(log, "a") as f:
             f.write(f"\n== {_dt.datetime.now():%Y-%m-%d %H:%M:%S}  host={os.uname().nodename}  python={sys.version.split()[0]}  numpy={'yes' if np is not None else 'no'}\n")
@@ -1092,13 +1148,13 @@ def run_preview_bench(big: bool = True) -> int:
     if "--keep" not in sys.argv:
         shutil.rmtree(tmp, ignore_errors=True)
     else:
-        print(f"files kept in {tmp} (open it in Kestrel and click through them to compare with the pane)")
+        print(f"files kept in {tmp} (open it in Shotrover and click through them to compare with the pane)")
     return 0
 
 
 # --------------------------------------------------------------------------- GUI stress test
 class StressDriver:
-    """`kestrel.py --stress [folder] [--cycles N]`: drives the real window from inside the main loop — the
+    """`shotrover.py --stress [folder] [--cycles N]`: drives the real window from inside the main loop — the
     way a user would, but faster and tirelessly — while the stall watchdog records every freeze and the
     freeze dumper catches lock-ups. Each step is one GLib timeout; between steps the loop runs normally so
     worker results, monitors and redraws interleave exactly as in real use.
@@ -1130,7 +1186,7 @@ class StressDriver:
     # ---- plumbing
     def start(self):
         if not self.folder and self.mode == "nav":
-            print("nav-bench: give it a folder:  kestrel.py --nav-bench /path/with/subfolders", file=sys.stderr)
+            print("nav-bench: give it a folder:  shotrover.py --nav-bench /path/with/subfolders", file=sys.stderr)
             self.win.app.quit()
             return
         if not self.folder:
@@ -1138,7 +1194,7 @@ class StressDriver:
             self.scratch = self.folder
         else:
             import tempfile
-            self.scratch = tempfile.mkdtemp(prefix="kestrel-stress-scratch-")
+            self.scratch = tempfile.mkdtemp(prefix="shotrover-stress-scratch-")
             sub = os.path.join(self.scratch, "subfolder")
             os.makedirs(sub)
             for i in range(200):
@@ -1154,7 +1210,7 @@ class StressDriver:
 
     def _make_folder(self) -> str:
         import tempfile
-        d = tempfile.mkdtemp(prefix="kestrel-stress-")
+        d = tempfile.mkdtemp(prefix="shotrover-stress-")
         print("stress: generating test files…", flush=True)
         _synth_png(os.path.join(d, "image.png"), 1024, 768)
         _synth_psd(os.path.join(d, "layout.psd"), 1500, 1000)
@@ -1359,7 +1415,7 @@ def step(name, fn):
         print("GEN-OK", name)
     except Exception:
         print("GEN-FAIL", name, traceback.format_exc().strip().splitlines()[-1])
-geo = hou.node("/obj").createNode("geo", "kestrel_gen")
+geo = hou.node("/obj").createNode("geo", "shotrover_gen")
 for c in geo.children():
     c.destroy()
 sph = geo.createNode("sphere")
@@ -1458,11 +1514,11 @@ def _png_write(path: str, w: int, h: int, rgb: bytes):
 
 
 def run_dcc_test(extra: List[str]) -> int:
-    """kestrel.py --dcc-test [files…]: generate test caches with the installed Houdini and Maya, read every one
-    back through each route Kestrel has (hython, gconvert, mayapy, Houdini-for-Alembic), render a frame of each
-    and write ~/kestrel-dcc-test/report.txt + sheet.png. Extra files given on the command line are tested too."""
+    """shotrover.py --dcc-test [files…]: generate test caches with the installed Houdini and Maya, read every one
+    back through each route Shotrover has (hython, gconvert, mayapy, Houdini-for-Alembic), render a frame of each
+    and write ~/shotrover-dcc-test/report.txt + sheet.png. Extra files given on the command line are tested too."""
     global LAST_VFX_ERROR
-    out = os.path.join(HOME, "kestrel-dcc-test")
+    out = os.path.join(HOME, "shotrover-dcc-test")
     os.makedirs(out, exist_ok=True)
     rep: List[str] = []
 
@@ -1471,7 +1527,7 @@ def run_dcc_test(extra: List[str]) -> int:
         rep.append(s)
     hou = _find_houdini()
     mp = _find_mayapy()
-    log(f"Kestrel {VERSION} DCC test   {time.strftime('%Y-%m-%d %H:%M')}")
+    log(f"Shotrover {VERSION} DCC test   {time.strftime('%Y-%m-%d %H:%M')}")
     log(f"python {sys.version.split()[0]}  numpy {np.__version__ if np is not None else 'MISSING'}")
     log(f"hython   {hou['hython'] or '—'}   (Houdini {hou['version'] or '?'})")
     log(f"gconvert {hou['gconvert'] or '—'}")
@@ -1487,7 +1543,7 @@ def run_dcc_test(extra: List[str]) -> int:
         if not tool:
             log(f"  {label}: not found, skipped")
             continue
-        sp = os.path.join(tempfile.gettempdir(), f"kestrel-gen-{label.lower()}.py")
+        sp = os.path.join(tempfile.gettempdir(), f"shotrover-gen-{label.lower()}.py")
         with open(sp, "w") as f:
             f.write(script)
         t0 = time.time()

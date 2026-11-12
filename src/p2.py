@@ -44,7 +44,7 @@ def ask_text(parent, title: str, label: str, value: str = "", select_stem: bool 
 
 
 class FolderPicker(Gtk.Dialog):
-    """Kestrel's own "Browse for folder" (like Explorer's): a folder tree rooted at Quick access, Home, the
+    """Shotrover's own "Browse for folder" (like Explorer's): a folder tree rooted at Quick access, Home, the
     user folders and every drive, with a path field. Used instead of GTK's file chooser, which on GNOME is
     the Nautilus-style chooser (or the Nautilus portal). Subfolders are listed in a thread when a branch is
     opened, so a slow network share never freezes the dialog."""
@@ -239,7 +239,7 @@ class FolderPicker(Gtk.Dialog):
 
 
 def pick_folder(parent, title: str, start: str, ok_label: str = "_Select") -> Optional[str]:
-    """Folder chooser used everywhere in Kestrel (Move to / Copy to, index roots, batch-rename repath)."""
+    """Folder chooser used everywhere in Shotrover (Move to / Copy to, index roots, batch-rename repath)."""
     return FolderPicker(parent, title, start, ok_label).choose()
 
 
@@ -677,7 +677,7 @@ class OptionsDialog(Gtk.Dialog):
 
     def _general(self):
         b = self._vbox()
-        self._heading(b, "Open Kestrel to:")
+        self._heading(b, "Open Shotrover to:")
         self._radios(b, "open_to", [("quick", "Quick access"), ("pc", "This PC"), ("home", "Home folder")])
         self._heading(b, "Browse folders")
         self._radios(b, "browse_in_new_tab", [(False, "Open each folder in the same tab"), (True, "Open each folder in its own tab")])
@@ -697,7 +697,7 @@ class OptionsDialog(Gtk.Dialog):
         self._heading(b, "Privacy")
         self._check(b, "show_recent", "Show recently used files in Quick access")
         self._check(b, "show_frequent", "Show frequently used folders in Quick access")
-        btn = Gtk.Button(label="Clear Kestrel history", halign=Gtk.Align.START)
+        btn = Gtk.Button(label="Clear Shotrover history", halign=Gtk.Align.START)
         btn.connect("clicked", lambda *_: (self.cfg["recent"].clear(), self.cfg["frequent"].clear()))
         b.pack_start(btn, False, False, 4)
         return b
@@ -732,7 +732,7 @@ class OptionsDialog(Gtk.Dialog):
         info = Gtk.Label(xalign=0, wrap=True)
         info.set_markup("<small>Folders you open paint instantly from the index while the real listing loads, and name searches "
                         "answer from it immediately. The index is AES-256 encrypted and authenticated; its key is kept in your desktop "
-                        "keyring (or a private key file), never next to the index. Plaintext exists only in Kestrel's memory.</small>")
+                        "keyring (or a private key file), never next to the index. Plaintext exists only in Shotrover's memory.</small>")
         b.pack_start(info, False, False, 0)
         b.pack_start(Gtk.Label(label="Folders to index:", xalign=0), False, False, 0)
         self.roots_store = Gtk.ListStore(str)
@@ -827,7 +827,7 @@ class OptionsDialog(Gtk.Dialog):
         d.destroy()
 
     def _dependencies(self):
-        """The 'Optional' page: everything Kestrel can use but doesn't need — hardware acceleration, the
+        """The 'Optional' page: everything Shotrover can use but doesn't need — hardware acceleration, the
         OpenRV integration, the optional-tool checklist with install/copy actions, and the diagnostics report."""
         outer = self._vbox()
         self._heading(outer, "3D preview")
@@ -873,7 +873,7 @@ class OptionsDialog(Gtk.Dialog):
         outer.pack_start(row, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password; "
-                        "EPEL is enabled automatically when needed. Restart Kestrel afterwards.</small>")
+                        "EPEL is enabled automatically when needed. Restart Shotrover afterwards.</small>")
         outer.pack_start(note, False, False, 0)
         exp = Gtk.Expander(label="Diagnostics (renderer, importers, converters, interpreters)")
         self.diag_view = Gtk.TextView(editable=False, monospace=True)
@@ -928,7 +928,7 @@ class OptionsDialog(Gtk.Dialog):
         if not chosen:
             self.dep_status.set_text("Nothing selected")
             return
-        script = os.path.join(GLib.get_user_cache_dir(), "kestrel", "install-deps.sh")
+        script = os.path.join(GLib.get_user_cache_dir(), "shotrover", "install-deps.sh")
         os.makedirs(os.path.dirname(script), exist_ok=True)
         with open(script, "w") as f:
             f.write(install_script(chosen))
@@ -1017,10 +1017,15 @@ def show_shortcuts(parent):
 def show_about(parent):
     d = Gtk.AboutDialog(transient_for=parent, modal=True, program_name=APP_FULL_NAME, version=VERSION,
                         comments="A fast, Windows-Explorer-style file manager for Linux.\nGTK 3 · PyGObject · GIO",
-                        logo_icon_name="system-file-manager", website="https://github.com/KCArrow/kestrel",
+                        website="https://github.com/KCArrow/shotrover",
                         copyright="© 2026 Kalib Arrowsmith", license_type=Gtk.License.CUSTOM,
                         license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals and noncommercial organizations. "
                                 "Use by companies and studios requires a commercial licence — see COMMERCIAL-LICENSE.md "
-                                "at https://github.com/KCArrow/kestrel", wrap_license=True)
+                                "at https://github.com/KCArrow/shotrover", wrap_license=True)
+    logo = app_icon(128)
+    if logo is not None:
+        d.set_logo(logo)
+    else:
+        d.set_logo_icon_name("system-file-manager")
     d.run()
     d.destroy()

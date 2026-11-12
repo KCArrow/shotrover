@@ -1,1 +1,1 @@
-Screenshots referenced from the main README. Take them with `kestrel --demo` (see ../DEMO.md).
+Screenshots referenced from the main README. Take them with `shotrover --demo` (see ../DEMO.md).

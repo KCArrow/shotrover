@@ -1,26 +1,30 @@
-# Kestrel File Browser
+# Shotrover
 
-[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20Kestrel-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/kalibarrowsmith)
+<img src="packaging/shotrover.svg" width="112" align="right" alt="Shotrover icon: a pup peeking out of a film-slate folder">
+
+*Formerly Kestrel.* Settings from a Kestrel install carry over automatically.
+
+[![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20Shotrover-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/kalibarrowsmith)
 
 A fast, Windows-Explorer-style file manager for the Linux desktop, built for Rocky Linux 9
 and VFX/animation workstations.
 
-Single-file GTK 3 application (`kestrel.py`, ~21k lines), **no pip dependencies**: it needs only
+Single-file GTK 3 application (`shotrover.py`, ~21k lines), **no pip dependencies**: it needs only
 `python3`, `python3-gobject` and `gtk3`, which every GNOME install already has. Everything else
 (video, 3D formats, EXR tools, archives, OpenRV…) is optional and detected at runtime.
 
 ```bash
 sudo dnf install python3-gobject gtk3     # Rocky / RHEL / Fedora (usually already present)
-./install.sh                              # ~/.local/bin/kestrel + app-menu entry
-kestrel ~/Pictures
+./install.sh                              # ~/.local/bin/shotrover + app-menu entry
+shotrover ~/Pictures
 ```
 
-Or unzip the portable build and run `./kestrel` — nothing is installed (see [Portable build](#portable-build)).
+Or unzip the portable build and run `./shotrover` — nothing is installed (see [Portable build](#portable-build)).
 
 ## Screenshots
 
 <!-- Stills taken in demo mode (docs/DEMO.md) — nothing here is a real machine. -->
-![Kestrel main window](docs/screenshots/hero.png)
+![Shotrover main window](docs/screenshots/hero.png)
 
 ![A 200-frame VDB campfire playing as smoke in the preview pane](docs/screenshots/vdb_viewer.gif)
 
@@ -71,6 +75,9 @@ drag-and-drop interoperate with Nautilus and other GTK apps. Undo (Ctrl+Z). Real
 Recycle Bin. Folders auto-refresh when changed on disk. Batch rename (Ctrl+F2) with patterns,
 numbering, regex, frame-number offsets (`shot.1001.exr` +60 → `shot.1061.exr`, padding kept) and
 repathing (move the renamed files into another folder, e.g. `../v005` or `/mnt/show/{parent}`). SHA-256 to clipboard. Run scripts in a terminal.
+**Find large files** (Tools menu) scans a folder or a whole drive in the background and lists what takes the
+space — big files, and frame sequences (`render.1001–1240.exr`) as one item with their total — with type and
+age filters and an optional duplicate check; tick what you don't need and it goes to the Recycle Bin.
 
 **Archives.** Zip / tar.gz / tar.xz / tar natively; `.7z`, `.rar`, `.cab`, `.iso` and more through
 7-Zip when installed. Double-clicking an archive extracts it (configurable); Extract here / Extract
@@ -85,7 +92,7 @@ second) or OpenGL. Smooth shading, orbit/zoom, wireframe, "all triangles" overri
 crossfades in ⅛ s; preview and details panes are resizable and remembered.
 
 **Houdini caches and VDBs.** `.bgeo` / `.bgeo.sc` / `.geo` meshes and particles (coloured by `Cd`, via
-Houdini) and `.vdb` volumes rendered as **smoke** (level sets as surfaces). VDBs are read by Kestrel itself —
+Houdini) and `.vdb` volumes rendered as **smoke** (level sets as surfaces). VDBs are read by Shotrover itself —
 Houdini, EmberGen and Blender files, blosc/zip, half-float — so no Houdini is needed; with OpenGL, particles
 and smoke are drawn on the GPU. Select the frames of a cache and press **Preview as sequence** for a time
 slider with playback (Space, ← →, adjustable fps; pauses when the window loses focus).
@@ -111,11 +118,13 @@ show the light pattern on a wall and a polar candela diagram with beam / field a
 (UDisks2, no root prompt in the app), physical-disk grouping on This PC so you can see which
 disk holds which mounts. Other OS partitions on a dual-boot machine stay hidden until explicitly
 mounted.
+Any folder can be shown in This PC as a drive (right-click → *Show in This PC as a drive*), with its own
+name, listed right after the drive it lives on with that disk's capacity bar — handy for a project share or a render volume.
 
 **Optional encrypted file index.** Speeds up navigation and search on slow/network storage. The
 disk is always the truth — the index only gives a head start, every folder is re-read as you
 visit it, and search results are verified. Stored AES-256 encrypted with HMAC under
-`~/.cache/kestrel`, key in the keyring (libsecret) or a 0600 key file.
+`~/.cache/shotrover`, key in the keyring (libsecret) or a 0600 key file.
 
 **Snappy by design.** The GTK thread never touches the disk or network: listings, stats,
 thumbnails, previews, searches and sizes run in threads or worker processes. Optional CPU parking
@@ -123,7 +132,7 @@ pins the interface to its own cores so a heavy preview can't make the window stu
 watchdog and freeze dumps are built in (see [Tests and diagnostics](#tests-and-diagnostics)).
 
 **Crash and error reports.** Unhandled errors, hard crashes (segfaults in a C library) and
-interface freezes are caught and written to a report. Kestrel shows a bar with *Review & report…*;
+interface freezes are caught and written to a report. Shotrover shows a bar with *Review & report…*;
 you see the full report, can edit it, and open it as a pre-filled GitHub issue with one click —
 nothing is ever sent automatically, and your home folder and user name are scrubbed first.
 **Help → Report a problem…** builds a report on demand.
@@ -156,34 +165,34 @@ sudo pacman -S python-gobject gtk3 python-numpy
 ## Install
 
 ```bash
-git clone https://github.com/<you>/kestrel.git
-cd kestrel
+git clone https://github.com/<you>/shotrover.git
+cd shotrover
 ./install.sh
 ```
 
-`install.sh` copies `kestrel.py` to `~/.local/bin/kestrel` and adds a desktop entry. No root needed.
+`install.sh` copies `shotrover.py` to `~/.local/bin/shotrover` and adds a desktop entry. No root needed.
 
-- Make it the default folder handler: `xdg-mime default kestrel.desktop inode/directory`
-- Uninstall: `./install.sh --uninstall` (settings in `~/.config/kestrel` are kept)
-- Run without installing: `python3 kestrel.py [folder…]`
+- Make it the default folder handler: `xdg-mime default shotrover.desktop inode/directory`
+- Uninstall: `./install.sh --uninstall` (settings in `~/.config/shotrover` are kept)
+- Run without installing: `python3 shotrover.py [folder…]`
 
 ---
 
 ## Portable build
 
-Download `kestrel-<version>-portable.zip` from the Releases page (or build it with
+Download `shotrover-<version>-portable.zip` from the Releases page (or build it with
 `./make-portable.sh`, output in `dist/`). Unzip anywhere:
 
 ```
-kestrel-1.1-portable/
-├── kestrel            # launcher: ./kestrel [folder]
-├── kestrel.py         # the application
+shotrover-1.1-portable/
+├── shotrover            # launcher: ./shotrover [folder]
+├── shotrover.py         # the application
 ├── install.sh         # optional: install into ~/.local/bin later
 ├── PORTABLE.txt
 ├── README.md  LICENSE  docs/  packaging/
 ```
 
-`./kestrel` runs it in place. Create a `config/` folder next to the launcher to make it fully
+`./shotrover` runs it in place. Create a `config/` folder next to the launcher to make it fully
 self-contained (settings, cache and the file index are then kept there instead of
 `~/.config` / `~/.cache`). The host still needs `python3`, `python3-gobject` and `gtk3`; that is
 the only way to ship a GTK app without bundling a desktop stack.
@@ -192,7 +201,7 @@ the only way to ship a GTK app without bundling a desktop stack.
 
 ## Optional tools
 
-Open **Preferences → Optional** inside Kestrel. It lists every optional dependency, shows which are
+Open **Preferences → Optional** inside Shotrover. It lists every optional dependency, shows which are
 found, lets you toggle OpenGL / OpenRV / CPU parking / indexing, and offers a generated install
 script for whatever is missing.
 
@@ -216,7 +225,7 @@ script for whatever is missing.
 | Index key in keyring | libsecret | `libsecret-tools` (otherwise a 0600 key file is used) |
 | Eject / Format | UDisks2 | `udisks2` (standard on GNOME) |
 
-Nothing here is required; Kestrel degrades gracefully and tells you in the preview pane what
+Nothing here is required; Shotrover degrades gracefully and tells you in the preview pane what
 would enable a given format.
 
 ---
@@ -252,19 +261,19 @@ Press **F1** in the app for the full list.
 ## Command-line flags
 
 ```
-kestrel [folder …]                 open one tab per folder (default: home)
-kestrel --demo [KestrelDemo]       fictional machine for screenshots/demos — see docs/DEMO.md
-kestrel --selftest [--bench]       unit/benchmark tests of the non-GUI machinery
-kestrel --preview-bench [--quick] [--keep]
+shotrover [folder …]                 open one tab per folder (default: home)
+shotrover --demo [ShotroverDemo]       fictional machine for screenshots/demos — see docs/DEMO.md
+shotrover --selftest [--bench]       unit/benchmark tests of the non-GUI machinery
+shotrover --preview-bench [--quick] [--keep]
                                    synthesize large files of every preview type, time each decoder
-kestrel --stress [folder] [--cycles N]
+shotrover --stress [folder] [--cycles N]
                                    drive the real window through the folder: navigate, select, preview,
                                    rename, zip… and report stalls
-kestrel --nav-bench folder         open every subfolder, report listing/paint times and stalls
-kestrel --profile                  run normally with cProfile on the UI thread (Tools → Performance report)
-kestrel --probe-gl [--no-save]     test OpenGL context creation under each GDK backend
-kestrel --probe-model file         run the 3D import chain on one file and report
-kestrel --dcc-test [files…]        generate test caches with Houdini / Maya and read them back through every route
+shotrover --nav-bench folder         open every subfolder, report listing/paint times and stalls
+shotrover --profile                  run normally with cProfile on the UI thread (Tools → Performance report)
+shotrover --probe-gl [--no-save]     test OpenGL context creation under each GDK backend
+shotrover --probe-model file         run the 3D import chain on one file and report
+shotrover --dcc-test [files…]        generate test caches with Houdini / Maya and read them back through every route
 ```
 
 ---
@@ -273,12 +282,12 @@ kestrel --dcc-test [files…]        generate test caches with Houdini / Maya an
 
 | Path | Contents |
 |---|---|
-| `~/.config/kestrel/config.json` | all settings (readable JSON; delete to reset) |
-| `~/.config/kestrel/index.key` | file-index key (only when no keyring is available; mode 0600) |
-| `~/.cache/kestrel/index.enc` | encrypted file index |
-| `~/.cache/kestrel/freeze-*.txt` | thread dumps written automatically if the UI freezes > 4 s |
-| `~/.cache/kestrel/reports/` | error / crash reports (unsent ones are offered at the next start; `archive/` keeps the last 40) |
-| `~/.cache/kestrel/gl-probe.txt` | last `--probe-gl` result |
+| `~/.config/shotrover/config.json` | all settings (readable JSON; delete to reset) |
+| `~/.config/shotrover/index.key` | file-index key (only when no keyring is available; mode 0600) |
+| `~/.cache/shotrover/index.enc` | encrypted file index |
+| `~/.cache/shotrover/freeze-*.txt` | thread dumps written automatically if the UI freezes > 4 s |
+| `~/.cache/shotrover/reports/` | error / crash reports (unsent ones are offered at the next start; `archive/` keeps the last 40) |
+| `~/.cache/shotrover/gl-probe.txt` | last `--probe-gl` result |
 
 A legacy `~/.config/explorer-gtk/config.json` is migrated automatically on first start.
 
@@ -286,32 +295,32 @@ A legacy `~/.config/explorer-gtk/config.json` is migrated automatically on first
 
 ## Building from source
 
-`kestrel.py` is generated by concatenating the parts in `src/` (kept separate only to keep
+`shotrover.py` is generated by concatenating the parts in `src/` (kept separate only to keep
 editing manageable; they share one module namespace):
 
 ```bash
-./build.sh            # src/p*.py → kestrel.py, then py_compile as a syntax check
-./make-portable.sh    # → dist/kestrel-<version>-portable.zip
+./build.sh            # src/p*.py → shotrover.py, then py_compile as a syntax check
+./make-portable.sh    # → dist/shotrover-<version>-portable.zip
 ```
 
 Part order and contents are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-Edit the parts, never `kestrel.py` directly.
+Edit the parts, never `shotrover.py` directly.
 
 ---
 
 ## Tests and diagnostics
 
 ```bash
-python3 kestrel.py --selftest             # on a desktop with GTK installed
+python3 shotrover.py --selftest             # on a desktop with GTK installed
 python3 tests/headless.py --selftest      # no display, no GTK: real GLib/Gio, widgets stubbed (CI)
-python3 kestrel.py --preview-bench        # decoder timings on synthetic large files
-python3 kestrel.py --nav-bench /mnt/nas   # navigation latency on a slow share
-python3 kestrel.py --stress ~/Projects    # robustness: random realistic use with stall reporting
+python3 shotrover.py --preview-bench        # decoder timings on synthetic large files
+python3 shotrover.py --nav-bench /mnt/nas   # navigation latency on a slow share
+python3 shotrover.py --stress ~/Projects    # robustness: random realistic use with stall reporting
 ```
 
 While running, **Tools → Performance report…** shows the stall watchdog's log (any main-loop stall
 over 120 ms with the Python stack it was stuck in), and a freeze longer than 4 s writes every
-thread's stack to `~/.cache/kestrel/freeze-*.txt`. See [docs/TESTING.md](docs/TESTING.md).
+thread's stack to `~/.cache/shotrover/freeze-*.txt`. See [docs/TESTING.md](docs/TESTING.md).
 
 ---
 
@@ -329,14 +338,14 @@ and how to report a freeze.
 - [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — source layout, threading model, preview pipeline, index design
 - [docs/TESTING.md](docs/TESTING.md) — every test/bench flag, what it measures, how to read the output
 - [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-- [docs/DEMO.md](docs/DEMO.md) — `--demo` mode and the KestrelDemo folder for screenshots
+- [docs/DEMO.md](docs/DEMO.md) — `--demo` mode and the ShotroverDemo folder for screenshots
 - [CHANGELOG.md](CHANGELOG.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — studio / company licensing
 
 ## Support
 
-Kestrel is free for personal use and built in my spare time. If it saves you time, you can
+Shotrover is free for personal use and built in my spare time. If it saves you time, you can
 support development on **[Ko-fi](https://ko-fi.com/kalibarrowsmith)**. Studios:
 **[buy a studio licence](https://ko-fi.com/s/6ee3ebf331)** (details in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)).
 
@@ -344,7 +353,7 @@ support development on **[Ko-fi](https://ko-fi.com/kalibarrowsmith)**. Studios:
 
 **Free for individuals and noncommercial organizations; studios and companies need a commercial licence.**
 
-Kestrel is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Personal,
+Shotrover is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Personal,
 hobby, student, research and non-profit use is free, including modifying and sharing it, as long
 as the copyright notice stays with it. Using it at or for a company, studio or other commercial
 organization requires a commercial licence — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)

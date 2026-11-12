@@ -1,0 +1,42 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
+  <!-- Shotrover: a rover pup peeking out of a folder whose front is a film slate -->
+  <defs>
+    <clipPath id="band"><rect x="22" y="158" width="212" height="24" rx="10"/></clipPath>
+  </defs>
+  <!-- folder back + tab -->
+  <path d="M30 92 q0-12 12-12 h52 q8 0 12 7 l7 11 h101 q12 0 12 12 v104 h-196z" fill="#d98f2b"/>
+  <g transform="translate(0,-8)">
+  <!-- ears (behind head) -->
+  <path d="M74 66 C52 66 38 92 44 128 C48 150 66 154 76 140 C84 124 88 92 90 74z" fill="#6e4024"/>
+  <path d="M182 66 C204 66 218 92 212 128 C208 150 190 154 180 140 C172 124 168 92 166 74z" fill="#6e4024"/>
+  <!-- head -->
+  <ellipse cx="128" cy="112" rx="58" ry="54" fill="#d7a066"/>
+  <!-- forehead patch -->
+  <path d="M128 60 C116 60 112 78 114 92 C118 100 138 100 142 92 C144 78 140 60 128 60z" fill="#f2dcbc"/>
+  <!-- muzzle -->
+  <ellipse cx="128" cy="138" rx="34" ry="24" fill="#f2dcbc"/>
+  <!-- eyes -->
+  <circle cx="102" cy="110" r="10" fill="#22160f"/>
+  <circle cx="154" cy="110" r="10" fill="#22160f"/>
+  <circle cx="105.5" cy="106.5" r="3.6" fill="#fff"/>
+  <circle cx="157.5" cy="106.5" r="3.6" fill="#fff"/>
+  <!-- nose + mouth -->
+  <path d="M116 126 h24 q4 0 2 5 q-5 9 -14 9 q-9 0 -14 -9 q-2 -5 2 -5z" fill="#22160f"/>
+  <path d="M120 148.4 Q124 150.5 128 146 Q132 150.5 136 148.4 Q135 156.5 128 156.5 Q121 156.5 120 148.4z" fill="#e8737a"/>
+  <path d="M128 140 v5 M128 145 q-7 7 -13 1 M128 145 q7 7 13 1" stroke="#22160f" stroke-width="3.5" fill="none" stroke-linecap="round"/>
+  </g>
+  <!-- folder front -->
+  <rect x="22" y="158" width="212" height="76" rx="12" fill="#f5bf45"/>
+  <!-- clapper band across the top of the front -->
+  <g clip-path="url(#band)">
+    <!-- everything overshoots the band; the clip makes the only edge, so no dark fringe behind the white stripes -->
+    <rect x="12" y="150" width="232" height="40" fill="#2a2a2e"/>
+    <g fill="#f4f1ea"><path d="M34.667 150 h18 l-23.333 40 h-18z"/><path d="M70.667 150 h18 l-23.333 40 h-18z"/><path d="M106.667 150 h18 l-23.333 40 h-18z"/><path d="M142.667 150 h18 l-23.333 40 h-18z"/><path d="M178.667 150 h18 l-23.333 40 h-18z"/><path d="M214.667 150 h18 l-23.333 40 h-18z"/></g>
+  </g>
+  <!-- paws over the edge -->
+  <g fill="#e9c393">
+    <ellipse cx="78" cy="160" rx="19" ry="13"/>
+    <ellipse cx="178" cy="160" rx="19" ry="13"/>
+  </g>
+  <path d="M72 156 v9 M84 156 v9 M172 156 v9 M184 156 v9" stroke="#b07a45" stroke-width="3" stroke-linecap="round"/>
+</svg>

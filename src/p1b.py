@@ -576,7 +576,7 @@ def _tool(*names) -> Optional[str]:
 
 def convert_with_tools(path: str, ct: str, max_w: int, max_h: int) -> Optional[Tuple[str, str]]:
     """Try installed converters; returns (png_path, tool_name) or None. Caller deletes the png."""
-    out = os.path.join(tempfile.gettempdir(), f"kestrel-preview-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.png")
+    out = os.path.join(tempfile.gettempdir(), f"shotrover-preview-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.png")
     low = path.lower()
     attempts = []
     is_video = ct.startswith("video/") or low.endswith((".mov", ".mp4", ".mkv", ".avi", ".webm", ".mxf", ".r3d"))
