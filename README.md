@@ -2,8 +2,6 @@
 
 <img src="packaging/shotrover.svg" width="112" align="right" alt="Shotrover icon: a pup peeking out of a film-slate folder">
 
-*Formerly Kestrel.* Settings from a Kestrel install carry over automatically.
-
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20Shotrover-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/kalibarrowsmith)
 
 A fast, Windows-Explorer-style file manager for the Linux desktop, built for Rocky Linux 9
