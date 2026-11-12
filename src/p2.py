@@ -1032,7 +1032,7 @@ def show_about(parent):
                         comments="A fast, Windows-Explorer-style file manager for Linux.\nGTK 3 · PyGObject · GIO",
                         website="https://github.com/KCArrow/shotrover",
                         copyright="© 2026 Kalib Arrowsmith", license_type=Gtk.License.CUSTOM,
-                        license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals and noncommercial organizations. "
+                        license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals, freelancers and noncommercial organizations. "
                                 "Use by companies and studios requires a commercial licence — see COMMERCIAL-LICENSE.md "
                                 "at https://github.com/KCArrow/shotrover", wrap_license=True)
     logo = app_icon(128)

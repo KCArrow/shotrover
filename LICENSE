@@ -6,8 +6,22 @@ Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/shotrove
 Shotrover is licensed under the PolyForm Noncommercial License 1.0.0, reproduced
 below. In short: individuals, hobbyists, students, non-profits and public
 institutions may use, modify and share it free of charge, as long as this notice
-stays with it. Use by or for a company, studio or other commercial organization
-requires a commercial licence: see COMMERCIAL-LICENSE.md.
+stays with it. Freelancers working on their own account may also use it for
+paid work free of charge, under the additional permission below. Use by or for a
+company, studio or other commercial organization requires a commercial licence:
+see COMMERCIAL-LICENSE.md.
+
+Additional permission for freelancers
+
+In addition to the permitted purposes in the license below, the licensor permits
+an individual who works on their own account (a freelancer, a sole trader, or a
+company whose only worker is its owner) to use the software, and their own
+modified versions of it, for paid work, on computers that the individual owns or
+controls. This permission is personal to that individual. It does not cover
+anyone the individual employs or subcontracts work to, and it does not cover use
+on computers provided or managed by a company, studio or other organization:
+that is use by the organization, which requires a commercial licence. All other
+terms of the license below continue to apply.
 
 SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 

@@ -2,7 +2,7 @@
 # Shotrover — Copyright (c) 2026 Kalib Arrowsmith. https://github.com/KCArrow/shotrover
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/shotrover)
-# Free for individuals and noncommercial organizations; companies and studios need a commercial
+# Free for individuals, freelancers and noncommercial organizations; companies and studios need a commercial
 # licence — see COMMERCIAL-LICENSE.md in the repository.
 """
 Shotrover — a fast, Windows-Explorer-style file manager for Linux desktops.
@@ -6189,7 +6189,7 @@ def show_about(parent):
                         comments="A fast, Windows-Explorer-style file manager for Linux.\nGTK 3 · PyGObject · GIO",
                         website="https://github.com/KCArrow/shotrover",
                         copyright="© 2026 Kalib Arrowsmith", license_type=Gtk.License.CUSTOM,
-                        license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals and noncommercial organizations. "
+                        license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals, freelancers and noncommercial organizations. "
                                 "Use by companies and studios requires a commercial licence — see COMMERCIAL-LICENSE.md "
                                 "at https://github.com/KCArrow/shotrover", wrap_license=True)
     logo = app_icon(128)

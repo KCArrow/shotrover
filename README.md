@@ -338,16 +338,17 @@ More reading: [architecture](docs/ARCHITECTURE.md) · [testing](docs/TESTING.md)
 
 ## Support
 
-Shotrover is free for personal use and built in my spare time. If it saves you time, you can
+Shotrover is free for individuals and freelancers and built in my spare time. If it saves you time, you can
 support development on **[Ko-fi](https://ko-fi.com/kalibarrowsmith)**. Studios:
 **[buy a studio licence](https://ko-fi.com/s/6ee3ebf331)** (details in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)).
 
 ## Licence
 
-**Free for individuals and noncommercial organizations; studios and companies need a commercial licence.**
+**Free for individuals, freelancers and noncommercial organizations; studios and companies need a commercial licence.**
 
 Shotrover is source-available under the [PolyForm Noncommercial License 1.0.0](LICENSE). Personal,
 hobby, student, research and non-profit use is free, including modifying and sharing it, as long
-as the copyright notice stays with it. Using it at or for a company, studio or other commercial
-organization requires a commercial licence — see [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)
-for studio pricing and contact. Copyright © 2026 Kalib Arrowsmith.
+as the copyright notice stays with it. Freelancers working on their own account can also use it
+for paid work, free, on their own computers. Using it at a company, studio or other commercial
+organization, or on machines one provides, requires a commercial licence — see
+[COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) for studio pricing and contact. Copyright © 2026 Kalib Arrowsmith.

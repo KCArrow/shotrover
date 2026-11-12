@@ -35,7 +35,7 @@ git clone https://github.com/KCArrow/shotrover.git && cd shotrover
 
 ## Licensing of contributions
 
-Shotrover is licensed under the PolyForm Noncommercial License with commercial licences sold
+Shotrover is licensed under the PolyForm Noncommercial License (plus a permission that lets freelancers use it for paid work) with commercial licences sold
 separately (see COMMERCIAL-LICENSE.md). So that this remains possible, by submitting a pull
 request you agree that your contribution is provided under the same terms **and** that you grant
 the project author a perpetual, irrevocable, royalty-free licence to use, modify and relicense it,

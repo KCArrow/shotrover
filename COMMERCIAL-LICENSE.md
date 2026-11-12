@@ -3,8 +3,12 @@
 Shotrover is **free** for individuals, hobbyists, students, non-profits and public institutions
 under the [PolyForm Noncommercial License 1.0.0](LICENSE).
 
-Using Shotrover **at or for a company or studio** (including freelancers doing paid studio work)
-needs a studio licence.
+**Freelancers use it free too.** If you work on your own account (a freelancer, a sole trader, or a
+one-person company), you can use Shotrover for paid work on your own computers without buying
+anything. This is the additional permission at the top of the [LICENSE](LICENSE) file.
+
+**Companies and studios need a studio licence.** That covers anyone using Shotrover as an employee,
+and anyone, freelancers included, using it on computers the studio provides or manages.
 
 ## Buy a studio licence
 
@@ -17,7 +21,7 @@ Both licences are:
 
 - **Perpetual for Shotrover 1.x**, with every 1.x update included
 - one flat price per studio: no seat counting, no licence keys, no activation, works offline
-- valid for the studio's staff, and for contractors and freelancers while they work for the studio
+- valid for the studio's staff, and for contractors and freelancers working on the studio's machines
 - usable on any number of machines, at any of the studio's locations
 
 Read the full terms before buying:

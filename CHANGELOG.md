@@ -2,6 +2,7 @@
 
 ## 1.1.1 — 2026-11-12
 
+- Licence: freelancers working on their own account can now use Shotrover for paid work free of charge, on their own computers. Companies and studios still need a studio licence (see COMMERCIAL-LICENSE.md).
 - Shotrover icons: a built-in icon set for files, folders and drives (yellow folders, a picture per file type including 3D models, volumes and scene files), so the app looks the same on every desktop. Choose between it and your desktop's icon theme in Preferences → View.
 - Colours: follow the desktop, or force a light or dark look for Shotrover only (Preferences → View). It switches to the light or dark sibling of your GTK theme, and to Adwaita when the theme has none.
 - The first start asks once which icons and colours you want.

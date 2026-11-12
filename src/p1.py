@@ -2,7 +2,7 @@
 # Shotrover — Copyright (c) 2026 Kalib Arrowsmith. https://github.com/KCArrow/shotrover
 # SPDX-License-Identifier: PolyForm-Noncommercial-1.0.0
 # Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/shotrover)
-# Free for individuals and noncommercial organizations; companies and studios need a commercial
+# Free for individuals, freelancers and noncommercial organizations; companies and studios need a commercial
 # licence — see COMMERCIAL-LICENSE.md in the repository.
 """
 Shotrover — a fast, Windows-Explorer-style file manager for Linux desktops.
