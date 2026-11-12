@@ -96,5 +96,5 @@ update (fix: reboot).
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs `tests/headless.py --selftest` on Ubuntu with `python3-gi` and
-numpy, and byte-compiles `shotrover.py` with Python 3.9 (Rocky 9's version) to catch syntax that
+numpy, and byte-compiles `shotrover.py` with Python 3.9 (the oldest supported version, what RHEL 9-family distros ship) to catch syntax that
 is too new.

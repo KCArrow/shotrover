@@ -20,9 +20,6 @@ Both licences are:
 - valid for the studio's staff, and for contractors and freelancers while they work for the studio
 - usable on any number of machines, at any of the studio's locations
 
-Shotrover was called Kestrel before November 2026. A studio licence bought for Kestrel 1.x is a licence
-for Shotrover 1.x on the same terms; nothing needs to be exchanged.
-
 Read the full terms before buying:
 [25-user licence (PDF)](docs/licences/Shotrover-Studio-Licence-25.pdf) ·
 [Unlimited licence (PDF)](docs/licences/Shotrover-Studio-Licence-Unlimited.pdf)

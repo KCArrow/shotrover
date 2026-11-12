@@ -12,7 +12,7 @@ jobs:
           cp shotrover.py /tmp/committed.py
           ./build.sh
           cmp shotrover.py /tmp/committed.py || { echo "shotrover.py is out of date: run ./build.sh and commit"; exit 1; }
-      - name: Python 3.9 syntax check (Rocky 9 baseline)
+      - name: Python 3.9 syntax check (oldest supported Python)
         uses: actions/setup-python@v5
         with: { python-version: '3.9' }
       - run: python3.9 -m py_compile shotrover.py

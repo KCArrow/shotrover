@@ -8,8 +8,7 @@
 Shotrover — a fast, Windows-Explorer-style file manager for Linux desktops.
 
 Native GTK 3 application, no pip dependencies: needs only python3, python3-gobject
-and gtk3, which Rocky Linux 9 Workstation already has
-(otherwise: sudo dnf install python3-gobject gtk3).
+and gtk3, which most Linux desktops already have (package names per distro are in the README).
 
 Usage:  shotrover [folder ...]
         shotrover --demo [ShotroverDemo folder]     fictional machine for screenshots (docs/DEMO.md)
@@ -50,7 +49,7 @@ except ImportError:   # pragma: no cover
     np = None
 
 # GtkSourceView is optional: it gives the preview pane syntax colouring, line numbers and a proper code
-# editor. Rocky 9's GNOME ships it (gedit uses it); without it the preview falls back to a plain TextView.
+# editor. most GNOME desktops ship it; without it the preview falls back to a plain TextView.
 GtkSource = None
 for _ver in ("4", "3.0"):
     try:
@@ -291,7 +290,10 @@ def load_config() -> dict:
         return demo_config()
     cfg = json.loads(json.dumps(DEFAULT_CONFIG))
     old = os.path.join(GLib.get_user_config_dir(), "explorer-gtk", "config.json")
-    if not os.path.exists(CONFIG_FILE) and os.path.exists(old):
+    # not while an un-migrated Kestrel folder is waiting (the self-test skips that move): copying the legacy
+    # file now would create ~/.config/shotrover and block the real settings from ever carrying over
+    pending = os.path.isdir(os.path.join(GLib.get_user_config_dir(), "kestrel"))
+    if not os.path.exists(CONFIG_FILE) and os.path.exists(old) and not pending:
         try:
             os.makedirs(CONFIG_DIR, exist_ok=True)
             shutil.copy2(old, CONFIG_FILE)

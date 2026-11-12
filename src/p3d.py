@@ -570,7 +570,7 @@ def load_via_blender(path: str) -> Optional[Tuple[list, list, str]]:
     shared filesystem — important for the Flatpak build, whose sandbox has a private /tmp."""
     bl = _find_blender()
     if not bl:
-        _vfx_err("Blender: not found (sudo dnf install blender, or flatpak install flathub org.blender.Blender)")
+        _vfx_err(f"Blender: not found ({pkg_hint('blender', 'blender', 'blender', 'blender')}, or flatpak install flathub org.blender.Blender)")
         return None
     argv = list(bl[1])
     path = os.path.abspath(path)
@@ -600,7 +600,7 @@ def load_via_assimp(path: str) -> Optional[Tuple[list, list, str]]:
     global LAST_VFX_ERROR
     a = shutil.which("assimp")
     if not a:
-        _vfx_err("assimp: not found (sudo dnf install assimp)")
+        _vfx_err(f"assimp: not found ({pkg_hint('assimp', 'assimp-utils', 'assimp', 'assimp')})")
         return None
     out = os.path.join(tempfile.gettempdir(), f"shotrover-assimp-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.obj")
     try:
@@ -658,45 +658,117 @@ def _has_py_module(name: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------- install hints for whatever distro this is
+_PKG_INSTALL = {"dnf": "sudo dnf install -y", "apt": "sudo apt-get install -y",
+                "pacman": "sudo pacman -S --needed --noconfirm", "zypper": "sudo zypper install -y"}
+_PKG_FAMILIES = (("dnf", ("fedora", "rhel", "centos", "rocky", "almalinux")), ("apt", ("debian", "ubuntu")),
+                 ("pacman", ("arch", "cachyos", "manjaro", "endeavouros")), ("zypper", ("suse", "opensuse")))
+_PKG_MANAGER: Optional[str] = None
+
+
+def os_release() -> dict:
+    """/etc/os-release as a dict (empty when unreadable)."""
+    out = {}
+    try:
+        with open("/etc/os-release") as f:
+            for line in f:
+                k, sep, v = line.strip().partition("=")
+                if sep:
+                    out[k] = v.strip('"\'')
+    except OSError:
+        pass
+    return out
+
+
+def pkg_manager() -> str:
+    """'dnf', 'apt', 'pacman', 'zypper' or '' — from os-release first (a stray apt on Fedora shouldn't win), then PATH."""
+    global _PKG_MANAGER
+    if _PKG_MANAGER is None:
+        rel = os_release()
+        ids = (rel.get("ID", "") + " " + rel.get("ID_LIKE", "")).lower().split()
+        binary = {"dnf": "dnf", "apt": "apt-get", "pacman": "pacman", "zypper": "zypper"}
+        found = ""
+        for pm, family in _PKG_FAMILIES:
+            if any(i in family or i.startswith("opensuse") and pm == "zypper" for i in ids) and shutil.which(binary[pm]):
+                found = pm
+                break
+        if not found:
+            found = next((pm for pm, _fam in _PKG_FAMILIES if shutil.which(binary[pm])), "")
+        _PKG_MANAGER = found
+    return _PKG_MANAGER
+
+
+def pkg_install(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
+    """Shell command installing a package set on this distro. Names differ per family, so each is given
+    explicitly; a family left empty (or an unknown distro) gets a hint naming the Fedora/RHEL packages instead."""
+    pm = pkg_manager()
+    pkgs = {"dnf": dnf, "apt": apt, "pacman": pacman, "zypper": zypper}.get(pm, "")
+    if pkgs:
+        return f"{_PKG_INSTALL[pm]} {pkgs}"
+    return f"echo 'Install with your package manager (Fedora/RHEL names: {dnf})'; false"
+
+
+def pkg_hint(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
+    """Short form for error messages: 'sudo apt install python3-numpy' / 'install python3-numpy'."""
+    pm = pkg_manager()
+    pkgs = {"dnf": dnf, "apt": apt, "pacman": pacman, "zypper": zypper}.get(pm, "")
+    if not pkgs:
+        return f"install {dnf}"
+    return {"dnf": "sudo dnf install ", "apt": "sudo apt install ", "pacman": "sudo pacman -S ", "zypper": "sudo zypper install "}[pm] + pkgs
+
+
+def _rpmfusion_cmd() -> str:
+    fam, macro = ("fedora", "%fedora") if os_release().get("ID") == "fedora" else ("el", "%rhel")
+    return (f"sudo dnf install -y https://mirrors.rpmfusion.org/free/{fam}/rpmfusion-free-release-$(rpm -E {macro}).noarch.rpm"
+            " && sudo dnf install -y gstreamer1-plugins-ugly gstreamer1-libav")
+
+
 def optional_deps() -> List[dict]:
-    """Everything Shotrover can use but doesn't require, with a check and the Rocky 9 install command.
+    """Everything Shotrover can use but doesn't require, with a check and the install command for this distro.
     Each entry: {key, name, gives, found: str|None, cmd: str}. The commands are plain shell so the user sees
     exactly what runs (Preferences → Optional opens them in a terminal)."""
     bl = _find_blender()
     flatpak = shutil.which("flatpak")
+    pm = pkg_manager()
     deps = [
         dict(key="blender", name="Blender", gives="Alembic, USD, FBX, glTF, Collada, .blend model previews",
              found=bl[0] if bl else None,
              cmd=("flatpak install -y flathub org.blender.Blender" if flatpak else
-                  "sudo dnf install -y flatpak && flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
+                  pkg_install("flatpak", "flatpak", "flatpak", "flatpak") + " && flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
                   "flatpak install -y flathub org.blender.Blender")),
         dict(key="assimp", name="assimp", gives="FBX, DAE, glTF, 3DS, X3D model previews",
-             found=shutil.which("assimp"), cmd="sudo dnf install -y assimp"),
+             found=shutil.which("assimp"), cmd=pkg_install("assimp", "assimp-utils", "assimp", "assimp")),
         dict(key="oiiotool", name="OpenImageIO tools", gives="EXR (all codecs), DPX, TIFF, 16-bit IFF, .tx previews",
-             found=shutil.which("oiiotool"), cmd="sudo dnf install -y OpenImageIO-utils"),
+             found=shutil.which("oiiotool"), cmd=pkg_install("OpenImageIO-utils", "openimageio-tools", "openimageio", "OpenImageIO")),
         dict(key="magick", name="ImageMagick", gives="DDS, XCF, TGA, SVG and other image formats",
-             found=shutil.which("magick") or shutil.which("convert"), cmd="sudo dnf install -y ImageMagick"),
-        dict(key="ffmpeg", name="ffmpeg (free build)", gives="video frame thumbnails and media info",
-             found=shutil.which("ffmpeg"), cmd="sudo dnf install -y ffmpeg-free"),
+             found=shutil.which("magick") or shutil.which("convert"), cmd=pkg_install("ImageMagick", "imagemagick", "imagemagick", "ImageMagick")),
+        dict(key="ffmpeg", name="ffmpeg", gives="video frame thumbnails and media info",
+             found=shutil.which("ffmpeg"), cmd=pkg_install("ffmpeg-free", "ffmpeg", "ffmpeg", "ffmpeg")),
         dict(key="pdftoppm", name="poppler-utils", gives="PDF first-page previews",
-             found=shutil.which("pdftoppm"), cmd="sudo dnf install -y poppler-utils"),
+             found=shutil.which("pdftoppm"), cmd=pkg_install("poppler-utils", "poppler-utils", "poppler", "poppler-tools")),
         dict(key="gtksourceview", name="GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
-             found="loaded" if GtkSource is not None else None, cmd="sudo dnf install -y gtksourceview4"),
+             found="loaded" if GtkSource is not None else None, cmd=pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4")),
         dict(key="pyopengl", name="PyOpenGL (Python)", gives="hardware-accelerated 3D preview",
-             found="OpenGL importable" if HAVE_GL else None, cmd="python3 -m pip install --user PyOpenGL"),
+             found="OpenGL importable" if HAVE_GL else None, cmd=("python3 -m pip install --user PyOpenGL" if pm in ("dnf", "") else pkg_install("", "python3-opengl", "python-opengl", "python3-opengl"))),
         dict(key="h5py", name="h5py (Python)", gives="HDF5 (legacy) Alembic previews",
-             found="h5py importable" if _has_py_module("h5py") else None, cmd="python3 -m pip install --user h5py"),
+             found="h5py importable" if _has_py_module("h5py") else None, cmd=("python3 -m pip install --user h5py" if pm in ("dnf", "") else pkg_install("", "python3-h5py", "python-h5py", "python3-h5py"))),
         dict(key="usd", name="usd-core (Python)", gives="USD previews",
              found="pxr importable" if _has_py_module("pxr") else None, cmd="python3 -m pip install --user usd-core"),
         dict(key="gst", name="GStreamer (Python bindings)", gives="video / audio playback engine" + (f" — import failed: {GST_ERROR}" if GST_ERROR else ""),
              found=(Gst.version_string() if HAVE_GST else None),
-             cmd="sudo dnf install -y gstreamer1 gstreamer1-plugins-base python3-gobject"),
+             cmd=pkg_install("gstreamer1 gstreamer1-plugins-base python3-gobject",
+                             "gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base python3-gi",
+                             "gstreamer gst-plugins-base python-gobject",
+                             "gstreamer gstreamer-plugins-base typelib-1_0-Gst-1_0 python3-gobject")),
         dict(key="gstgtk", name="GStreamer GTK sink", gives="video player in the preview pane",
-             found="gtksink" if gst_sink_available(refresh=True) else None, cmd="sudo dnf install -y gstreamer1-plugins-good gstreamer1-plugins-good-gtk"),
-        dict(key="gstcodecs", name="GStreamer codecs (RPM Fusion)",
+             found="gtksink" if gst_sink_available(refresh=True) else None, cmd=pkg_install("gstreamer1-plugins-good gstreamer1-plugins-good-gtk", "gstreamer1.0-plugins-good gstreamer1.0-gtk3",
+                             "gst-plugins-good gst-plugin-gtk", "gstreamer-plugins-good gstreamer-plugins-good-gtk")),
+        dict(key="gstcodecs", name="GStreamer codecs" + (" (RPM Fusion)" if pm == "dnf" else ""),
              gives="H.264 / H.265 / ProRes / AAC playback" + (f" — {gst_h264_status()[1]}" if HAVE_GST and not gst_h264_status()[0] else ""),
              found=gst_h264_status()[0],
-             cmd="sudo dnf install -y https://mirrors.rpmfusion.org/free/el/rpmfusion-free-release-9.noarch.rpm && sudo dnf install -y gstreamer1-plugins-ugly gstreamer1-libav"),
+             cmd=(_rpmfusion_cmd() if pm == "dnf" else
+                  pkg_install("gstreamer1-plugins-ugly gstreamer1-libav", "gstreamer1.0-plugins-ugly gstreamer1.0-libav",
+                              "gst-plugins-ugly gst-libav", "gstreamer-plugins-ugly gstreamer-plugins-libav"))),
         dict(key="rv", name="OpenRV", gives="Open in RV (right-click, Ctrl+Shift+R)",
              found=find_rv(load_config().get("rv_path", "")), cmd="echo 'Download OpenRV from https://github.com/AcademySoftwareFoundation/OpenRV/releases and unpack it under /opt or ~/, then set the path in Preferences → Optional'"),
         dict(key="houdini", name="Houdini (hython / gconvert)", gives=".bgeo / .bgeo.sc / .geo and .vdb previews: meshes, particles, volumes; also reads Alembic",
@@ -707,11 +779,11 @@ def optional_deps() -> List[dict]:
              cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
         dict(key="openvdb", name="OpenVDB (Python)", gives=".vdb volume previews without Houdini",
              found="importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None,
-             cmd="sudo dnf install -y python3-openvdb || echo 'python3-openvdb is not packaged for this release; Houdini or Blender also preview VDBs'"),
+             cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb") + " || echo 'python3-openvdb is not packaged for this release; Houdini or Blender also preview VDBs'"),
         dict(key="7z", name="7-Zip (p7zip)", gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
-             found=sevenzip(), cmd="sudo dnf install -y p7zip p7zip-plugins"),
+             found=sevenzip(), cmd=pkg_install("p7zip p7zip-plugins", "7zip || sudo apt-get install -y p7zip-full", "7zip", "7zip")),
         dict(key="xdotool", name="xdotool", gives="fm-bench.py benchmark script only",
-             found=shutil.which("xdotool"), cmd="sudo dnf install -y xdotool"),
+             found=shutil.which("xdotool"), cmd=pkg_install("xdotool", "xdotool", "xdotool", "xdotool")),
     ]
     return deps
 
@@ -719,10 +791,14 @@ def optional_deps() -> List[dict]:
 def install_script(deps: List[dict]) -> str:
     """Shell script that installs the given deps one after another, continuing past failures and summarising."""
     lines = ["#!/bin/bash", "# Shotrover optional dependencies — review before running", "set -u",
-             "if ! rpm -q epel-release >/dev/null 2>&1; then echo '== enabling EPEL (needed for most of these)'; sudo dnf install -y epel-release; fi",
              "fail=()"]
+    pm = pkg_manager()
+    if pm == "dnf" and os_release().get("ID") != "fedora":      # RHEL family: most extras live in EPEL
+        lines.insert(3, "if ! rpm -q epel-release >/dev/null 2>&1; then echo '== enabling EPEL (needed for most of these)'; sudo dnf install -y epel-release; fi")
+    elif pm == "apt":
+        lines.insert(3, "sudo apt-get update")
     for d in deps:
-        lines += [f"echo; echo '== {d['name']}: {d['gives']}'", f"if ! ( {d['cmd']} ); then fail+=('{d['name']}'); fi"]
+        lines += ["echo; echo " + shlex.quote(f"== {d['name']}: {d['gives']}"), f"if ! ( {d['cmd']} ); then fail+=({shlex.quote(d['name'])}); fi"]
     lines += ["echo", "if [ ${#fail[@]} -eq 0 ]; then echo 'All done. Restart Shotrover to pick up the new tools.';",
               "else echo \"Failed: ${fail[*]}\"; fi"]
     return "\n".join(lines) + "\n"
@@ -943,7 +1019,7 @@ def load_via_houdini(path: str, max_points: int = 2_000_000, max_voxels: int = 1
         _vfx_err("Houdini: hython not found (PATH, $HFS or /opt/hfs*)")
         return None
     if np is None:
-        _vfx_err("Houdini caches need numpy (sudo dnf install python3-numpy)")
+        _vfx_err(f"Houdini caches need numpy ({pkg_hint('python3-numpy', 'python3-numpy', 'python-numpy', 'python3-numpy')})")
         return None
     import tempfile
     tmp = tempfile.mkdtemp(prefix="shotrover-hou-")

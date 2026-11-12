@@ -339,7 +339,7 @@ def load_houdini_cache(path: str, kind: str, max_faces: int, norm=None, max_voxe
     global LAST_VFX_ERROR
     LAST_VFX_ERROR = ""
     if np is None:
-        return {"error": "Houdini caches need numpy (sudo dnf install python3-numpy)."}
+        return {"error": f"Houdini caches need numpy ({pkg_hint('python3-numpy', 'python3-numpy', 'python-numpy', 'python3-numpy')})."}
     mv = max_voxels or VDB_MAX_VOXELS
     got = load_vdb_native(path, mv, norm[3] if norm is not None and len(norm) > 3 else None) if kind == "vdb" else None
     if got is None:
@@ -1688,7 +1688,7 @@ except Exception as _ex:                 # typelib missing (gstreamer1 / python3
 
 
 def gst_sink_available(refresh: bool = False) -> bool:
-    """gtksink lives in gstreamer1-plugins-good-gtk on Rocky; without it we can't embed video in the pane.
+    """gtksink is packaged separately on most distros (gstreamer1-plugins-good-gtk, gstreamer1.0-gtk3, gst-plugin-gtk); without it we can't embed video in the pane.
     refresh=True re-scans the plugin registry so a package installed while Shotrover runs is picked up."""
     if not HAVE_GST:
         return False
@@ -1737,8 +1737,8 @@ def gst_h264_status() -> Tuple[Optional[str], str]:
 class VideoPreview(Gtk.Box):
     """In-pane player for the preview area: playbin → gtksink widget, with play/pause, a seek bar, time
     readout and mute. Opens paused on the first frame (no autoplay noise), Space toggles playback.
-    Codec coverage is whatever GStreamer has: the free EPEL plugins do VP8/VP9/AV1/Theora/MJPEG; H.264/H.265
-    and ProRes need gstreamer1-plugins-ugly + gstreamer1-libav from RPM Fusion (see Dependencies)."""
+    Codec coverage is whatever GStreamer has: the free plugins every distro ships do VP8/VP9/AV1/Theora/MJPEG; H.264/H.265
+    and ProRes need the "ugly" and libav plugin sets (RPM Fusion on Fedora/RHEL; see Dependencies)."""
 
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)

@@ -25,8 +25,10 @@ Shotrover — portable build
   ./install.sh              optional: install to ~/.local/bin and the app menu
 
 Requires: python3 (3.9+), python3-gobject, gtk3.
-  Rocky/RHEL/Fedora:  sudo dnf install python3-gobject gtk3
+  Fedora/RHEL/Rocky:  sudo dnf install python3-gobject gtk3
   Debian/Ubuntu:      sudo apt install python3-gi gir1.2-gtk-3.0
+  Arch/CachyOS:       sudo pacman -S python-gobject gtk3
+  openSUSE:           sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0
 Optional extras (video, 3D formats, archives…): Preferences → Optional inside the app.
 TXT
 (cd dist && rm -f "$OUT.zip" && zip -qr "$OUT.zip" "$OUT")

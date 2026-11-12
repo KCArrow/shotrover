@@ -714,7 +714,7 @@
         box.pack_start(sw, True, True, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
-                        "EPEL is enabled automatically when needed. Restart Shotrover afterwards.</small>")
+                        "The commands match your distribution. Restart Shotrover afterwards.</small>")
         box.pack_start(note, False, False, 0)
         checks: List[Tuple[Gtk.CheckButton, dict]] = []
         d.show_all()
@@ -1385,7 +1385,7 @@ def probe_gl(args: List[str]) -> int:
             except (OSError, subprocess.TimeoutExpired) as ex:
                 print(f"{tool + ':':<14}{ex}")
         else:
-            print(f"{tool + ':':<14}not installed (sudo dnf install {'glx-utils' if tool == 'glxinfo' else 'egl-utils'})")
+            print(f"{tool + ':':<14}not installed ({pkg_hint('glx-utils', 'mesa-utils', 'mesa-utils', 'Mesa-demo-x') if tool == 'glxinfo' else pkg_hint('egl-utils', 'mesa-utils-bin', 'mesa-utils', 'Mesa-demo-egl')})")
     verdicts = []
     try:
         r = subprocess.run(["sh", "-c", "nvidia-smi --query-gpu=name,driver_version --format=csv,noheader 2>&1"], capture_output=True, text=True, timeout=10)
@@ -1457,7 +1457,7 @@ def probe_gl(args: List[str]) -> int:
     print("No backend could create a GL context. Common causes:")
     print("  - NVIDIA driver without GBM/EGL Wayland support: try the x11 result above, or update the driver")
     print("  - remote session / VNC / software-only GL: set LIBGL_ALWAYS_SOFTWARE=1 to use llvmpipe (slow but works)")
-    print("  - Flatpak/snap sandboxes or missing mesa-libGL / mesa-libEGL packages: sudo dnf install mesa-libGL mesa-libEGL mesa-dri-drivers")
+    print("  - Flatpak/snap sandboxes or missing Mesa GL / EGL libraries: " + pkg_hint("mesa-libGL mesa-libEGL mesa-dri-drivers", "libgl1 libegl1 libgl1-mesa-dri", "mesa", "Mesa-libGL1 Mesa-libEGL1 Mesa-dri"))
     return 1
 
 

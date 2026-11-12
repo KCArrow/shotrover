@@ -872,8 +872,8 @@ class OptionsDialog(Gtk.Dialog):
         row.pack_end(refresh, False, False, 0)
         outer.pack_start(row, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True)
-        note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password; "
-                        "EPEL is enabled automatically when needed. Restart Shotrover afterwards.</small>")
+        note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
+                        "The commands match your distribution. Restart Shotrover afterwards.</small>")
         outer.pack_start(note, False, False, 0)
         exp = Gtk.Expander(label="Diagnostics (renderer, importers, converters, interpreters)")
         self.diag_view = Gtk.TextView(editable=False, monospace=True)

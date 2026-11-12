@@ -2,12 +2,10 @@
 
 ## Unreleased
 
-- **Kestrel is now Shotrover.** Another file browser on GitHub already uses the name Kestrel, so the app,
-  the launcher (`shotrover`, `shotrover.py`), the app-menu entry and the repository are renamed. Settings,
-  pinned folders, folder drives, the file index (and its keyring key) and the scene-geometry cache move
-  over automatically the first time Shotrover starts (`~/.config/kestrel` → `~/.config/shotrover`, same for
-  `~/.cache`). `./install.sh` replaces an old Kestrel install, including the default-folder-handler
-  setting. Studio licences bought for Kestrel 1.x cover Shotrover 1.x.
+- Runs the same on any distro: Preferences → Optional and the install hints in error messages now give the
+  commands for your package manager (dnf, apt, pacman or zypper) instead of always dnf; EPEL / RPM Fusion are
+  only suggested on the RHEL family and Fedora. `install.sh` and the docs list every distro family
+- Fixed: the generated "install optional tools" script had a shell syntax error when Maya was in the list
 - Show any folder in This PC as a drive: right-click a folder → *Show in This PC as a drive*, give it a name;
   it gets a drive tile next to the drive it lives on (same disk section, same capacity bar) and an entry
   after that drive in the navigation pane. Rename or remove it from its tile (the folder itself is never touched); greyed out while the folder

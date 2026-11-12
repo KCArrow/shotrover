@@ -12,9 +12,11 @@ if [ "$1" = "--uninstall" ]; then
 fi
 if ! python3 -c "import gi; gi.require_version('Gtk','3.0'); from gi.repository import Gtk" 2>/dev/null; then
   echo "PyGObject/GTK 3 missing."
-  echo "  Rocky/RHEL/Fedora:  sudo dnf install python3-gobject gtk3"
+  echo "  Fedora/RHEL/Rocky:  sudo dnf install python3-gobject gtk3"
   echo "  Debian/Ubuntu:      sudo apt install python3-gi gir1.2-gtk-3.0"
   echo "  Arch/CachyOS:       sudo pacman -S python-gobject gtk3"
+  echo "  openSUSE:           sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0"
+  echo "  Anything else:      install your distro's PyGObject and GTK 3 packages"
   exit 1
 fi
 mkdir -p "$BIN" "$APPS" "$ICONS"

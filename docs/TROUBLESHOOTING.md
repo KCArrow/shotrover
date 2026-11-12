@@ -1,12 +1,17 @@
 # Troubleshooting
 
+Package names below are given for the Fedora / RHEL family (`dnf`) and Debian / Ubuntu (`apt`) where they
+differ; on Arch, openSUSE and others the names are similar. **Preferences → Optional** writes the exact
+install commands for your distro, so use that when in doubt.
+
 First stop: **Preferences → Optional** shows every optional tool, whether it was found, and a
 diagnostics report you can copy. **Tools → Performance report…** shows stalls and timings.
 
 ## It won't start
 
 - `ModuleNotFoundError: No module named 'gi'` → install PyGObject:
-  `sudo dnf install python3-gobject gtk3` (Rocky/Fedora), `sudo apt install python3-gi gir1.2-gtk-3.0` (Debian/Ubuntu).
+  `sudo dnf install python3-gobject gtk3` (Fedora/RHEL/Rocky), `sudo apt install python3-gi gir1.2-gtk-3.0`
+  (Debian/Ubuntu), `sudo pacman -S python-gobject gtk3` (Arch), or your distro's PyGObject and GTK 3 packages.
 - `Namespace Gtk not available` → the GTK 3 typelib is missing: `gtk3` / `gir1.2-gtk-3.0`.
 - Running `shotrover` prints "command not found" after `install.sh` → `~/.local/bin` is not on your
   PATH; log out/in or `export PATH="$HOME/.local/bin:$PATH"`.
@@ -15,12 +20,15 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 ## Video / audio preview
 
 - *GStreamer: missing* → install the GStreamer GI bindings and plugins:
-  `sudo dnf install python3-gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free`.
-  On Rocky 9, `python3-gstreamer1` is what makes `from gi.repository import Gst` work; the plugins
-  alone are not enough.
-- *gtksink missing* → it is in `gstreamer1-plugins-good` (Rocky) / `gstreamer1.0-gtk3` (Debian).
-- Movies show a black or static frame, audio only → no H.264 decoder. Enable RPM Fusion and install
-  `gstreamer1-libav` (or `gstreamer1-plugins-ugly` / `openh264`). The Optional tab lists the
+  `sudo dnf install python3-gstreamer1 gstreamer1-plugins-base gstreamer1-plugins-good gstreamer1-plugins-bad-free`
+  (Fedora/RHEL), `sudo apt install gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-good`
+  (Debian/Ubuntu), `sudo pacman -S gstreamer gst-plugins-base gst-plugins-good` (Arch).
+  The bindings are what make `from gi.repository import Gst` work; the plugins alone are not enough.
+- *gtksink missing* → it is in `gstreamer1-plugins-good-gtk` (Fedora/RHEL), `gstreamer1.0-gtk3` (Debian/Ubuntu),
+  `gst-plugin-gtk` (Arch).
+- Movies show a black or static frame, audio only → no H.264 decoder. On Fedora/RHEL enable RPM Fusion and
+  install `gstreamer1-libav` (or `gstreamer1-plugins-ugly` / `openh264`); on Debian/Ubuntu install
+  `gstreamer1.0-libav`; on Arch `gst-libav`. The Optional tab lists the
   decoders it found (`H264_DECODERS`).
 - The diagnostics report lists each GStreamer element by its actual element name; a package being
   installed but the element still "missing" usually means the plugin was built without that feature
@@ -45,7 +53,7 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
     `org.blender.Blender`) or `assimp`.
   - `.abc`: Ogawa files need Blender; **legacy HDF5 Alembic** (older Maya exports) can't be read by
     Blender or current Alembic builds — Shotrover reads them directly with `h5py`
-    (`sudo dnf install python3-h5py`). `shotrover --probe-model file.abc` tells you which kind it is.
+    (package `python3-h5py`; `python-h5py` on Arch). `shotrover --probe-model file.abc` tells you which kind it is.
   - `.usd .usda .usdc .usdz`: Blender, or `pip install --user usd-core`.
   - `.blend`: Blender.
 - Flatpak Blender not detected → `flatpak info org.blender.Blender` must succeed for your user.
@@ -201,8 +209,8 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
 
 ## Archives
 
-- `.7z / .rar / .cab / .iso` need 7-Zip: `sudo dnf install p7zip p7zip-plugins` (or `7zip` on
-  newer distros). The extract-on-double-click behaviour is in Preferences → General → Archives.
+- `.7z / .rar / .cab / .iso` need 7-Zip: install `7zip` (or `p7zip` with `p7zip-plugins` / `p7zip-full` on
+  older distros). The extract-on-double-click behaviour is in Preferences → General → Archives.
 
 ## Reporting a problem
 

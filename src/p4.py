@@ -876,7 +876,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if avail:
             combo.set_active(0)
         box.pack_start(combo, False, False, 0)
-        missing = [f"{desc.split(' — ')[0]} (dnf install {pkg})" for k, desc, pkg in FORMAT_CHOICES if not mkfs_available(k)]
+        missing = [f"{desc.split(' — ')[0]} (package: {pkg})" for k, desc, pkg in FORMAT_CHOICES if not mkfs_available(k)]
         if missing:
             ml = Gtk.Label(xalign=0, wrap=True)
             ml.set_markup("<small>Not available until installed: " + GLib.markup_escape_text(", ".join(missing)) + "</small>")

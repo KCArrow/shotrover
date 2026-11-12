@@ -3,8 +3,8 @@
 ## Setup
 
 ```bash
-git clone https://github.com/<you>/shotrover.git && cd shotrover
-sudo dnf install python3-gobject gtk3 python3-numpy      # or the apt/pacman equivalents in README
+git clone https://github.com/KCArrow/shotrover.git && cd shotrover
+# GTK 3 + PyGObject (+ numpy): see "Get started" in the README for your distro's command
 ./build.sh && python3 shotrover.py
 ```
 
@@ -27,7 +27,10 @@ sudo dnf install python3-gobject gtk3 python3-numpy      # or the apt/pacman equ
   app must degrade gracefully (a message in the preview pane, never an exception dialog).
 - Every GStreamer call goes through `VideoPreview._ops`. Every new preview type gets its row in
   `run_preview_bench` and a unit test in `run_selftest`.
-- UI strings are terse: labels, not explanations. Rocky 9 is the baseline: Python 3.9 syntax, GTK 3.24.
+- UI strings are terse: labels, not explanations. The baseline is Python 3.9 syntax and GTK 3.24, so it runs on
+  long-term-support distros as well as rolling ones.
+- Nothing distro-specific in the code: find tools on PATH or in their usual locations, and give install
+  hints through `pkg_install()` / `pkg_hint()` (p3d), which pick dnf, apt, pacman or zypper names.
 - Keep `--selftest` fast (< 10 s without `--bench`).
 
 ## Licensing of contributions

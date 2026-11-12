@@ -1,0 +1,9 @@
+# Blank issues stay enabled: the app's "Review & report…" button and the licence links open pre-filled issues.
+blank_issues_enabled: true
+contact_links:
+  - name: Troubleshooting guide
+    url: https://github.com/KCArrow/shotrover/blob/main/docs/TROUBLESHOOTING.md
+    about: No video, OpenGL errors, Blender not detected, slow network folders — check here first.
+  - name: Studio licence
+    url: https://github.com/KCArrow/shotrover/blob/main/COMMERCIAL-LICENSE.md
+    about: Using Shotrover at a studio or company.

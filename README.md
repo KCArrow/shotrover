@@ -1,32 +1,89 @@
+<div align="center">
+
+<img src="packaging/shotrover.svg" width="128" alt="Shotrover icon: a pup peeking out of a film-slate folder">
+
 # Shotrover
 
-<img src="packaging/shotrover.svg" width="112" align="right" alt="Shotrover icon: a pup peeking out of a film-slate folder">
+**A fast, friendly file manager for Linux that understands your work files.**
 
+Familiar Explorer-style layout, on any distro, with previews for the things other file managers
+show as a grey icon: EXR, PSD, video, 3D models, VDB smoke, Maya / Blender / Unreal / Unity scenes.
+
+[![CI](https://github.com/KCArrow/shotrover/actions/workflows/ci.yml/badge.svg)](https://github.com/KCArrow/shotrover/actions/workflows/ci.yml)
+![Linux](https://img.shields.io/badge/Linux-any%20distro%20with%20GTK%203-2ea44f?logo=linux&logoColor=white)
+![Python 3.9+](https://img.shields.io/badge/Python-3.9%2B-3776AB?logo=python&logoColor=white)
+[![Free for personal use](https://img.shields.io/badge/licence-free%20for%20personal%20use-blue)](#licence)
 [![Support on Ko-fi](https://img.shields.io/badge/Ko--fi-support%20Shotrover-FF5E5B?logo=ko-fi&logoColor=white)](https://ko-fi.com/kalibarrowsmith)
 
-A fast, Windows-Explorer-style file manager for the Linux desktop, built for Rocky Linux 9
-and VFX/animation workstations.
+[Get started](#get-started) · [What it does](#what-it-does) · [Optional extras](#optional-extras) · [Help](#help-and-troubleshooting) · [Report a problem](https://github.com/KCArrow/shotrover/issues/new/choose)
 
-Single-file GTK 3 application (`shotrover.py`, ~21k lines), **no pip dependencies**: it needs only
-`python3`, `python3-gobject` and `gtk3`, which every GNOME install already has. Everything else
-(video, 3D formats, EXR tools, archives, OpenRV…) is optional and detected at runtime.
-
-```bash
-sudo dnf install python3-gobject gtk3     # Rocky / RHEL / Fedora (usually already present)
-./install.sh                              # ~/.local/bin/shotrover + app-menu entry
-shotrover ~/Pictures
-```
-
-Or unzip the portable build and run `./shotrover` — nothing is installed (see [Portable build](#portable-build)).
-
-## Screenshots
+</div>
 
 <!-- Stills taken in demo mode (docs/DEMO.md) — nothing here is a real machine. -->
 ![Shotrover main window](docs/screenshots/hero.png)
 
+---
+
+## Get started
+
+Shotrover is one Python file with **no pip dependencies**. It needs Python 3.9 or newer and GTK 3,
+which most Linux desktops already have installed.
+
+**1. Make sure GTK's Python bindings are there** (skip this if you use GNOME, it is almost certainly done):
+
+| Distro family | Command |
+|---|---|
+| Fedora, RHEL, Rocky, AlmaLinux | `sudo dnf install python3-gobject gtk3` |
+| Debian, Ubuntu, Mint, Pop!_OS | `sudo apt install python3-gi gir1.2-gtk-3.0` |
+| Arch, CachyOS, Manjaro, EndeavourOS | `sudo pacman -S python-gobject gtk3` |
+| openSUSE | `sudo zypper install python3-gobject python3-gobject-Gdk typelib-1_0-Gtk-3_0` |
+
+On anything else, install the packages your distro calls *PyGObject* and *GTK 3*.
+
+**2. Install Shotrover** (no root needed, everything goes in your home folder):
+
+```bash
+git clone https://github.com/KCArrow/shotrover.git
+cd shotrover
+./install.sh
+```
+
+**3. Run it** from your app menu, or from a terminal:
+
+```bash
+shotrover ~/Pictures
+```
+
+<details>
+<summary><b>Other ways to run it</b></summary>
+
+- **Portable, nothing installed.** Download `shotrover-<version>-portable.zip` from the
+  [Releases page](https://github.com/KCArrow/shotrover/releases), unzip it anywhere and run `./shotrover`.
+  More in [Portable build](#portable-build).
+- **Straight from the source folder:** `python3 shotrover.py [folder…]`
+- **Make it your default file manager:** `xdg-mime default shotrover.desktop inode/directory`
+- **Uninstall:** `./install.sh --uninstall` (your settings in `~/.config/shotrover` are kept)
+
+</details>
+
+### Which distros does it run on?
+
+Any Linux desktop with GTK 3 and Python 3.9+, on X11 or Wayland, with any desktop environment.
+It is developed day to day on Rocky Linux 9, the automated tests run on Ubuntu, and it is also used
+on Fedora and Arch / CachyOS. Nothing in it is tied to one distribution: optional tools are found at
+runtime wherever your distro puts them, and the in-app installer writes commands for `dnf`, `apt`,
+`pacman` or `zypper` depending on what you have.
+
+If something doesn't work on your distro, that is a bug.
+[Tell me about it](https://github.com/KCArrow/shotrover/issues/new/choose) and include the distro name.
+
+---
+
+## A quick look
+
 ![A 200-frame VDB campfire playing as smoke in the preview pane](docs/screenshots/vdb_viewer.gif)
 
-*VDB smoke in the preview pane: select the frames, press **Preview as sequence**, scrub or play — no Houdini needed.*
+*VDB smoke in the preview pane: select the frames, press **Preview as sequence**, scrub or play. No Houdini needed.*
 
 | This PC | 3D preview | Video preview |
 |---|---|---|
@@ -38,201 +95,140 @@ Or unzip the portable build and run `./shotrover` — nothing is installed (see 
 
 ---
 
-## Contents
+## What it does
 
-- [Features](#features)
-- [Requirements](#requirements)
-- [Install](#install)
-- [Portable build](#portable-build)
-- [Optional tools](#optional-tools)
-- [Keyboard shortcuts](#keyboard-shortcuts)
-- [Command-line flags](#command-line-flags)
-- [Configuration and data locations](#configuration-and-data-locations)
-- [Building from source](#building-from-source)
-- [Tests and diagnostics](#tests-and-diagnostics)
-- [Troubleshooting](#troubleshooting)
-- [Documentation](#documentation)
-- [License](#license)
+### 🗂️ Everyday file management
 
----
+- **A layout you already know.** Menu bar, command bar, breadcrumb address bar you can type into
+  (with Tab completion), tabs you can drag out into their own window, split view, and a navigation
+  pane with Quick access, This PC and the Recycle Bin.
+- **Eight views.** Extra large icons down to small, List, Details, Tiles and Content. Sort and group
+  by any column. A folder with 100,000 files scrolls as smoothly as one with 100.
+- **File operations that stay out of your way.** Copy, move, delete and rename run in the
+  background with speed, time remaining, pause and cancel. Undo with Ctrl+Z. A real Recycle Bin.
+  Copy, paste and drag-and-drop work with other apps.
+- **Batch rename** (Ctrl+F2) with patterns, numbering, regex and frame-number offsets
+  (`shot.1001.exr` +60 → `shot.1061.exr`, padding kept), and it can move the renamed files into
+  another folder in the same step.
+- **Archives.** Zip and tar open and extract natively; `.7z`, `.rar`, `.cab`, `.iso` and more work
+  once 7-Zip is installed.
+- **Find large files** (Tools menu). Scans a folder or a whole drive and shows what is taking the
+  space. Frame sequences count as one item (`render.1001–1240.exr`), system files are flagged so
+  you don't remove them by accident, and whatever you tick goes to the Recycle Bin.
 
-## Features
+### 👀 Previews for nearly everything
 
-**Explorer layout.** Menu bar (File / Home / Share / View / Tools / Help), Windows 11-style command
-bar, breadcrumb address bar with path typing and Tab completion, tabs (drag a tab out into its own
-window, drag it back), split view (two folders side by side, Ctrl+Shift+S), navigation pane (Quick
-access with pinned/frequent/recent, This PC, Recycle Bin), details pane, preview pane.
+- **Images:** the usual formats plus **EXR**, **Radiance HDR**, **Maya IFF** and **Photoshop
+  PSD/PSB**. Animated GIF and WebP play in place.
+- **Video and audio** playback, right in the preview pane.
+- **3D models:** OBJ, STL, PLY, FBX, glTF, Alembic, USD and `.blend`, with orbit, zoom, wireframe
+  and smooth shading. Works without a GPU (five million triangles in under a second) and uses
+  OpenGL when available.
+- **Text and code** with syntax highlighting and a quick inline editor, **PDF**, folder contents
+  with sizes, archive listings and media info.
 
-**Views.** Extra large → small icons, List, Details, Tiles, Content; sort and group by any column;
-column chooser; item check boxes; file name extensions; hidden items. Details view uses fixed-height
-rows so 100k-file folders scroll like 100-file ones.
+### 🎬 Made for VFX, animation and game work
 
-**File operations.** Background copy / move / delete / rename / new with a progress dialog (bytes,
-speed, remaining, pause, cancel) and Replace / Skip / Keep-both conflicts. Clipboard and
-drag-and-drop interoperate with Nautilus and other GTK apps. Undo (Ctrl+Z). Real freedesktop
-Recycle Bin. Folders auto-refresh when changed on disk. Batch rename (Ctrl+F2) with patterns,
-numbering, regex, frame-number offsets (`shot.1001.exr` +60 → `shot.1061.exr`, padding kept) and
-repathing (move the renamed files into another folder, e.g. `../v005` or `/mnt/show/{parent}`). SHA-256 to clipboard. Run scripts in a terminal.
-**Find large files** (Tools menu) scans a folder or a whole drive in the background and lists what takes the
-space — big files, and frame sequences (`render.1001–1240.exr`) as one item with their total — with type and
-age filters and an optional duplicate check; tick what you don't need and it goes to the Recycle Bin.
+- **Houdini caches and VDBs.** `.vdb` volumes render as smoke, read by Shotrover itself, so no
+  Houdini licence is needed. `.bgeo` meshes and particles work through Houdini when it is
+  installed. Select the frames of a cache to get a time slider with playback.
+- **Scene breakdowns.** See what is inside a scene before opening it: Unreal (`.umap`, `.uasset`,
+  `.uproject`), Unity (`.unity`, `.prefab`, `.unitypackage`), Maya (`.ma`, `.mb`) and Blender
+  (`.blend`) show an outliner, materials, render settings and **every referenced file, flagged
+  when it is missing**. None of those apps need to be installed. Pick an object to see its
+  geometry, a material to see it on a material ball, or a texture to see the image.
+- **Shaders, materials and lights.** MaterialX, OSL, Unity materials and Shader Graph show on a
+  material ball. GLSL fragment shaders (Shadertoy style) **run live**. IES light profiles show the
+  light pattern on a wall with beam angles, lumens and wattage.
+- **OpenRV.** Right-click → *Open in RV*, or Ctrl+Shift+R, when RV is installed.
 
-**Archives.** Zip / tar.gz / tar.xz / tar natively; `.7z`, `.rar`, `.cab`, `.iso` and more through
-7-Zip when installed. Double-clicking an archive extracts it (configurable); Extract here / Extract
-to…; progress with pause.
+### 💾 Drives and storage
 
-**Preview pane.** Images (GdkPixbuf formats plus built-in decoders for **EXR**, **Radiance HDR**,
-**Maya IFF**, **Photoshop PSD/PSB**; **animated GIF / WebP** play, click to pause), text with syntax highlighting and an inline quick editor,
-PDF, folder contents with sizes, archive listings, media info, **video and audio playback**
-(GStreamer), and a **3D model previewer** for OBJ, STL, PLY, FBX, glTF, Alembic (`.abc`, both Ogawa
-and legacy HDF5), USD and `.blend` — software rasteriser (multi-process, 5 M-triangle meshes in under a
-second) or OpenGL. Smooth shading, orbit/zoom, wireframe, "all triangles" override. Every preview switch
-crossfades in ⅛ s; preview and details panes are resizable and remembered.
+- **USB drives appear the moment you plug them in,** with Eject and Format built in and no root
+  prompt.
+- **This PC groups mounts by physical disk,** so you can see which disk holds what.
+- **Show any folder as a drive.** Right-click → *Show in This PC as a drive*. Handy for a project
+  share or a render volume.
+- **Optional encrypted file index** to speed up browsing and search on slow or network storage.
+  The disk is always the truth; the index only gives a head start.
 
-**Houdini caches and VDBs.** `.bgeo` / `.bgeo.sc` / `.geo` meshes and particles (coloured by `Cd`, via
-Houdini) and `.vdb` volumes rendered as **smoke** (level sets as surfaces). VDBs are read by Shotrover itself —
-Houdini, EmberGen and Blender files, blosc/zip, half-float — so no Houdini is needed; with OpenGL, particles
-and smoke are drawn on the GPU. Select the frames of a cache and press **Preview as sequence** for a time
-slider with playback (Space, ← →, adjustable fps; pauses when the window loses focus).
+### ⚡ Fast and honest
 
-**Scene breakdowns.** See what's in a scene before you open it: Unreal (`.umap`, `.uasset`, `.uproject`),
-Unity (`.unity`, `.prefab`, `.unitypackage`), Maya (`.ma`, `.mb`) and Blender (`.blend`) show an outliner,
-actors / components / materials, render settings and **every referenced file with its full path, flagged
-when it's missing** — read directly from the file, no Unreal, Unity, Maya or Blender needed. Filter, copy as
-text, double-click a reference to jump to it. Blender and Unreal files show their saved thumbnail, and
-picking a material in a Maya or Blender breakdown renders it on a material ball. Picking an **object** shows its
-geometry in a small 3D view (Blender 2.7x–5.x with collection instances; Maya ASCII natively, including instances
-and meshes built from a primitive's history; Maya binary too, and Maya's own evaluation of rigs and modelling history when Maya is installed),
-and picking a **texture** shows the image (UDIMs open their first tile).
-
-**Shaders, materials and lights.** MaterialX (`.mtlx`), OSL (`.osl`, `.oso`), Unity materials (`.mat`),
-ShaderLab (`.shader`) and Shader Graph show their inputs and textures on a **material ball** (GGX, clearcoat,
-normal maps, transmission, UDIM textures). GLSL fragment shaders — Shadertoy and glslsandbox / Book of
-Shaders style — **run live** on the GPU, with compile errors on the right line; GLSL / HLSL sources get a
-breakdown (uniforms, inputs, functions, includes) and a highlighted **Code** view. **IES light profiles**
-show the light pattern on a wall and a polar candela diagram with beam / field angles, lumens and wattage.
-
-**Removable drives.** Live detection (no restart), USB badge on removable media, Eject and Format
-(UDisks2, no root prompt in the app), physical-disk grouping on This PC so you can see which
-disk holds which mounts. Other OS partitions on a dual-boot machine stay hidden until explicitly
-mounted.
-Any folder can be shown in This PC as a drive (right-click → *Show in This PC as a drive*), with its own
-name, listed right after the drive it lives on with that disk's capacity bar — handy for a project share or a render volume.
-
-**Optional encrypted file index.** Speeds up navigation and search on slow/network storage. The
-disk is always the truth — the index only gives a head start, every folder is re-read as you
-visit it, and search results are verified. Stored AES-256 encrypted with HMAC under
-`~/.cache/shotrover`, key in the keyring (libsecret) or a 0600 key file.
-
-**Snappy by design.** The GTK thread never touches the disk or network: listings, stats,
-thumbnails, previews, searches and sizes run in threads or worker processes. Optional CPU parking
-pins the interface to its own cores so a heavy preview can't make the window stutter. A stall
-watchdog and freeze dumps are built in (see [Tests and diagnostics](#tests-and-diagnostics)).
-
-**Crash and error reports.** Unhandled errors, hard crashes (segfaults in a C library) and
-interface freezes are caught and written to a report. Shotrover shows a bar with *Review & report…*;
-you see the full report, can edit it, and open it as a pre-filled GitHub issue with one click —
-nothing is ever sent automatically, and your home folder and user name are scrubbed first.
-**Help → Report a problem…** builds a report on demand.
-
-**OpenRV integration (optional).** Right-click → *Open in RV* or **Ctrl+Shift+R** sends images,
-sequences and movies to RV when it's detected.
+- **The window never waits on the disk.** Listings, thumbnails, previews, searches and sizes all
+  run in the background, so a slow network share can't freeze the interface.
+- **Nothing is sent anywhere without you.** If something crashes, Shotrover writes a report and
+  offers *Review & report…*. You read it, edit it, and open it as a GitHub issue yourself. Your
+  user name and home folder are scrubbed first.
 
 ---
 
-## Requirements
+## Optional extras
 
-| | |
-|---|---|
-| OS | Linux with GTK 3 (developed and tested on Rocky Linux 9; also runs on Fedora, Ubuntu, Arch/CachyOS) |
-| Python | 3.9 or newer (Rocky 9 ships 3.9; 3.11/3.12 also work) |
-| Required packages | `python3-gobject` (PyGObject), `gtk3` |
-| Optional | `python3-numpy` (much faster 3D/EXR previews), see [Optional tools](#optional-tools) |
+Everything beyond the basics is optional. Shotrover finds what you have at runtime and tells you in
+the preview pane what would enable a format you don't have support for yet.
 
-```bash
-# Rocky / RHEL / Fedora
-sudo dnf install python3-gobject gtk3 python3-numpy
-# Debian / Ubuntu
-sudo apt install python3-gi gir1.2-gtk-3.0 python3-numpy
-# Arch / CachyOS
-sudo pacman -S python-gobject gtk3 python-numpy
-```
+**The easy way:** open **Preferences → Optional** in the app. It lists every optional tool, shows
+which ones were found, and writes an install script with the right commands for your distro.
 
----
+<details>
+<summary><b>Full list of optional tools</b></summary>
 
-## Install
+Package names vary a little between distros; the ones below are what to search for.
 
-```bash
-git clone https://github.com/<you>/shotrover.git
-cd shotrover
-./install.sh
-```
+| To get | You need | Look for |
+|---|---|---|
+| Much faster 3D and EXR previews | numpy | `python3-numpy` (Arch: `python-numpy`) |
+| Video and audio preview | GStreamer with the GTK sink and codecs | GStreamer "good", "bad", "ugly" and "libav" plugin sets, plus the GTK 3 sink. On Fedora / RHEL the H.264 codecs come from RPM Fusion |
+| FBX, glTF, DAE and other model formats | Blender (any install, including Flatpak) or `assimp` | `flatpak install flathub org.blender.Blender` |
+| Alembic `.abc`, USD, `.blend` | Blender | as above; `pip install usd-core` also works for USD |
+| FBX / Alembic / USD without Blender | Maya (`mayapy`) | found under `/usr/autodesk/maya*` or `$MAYA_LOCATION` |
+| Houdini caches `.bgeo` `.bgeo.sc` `.geo` | Houdini (`hython`, else `gconvert`) | found under `/opt/hfs*` or `$HFS` |
+| `.vdb` volumes | built in (needs numpy) | `python3-blosc` or Houdini make compressed VDBs decode faster |
+| Legacy HDF5 Alembic | h5py | `python3-h5py` |
+| OpenGL preview, live GLSL shaders | PyOpenGL | `python3-pyopengl` / `python3-opengl` |
+| EXR / DPX / TX conversions | OpenImageIO `oiiotool`, ImageMagick | `OpenImageIO-utils` / `openimageio-tools`, `ImageMagick` |
+| Movie thumbnails, extra image formats | `ffmpeg` | `ffmpeg` |
+| PDF preview | `pdftoppm` | `poppler-utils` |
+| Syntax highlighting in the editor | GtkSourceView 4 | `gtksourceview4` |
+| `.7z .rar .cab .iso …` | 7-Zip | `7zip` or `p7zip` |
+| Open in RV | OpenRV on your PATH, or picked in Preferences | [OpenRV on GitHub](https://github.com/AcademySoftwareFoundation/OpenRV) |
+| File-index key in your keyring | libsecret | `libsecret-tools` (otherwise a private key file is used) |
+| Eject / Format | UDisks2 | `udisks2` (standard on most desktops) |
 
-`install.sh` copies `shotrover.py` to `~/.local/bin/shotrover` and adds a desktop entry. No root needed.
-
-- Make it the default folder handler: `xdg-mime default shotrover.desktop inode/directory`
-- Uninstall: `./install.sh --uninstall` (settings in `~/.config/shotrover` are kept)
-- Run without installing: `python3 shotrover.py [folder…]`
+</details>
 
 ---
 
 ## Portable build
 
-Download `shotrover-<version>-portable.zip` from the Releases page (or build it with
-`./make-portable.sh`, output in `dist/`). Unzip anywhere:
+Download `shotrover-<version>-portable.zip` from the
+[Releases page](https://github.com/KCArrow/shotrover/releases), or build it yourself with
+`./make-portable.sh` (output in `dist/`). Unzip anywhere:
 
 ```
 shotrover-1.1-portable/
-├── shotrover            # launcher: ./shotrover [folder]
-├── shotrover.py         # the application
+├── shotrover          # launcher: ./shotrover [folder]
+├── shotrover.py       # the application
 ├── install.sh         # optional: install into ~/.local/bin later
 ├── PORTABLE.txt
-├── README.md  LICENSE  docs/  packaging/
+└── README.md  LICENSE  docs/  packaging/
 ```
 
 `./shotrover` runs it in place. Create a `config/` folder next to the launcher to make it fully
-self-contained (settings, cache and the file index are then kept there instead of
-`~/.config` / `~/.cache`). The host still needs `python3`, `python3-gobject` and `gtk3`; that is
-the only way to ship a GTK app without bundling a desktop stack.
+self-contained: settings, cache and the file index then live there instead of `~/.config` and
+`~/.cache`, which is useful on a USB stick. The machine you run it on still needs Python 3 and
+GTK 3 (step 1 of [Get started](#get-started)).
 
 ---
 
-## Optional tools
+## Reference
 
-Open **Preferences → Optional** inside Shotrover. It lists every optional dependency, shows which are
-found, lets you toggle OpenGL / OpenRV / CPU parking / indexing, and offers a generated install
-script for whatever is missing.
-
-| Capability | Needs | Rocky 9 package / source |
-|---|---|---|
-| Video & audio preview | GStreamer + gtksink + codecs | `gstreamer1-plugins-good gstreamer1-plugins-bad-free gstreamer1-plugins-ugly-free gstreamer1-libav` (RPM Fusion for H.264) |
-| Fast 3D / EXR | numpy | `python3-numpy` |
-| FBX, glTF, DAE, PLY… | Blender (any install incl. Flatpak `org.blender.Blender`) or `assimp` | `flatpak install org.blender.Blender` / `assimp` |
-| Alembic `.abc` (Ogawa), USD, `.blend` | Blender | as above; `pip install usd-core` also works for USD |
-| FBX / Alembic / USD without Blender | Maya (`mayapy`) | found under `/usr/autodesk/maya*` or `$MAYA_LOCATION` |
-| Houdini caches: `.bgeo` `.bgeo.sc` `.geo` | Houdini (`hython`, else `gconvert`) | found under `/opt/hfs*` or `$HFS` |
-| `.vdb` volumes | built in (needs numpy) | `python3-blosc` or Houdini make blosc-compressed VDBs decode faster |
-| Alembic `.abc` (legacy HDF5) | h5py | `python3-h5py` |
-| OpenGL preview, live GLSL shaders | PyOpenGL | `python3-pyopengl` |
-| EXR/DPX/TX conversions | OpenImageIO `oiiotool`, ImageMagick | `OpenImageIO-utils ImageMagick` |
-| Thumbnails for movies, extra image formats | `ffmpeg` | RPM Fusion |
-| PDF preview | `pdftoppm` | `poppler-utils` |
-| Text editor highlighting | GtkSourceView 4 | `gtksourceview4` |
-| `.7z .rar .cab .iso …` | 7-Zip | `p7zip p7zip-plugins` or `7zip` |
-| Open in RV | OpenRV on PATH or picked in Preferences | https://github.com/AcademySoftwareFoundation/OpenRV |
-| Index key in keyring | libsecret | `libsecret-tools` (otherwise a 0600 key file is used) |
-| Eject / Format | UDisks2 | `udisks2` (standard on GNOME) |
-
-Nothing here is required; Shotrover degrades gracefully and tells you in the preview pane what
-would enable a given format.
-
----
-
-## Keyboard shortcuts
+<details>
+<summary><b>Keyboard shortcuts</b></summary>
 
 Press **F1** in the app for the full list.
 
-| | |
+| Keys | Action |
 |---|---|
 | Enter / Backspace / Alt+← → ↑ | open / back / forward / up |
 | Ctrl+L, F4, Alt+D | edit path |
@@ -254,19 +250,20 @@ Press **F1** in the app for the full list.
 | Space, ← → (3D preview) | play / pause, step a cache sequence |
 | F5, F11, Ctrl+Q | refresh, full screen, quit |
 
----
+</details>
 
-## Command-line flags
+<details>
+<summary><b>Command-line flags</b></summary>
 
 ```
 shotrover [folder …]                 open one tab per folder (default: home)
-shotrover --demo [ShotroverDemo]       fictional machine for screenshots/demos — see docs/DEMO.md
+shotrover --demo [ShotroverDemo]     fictional machine for screenshots/demos — see docs/DEMO.md
 shotrover --selftest [--bench]       unit/benchmark tests of the non-GUI machinery
 shotrover --preview-bench [--quick] [--keep]
-                                   synthesize large files of every preview type, time each decoder
+                                     synthesize large files of every preview type, time each decoder
 shotrover --stress [folder] [--cycles N]
-                                   drive the real window through the folder: navigate, select, preview,
-                                   rename, zip… and report stalls
+                                     drive the real window through the folder: navigate, select, preview,
+                                     rename, zip… and report stalls
 shotrover --nav-bench folder         open every subfolder, report listing/paint times and stalls
 shotrover --profile                  run normally with cProfile on the UI thread (Tools → Performance report)
 shotrover --probe-gl [--no-save]     test OpenGL context creation under each GDK backend
@@ -274,43 +271,38 @@ shotrover --probe-model file         run the 3D import chain on one file and rep
 shotrover --dcc-test [files…]        generate test caches with Houdini / Maya and read them back through every route
 ```
 
----
+</details>
 
-## Configuration and data locations
+<details>
+<summary><b>Where settings and data live</b></summary>
 
 | Path | Contents |
 |---|---|
 | `~/.config/shotrover/config.json` | all settings (readable JSON; delete to reset) |
 | `~/.config/shotrover/index.key` | file-index key (only when no keyring is available; mode 0600) |
 | `~/.cache/shotrover/index.enc` | encrypted file index |
-| `~/.cache/shotrover/freeze-*.txt` | thread dumps written automatically if the UI freezes > 4 s |
+| `~/.cache/shotrover/freeze-*.txt` | thread dumps written automatically if the UI freezes for more than 4 s |
 | `~/.cache/shotrover/reports/` | error / crash reports (unsent ones are offered at the next start; `archive/` keeps the last 40) |
 | `~/.cache/shotrover/gl-probe.txt` | last `--probe-gl` result |
 
 A legacy `~/.config/explorer-gtk/config.json` is migrated automatically on first start.
 
----
+</details>
 
-## Building from source
+<details>
+<summary><b>Building from source and running the tests</b></summary>
 
-`shotrover.py` is generated by concatenating the parts in `src/` (kept separate only to keep
-editing manageable; they share one module namespace):
+`shotrover.py` is generated by concatenating the parts in `src/` (kept separate only to make
+editing manageable; they share one module namespace). Edit the parts, never `shotrover.py` directly.
 
 ```bash
 ./build.sh            # src/p*.py → shotrover.py, then py_compile as a syntax check
 ./make-portable.sh    # → dist/shotrover-<version>-portable.zip
 ```
 
-Part order and contents are documented in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
-Edit the parts, never `shotrover.py` directly.
-
----
-
-## Tests and diagnostics
-
 ```bash
 python3 shotrover.py --selftest             # on a desktop with GTK installed
-python3 tests/headless.py --selftest      # no display, no GTK: real GLib/Gio, widgets stubbed (CI)
+python3 tests/headless.py --selftest        # no display, no GTK: real GLib/Gio, widgets stubbed (CI)
 python3 shotrover.py --preview-bench        # decoder timings on synthetic large files
 python3 shotrover.py --nav-bench /mnt/nas   # navigation latency on a slow share
 python3 shotrover.py --stress ~/Projects    # robustness: random realistic use with stall reporting
@@ -318,28 +310,26 @@ python3 shotrover.py --stress ~/Projects    # robustness: random realistic use w
 
 While running, **Tools → Performance report…** shows the stall watchdog's log (any main-loop stall
 over 120 ms with the Python stack it was stuck in), and a freeze longer than 4 s writes every
-thread's stack to `~/.cache/shotrover/freeze-*.txt`. See [docs/TESTING.md](docs/TESTING.md).
+thread's stack to `~/.cache/shotrover/freeze-*.txt`.
+
+Part order and contents are in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md); every test flag is
+explained in [docs/TESTING.md](docs/TESTING.md).
+
+</details>
 
 ---
 
-## Troubleshooting
+## Help and troubleshooting
 
-See [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) for: GStreamer "missing" / no video,
-OpenGL context failures (including the NVIDIA driver/kernel mismatch after an update), Flatpak
-Blender not detected, Alembic files that no importer reads, slow network folders, index questions,
-and how to report a freeze.
+- **Something not working?** [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md) covers the common
+  ones: it won't start, no video, OpenGL failures, Blender not detected, slow network folders.
+- **Found a bug or have an idea?** Use **Help → Report a problem…** in the app, or
+  [open an issue](https://github.com/KCArrow/shotrover/issues/new/choose). Reports from distros
+  other than mine are especially welcome.
+- **Want to contribute?** Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
----
-
-## Documentation
-
-- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) — source layout, threading model, preview pipeline, index design
-- [docs/TESTING.md](docs/TESTING.md) — every test/bench flag, what it measures, how to read the output
-- [docs/TROUBLESHOOTING.md](docs/TROUBLESHOOTING.md)
-- [docs/DEMO.md](docs/DEMO.md) — `--demo` mode and the ShotroverDemo folder for screenshots
-- [CHANGELOG.md](CHANGELOG.md)
-- [CONTRIBUTING.md](CONTRIBUTING.md)
-- [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md) — studio / company licensing
+More reading: [architecture](docs/ARCHITECTURE.md) · [testing](docs/TESTING.md) ·
+[demo mode](docs/DEMO.md) · [changelog](CHANGELOG.md)
 
 ## Support
 
@@ -347,7 +337,7 @@ Shotrover is free for personal use and built in my spare time. If it saves you t
 support development on **[Ko-fi](https://ko-fi.com/kalibarrowsmith)**. Studios:
 **[buy a studio licence](https://ko-fi.com/s/6ee3ebf331)** (details in [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)).
 
-## License
+## Licence
 
 **Free for individuals and noncommercial organizations; studios and companies need a commercial licence.**
 
