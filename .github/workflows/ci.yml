@@ -12,11 +12,17 @@ jobs:
           cp shotrover.py /tmp/committed.py
           ./build.sh
           cmp shotrover.py /tmp/committed.py || { echo "shotrover.py is out of date: run ./build.sh and commit"; exit 1; }
-      - name: Python 3.9 syntax check (oldest supported Python)
-        uses: actions/setup-python@v5
-        with: { python-version: '3.9' }
-      - run: python3.9 -m py_compile shotrover.py
       - name: Headless self-test
         run: /usr/bin/python3 tests/headless.py --selftest
       - name: Portable zip builds
         run: ./make-portable.sh
+
+  # Oldest supported Python. Runs in the official 3.9 image because newer runner images no longer offer
+  # 3.9 through actions/setup-python.
+  python39:
+    name: Python 3.9 syntax check (oldest supported Python)
+    runs-on: ubuntu-latest
+    container: python:3.9-slim
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m py_compile shotrover.py
