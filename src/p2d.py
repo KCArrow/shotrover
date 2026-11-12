@@ -571,7 +571,7 @@ class LargeFilesWindow(Gtk.Window):
             kind = it.kind + (" (sequence)" if it.is_sequence else "")
             notes, colour = "", None
             if it.flag == "system":
-                notes, colour = "⚠ System · " + it.reason, "#d9822b"
+                notes, colour = "⚠ System · " + it.reason, COL_WARN
                 tip += "\n⚠ " + it.reason
             elif it.flag == "info":
                 notes = it.reason
@@ -623,7 +623,7 @@ class LargeFilesWindow(Gtk.Window):
             text = f"{len(chk):,} ticked · {fmt_size(sum(x.size for x in chk))} would be freed"
             if nsys:
                 self.sel_label.set_markup(GLib.markup_escape_text(text) +
-                                          f"  <span foreground='#d9822b'>⚠ {nsys} system file{'s' if nsys != 1 else ''}</span>")
+                                          f"  <span foreground='{COL_WARN}'>⚠ {nsys} system file{'s' if nsys != 1 else ''}</span>")
             else:
                 self.sel_label.set_text(text)
         else:

@@ -11,7 +11,6 @@ Native GTK 3 application, no pip dependencies: needs only python3, python3-gobje
 and gtk3, which most Linux desktops already have (package names per distro are in the README).
 
 Usage:  shotrover [folder ...]
-        shotrover --demo [ShotroverDemo folder]     fictional machine for screenshots (docs/DEMO.md)
         shotrover --selftest | --preview-bench | --stress | --nav-bench | --profile | --probe-gl | --probe-model
 """
 from __future__ import annotations
@@ -76,7 +75,7 @@ def bench(label: str):
 APP_ID = "io.github.KCArrow.Shotrover"
 APP_NAME = "Shotrover"
 APP_FULL_NAME = "Shotrover"
-VERSION = "1.1"
+VERSION = "1.1.1"
 # the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
 # file and the portable build show it in the title bar, task switcher and About box without installing
 APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
@@ -138,6 +137,13 @@ def app_icon(size: int):
     return _APP_ICONS[size]
 HOME = os.path.expanduser("~")
 
+# ---- colour tokens: the only place status colours are spelled out. The stylesheet (CSS, in the last part)
+# defines the same values as @sr_ok / @sr_warn / @sr_danger; Pango markup and cell renderers use these names.
+COL_OK = "#3fa66a"          # installed, saved, editing
+COL_WARN = "#d9822b"        # needs attention: unsaved changes, system files
+COL_DANGER = "#e5534b"      # missing, failed, destructive
+COL_DIM = "#8c8c8c"         # secondary text where the theme's dim-label class cannot reach (cell renderers)
+
 # --------------------------------------------------------------------------- demo mode (shotrover --demo folder)
 # A fictional machine for screenshots and demos: drives, disks, free space, user folders, user name, Quick access
 # and Recent all come from the demo folder; the real config is neither read nor written.
@@ -190,6 +196,8 @@ def demo_config() -> dict:
                                  j("Home", "Documents", "timesheet_oct.csv")) if os.path.isfile(p)]
     cfg["frequent"] = {j("Projects", "Hollowmere", "shots"): 41, j("Projects", "Hollowmere", "assets"): 37, j("Home", "Pictures"): 12, j("Archive"): 9}
     cfg["preview_pane"] = cfg["details_pane"] = True
+    cfg["setup_done"] = True
+    cfg["index_roots"] = [DEMO["home"]]             # never the real home folder, even as a default in Preferences
     return cfg
 
 
@@ -275,6 +283,9 @@ DEFAULT_CONFIG = {
     "window": [1100, 700], "nav_width": 220, "preview_width": 300, "side_width": 0, "side_split": 0,
     "pinned": [], "recent": [], "frequent": {},
     "pc_drives": [],          # folders shown as drives in This PC: [{"path": …, "label": …}]
+    "icons": "shotrover",     # shotrover (built-in set) | system (the desktop's icon theme)
+    "theme": "system",        # system | light | dark, for this app only
+    "setup_done": False,      # the first-start "choose how Shotrover looks" question has been answered
 }
 COLUMN_TITLES = {"name": "Name", "modified": "Date modified", "type": "Type", "size": "Size", "created": "Date created",
                  "accessed": "Date accessed", "owner": "Owner", "perms": "Permissions", "location": "Folder path",
@@ -421,7 +432,7 @@ def entry_from_info(info: Gio.FileInfo, parent: Gio.File) -> Entry:
     if e.is_dir:
         e.type = "File folder"
     else:
-        e.type = Gio.content_type_get_description(e.content_type) if e.content_type else "File"
+        e.type = type_name(info.get_name() or "", e.content_type)
     if e.is_link:
         e.type += " (link)"
     e.icon = info.get_icon()
@@ -483,13 +494,47 @@ _CT_CACHE: Dict[str, Tuple[str, Gio.Icon]] = {}
 _FOLDER_ICON = Gio.ThemedIcon.new("folder")
 
 
+# The desktop's MIME database knows little about production formats and guesses badly from the extension alone
+# (.obj → "TGIF document", .abc → "ABC music", .ma → "Mathematica notebook"). These names win over its guess.
+TYPE_NAMES = {
+    ".obj": "OBJ model", ".mtl": "OBJ material", ".fbx": "FBX model", ".abc": "Alembic cache", ".stl": "STL model", ".ply": "PLY model",
+    ".usd": "USD scene", ".usda": "USD scene (text)", ".usdc": "USD scene (binary)", ".usdz": "USD package",
+    ".gltf": "glTF model", ".glb": "glTF model (binary)", ".dae": "Collada model", ".3ds": "3DS model", ".lwo": "LightWave model",
+    ".blend": "Blender scene", ".ma": "Maya ASCII scene", ".mb": "Maya binary scene", ".hip": "Houdini scene", ".hiplc": "Houdini scene",
+    ".hipnc": "Houdini scene", ".hda": "Houdini digital asset", ".otl": "Houdini digital asset", ".nk": "Nuke script",
+    ".bgeo": "Houdini geometry", ".vdb": "OpenVDB volume",
+    ".exr": "EXR image", ".hdr": "Radiance HDR image", ".dpx": "DPX image", ".cin": "Cineon image", ".tx": "Mip-mapped texture",
+    ".iff": "Maya IFF image", ".ptex": "Ptex texture", ".psb": "Photoshop large document",
+    ".mtlx": "MaterialX document", ".osl": "OSL shader", ".oso": "Compiled OSL shader", ".ies": "IES light profile",
+    ".uasset": "Unreal asset", ".umap": "Unreal level", ".uproject": "Unreal project", ".prefab": "Unity prefab", ".unity": "Unity scene",
+    ".mxf": "MXF video", ".r3d": "RED raw video", ".braw": "Blackmagic raw video", ".ari": "ARRI raw image",
+    ".cube": "LUT (cube)", ".ocio": "OpenColorIO config", ".rib": "RenderMan scene",
+    ".vrscene": "V-Ray scene", ".sbs": "Substance Designer graph", ".sbsar": "Substance archive", ".spp": "Substance Painter project",
+    ".ztl": "ZBrush tool", ".zpr": "ZBrush project", ".c4d": "Cinema 4D scene", ".max": "3ds Max scene", ".aep": "After Effects project",
+    ".prproj": "Premiere project", ".drp": "DaVinci Resolve project", ".edl": "Edit decision list", ".otio": "OpenTimelineIO timeline",
+}
+
+
+def type_name(name: str, ct: str) -> str:
+    """The Type shown for a file: our own name for production formats, otherwise the desktop's description."""
+    low = name.lower()
+    if low.endswith((".bgeo.sc", ".bgeo.gz", ".geo.sc", ".geo.gz")):
+        return "Houdini geometry"
+    own = TYPE_NAMES.get(os.path.splitext(low)[1])
+    if own:
+        return own
+    return Gio.content_type_get_description(ct) if ct else "File"
+
+
 def _ct_info(name: str) -> Tuple[str, str, Gio.Icon]:
     """(content_type, description, icon) for a file name — cached by extension/content type."""
     ext = os.path.splitext(name)[1].lower() or name.lower()
+    if ext in (".sc", ".gz") and name.lower().endswith((".bgeo.sc", ".bgeo.gz", ".geo.sc", ".geo.gz")):
+        ext = ".bgeo" + ext                 # named as a pair, not by the last part
     hit = _CT_CACHE.get(ext)
     if hit is None:
         ct, _ = Gio.content_type_guess(name, None)
-        hit = (ct, Gio.content_type_get_description(ct), Gio.content_type_get_icon(ct))
+        hit = (ct, type_name(name, ct), Gio.content_type_get_icon(ct))
         _CT_CACHE[ext] = hit
     return hit
 

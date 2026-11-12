@@ -732,7 +732,7 @@
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
                 grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='#2e8b57'>installed</span>" if dep["found"] else "<span foreground='#c0392b'>missing</span>")
+                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
@@ -1171,8 +1171,31 @@
 
 
 # --------------------------------------------------------------------------- application
-CSS = b"""
+# Two surfaces, on purpose: @sr_surface is where files are listed (every layout, This PC, search results);
+# @sr_chrome is everything around it (bars, navigation pane, preview / details pane). Status colours come
+# from the COL_* tokens so markup, cell renderers and the stylesheet can never drift apart.
+CSS = (f"@define-color sr_ok {COL_OK};\n@define-color sr_warn {COL_WARN};\n@define-color sr_danger {COL_DANGER};\n").encode() + b"""
+@define-color sr_surface @theme_base_color;
+@define-color sr_chrome @theme_bg_color;
+/* every structural divider (pane edges, status bar, column headers, separators) is this one solid 1px colour.
+   Solid, not translucent: a translucent line reads differently on each background, and a paned handle paints twice. */
+@define-color sr_line mix(@theme_bg_color, @theme_fg_color, 0.08);
+/* An unfocused window keeps its surfaces; only the text dims, and it does so at once. Themes otherwise darken
+   some surfaces but not ours, and fade buttons and fields while everything else switches instantly. */
+*:backdrop { transition: none; }
+.background:backdrop, menubar:backdrop { background-color: @sr_chrome; }
+button, entry, scrollbar { transition-property: background-color, box-shadow; }
+separator { background-image: none; background-color: @sr_line; min-width: 1px; min-height: 1px; }
 /* ---- Windows 11 "Fluent" flavour on top of the current GTK theme ---- */
+.filearea, .filearea treeview.view, .filearea .icongrid, .filearea viewport, .filearea flowbox { background-color: @sr_surface; }
+.navpane, .navpane treeview.view { background-color: @sr_chrome; }
+/* the selection colour always comes with its own text colour: themes may pair their tree selection differently
+   (ZorinGrey-Dark: white text on a faint tint), and our light bar under that white text was unreadable */
+.navpane treeview.view:selected, .filearea treeview.view:selected { background-color: alpha(@theme_selected_bg_color, 0.85); color: @theme_selected_fg_color; }
+button.destructive-action:not(:disabled) { background-image: none; background-color: @sr_danger; color: #ffffff;
+           border-color: shade(@sr_danger, 0.85); text-shadow: none; box-shadow: none; }
+button.destructive-action:not(:disabled):hover { background-color: shade(@sr_danger, 1.08); }
+button.destructive-action:not(:disabled) label { color: #ffffff; }
 menubar { padding: 0 4px; }
 menubar > menuitem { padding: 4px 8px; border-radius: 4px; }
 menubar > menuitem:hover { background: alpha(@theme_fg_color, 0.08); color: @theme_fg_color; box-shadow: none; }
@@ -1196,44 +1219,42 @@ entry.search { border-radius: 6px; min-height: 30px; }
 .commandbar button.cmd { padding: 4px 10px; min-height: 30px; border-radius: 6px; }
 .commandbar button.cmd:hover { background: alpha(@theme_fg_color, 0.08); }
 .commandbar button.cmd label { font-size: 0.95em; }
-.navpane treeview { padding: 2px 0; }
 .navpane treeview:selected { border-radius: 4px; }
-.navpane { background: alpha(@theme_fg_color, 0.025); }
-paned > separator { min-width: 1px; min-height: 1px; background: alpha(@theme_fg_color, 0.12); background-clip: content-box;
-                    margin: 0; border: none; box-shadow: none; }
-treeview.view { padding: 1px 0; }
-treeview.view header button { padding: 4px 8px; background: none; border-style: solid; border-color: alpha(@theme_fg_color, 0.12);
+/* a hairline with no gutter: some themes pad the separator, which left a strip of chrome colour between panes */
+paned > separator { min-width: 1px; min-height: 1px; background-image: none; background-color: @sr_line;
+                    margin: 0; padding: 0; border: none; box-shadow: none; }
+treeview.view header button { padding: 3px 8px; background: none; border-style: solid; border-color: @sr_line;
                                border-width: 0 1px 1px 0; border-radius: 0; }
 treeview.view header button:last-child { border-right-width: 0; }
 treeview.view header button:hover { background: alpha(@theme_fg_color, 0.06); }
 treeview.view header button label { font-weight: 600; color: alpha(@theme_fg_color, 0.75); }
-treeview.view:selected { background: alpha(@theme_selected_bg_color, 0.85); border-radius: 3px; }
+treeview.view:selected { background: alpha(@theme_selected_bg_color, 0.85); color: @theme_selected_fg_color; border-radius: 3px; }
 iconview:selected { background: alpha(@theme_selected_bg_color, 0.8); border-radius: 6px; }
 notebook > header { background: alpha(@theme_fg_color, 0.04); border: none; padding: 4px 4px 0 4px; }
 notebook > header tab { padding: 4px 10px; margin: 0 2px; border: none; border-radius: 6px 6px 0 0; min-width: 120px; }
-notebook > header tab:checked { background: @theme_base_color; }
+notebook > header tab:checked { background: @sr_surface; }
 notebook > header tab:hover:not(:checked) { background: alpha(@theme_fg_color, 0.06); }
 notebook > header tab button.tab-close { min-width: 18px; min-height: 18px; padding: 0; border-radius: 4px; }
-.pane-header { padding: 3px 4px; background: alpha(@theme_fg_color, 0.04); border-bottom: 2px solid alpha(@theme_fg_color, 0.1); }
-.pane-header.active { background: alpha(@theme_selected_bg_color, 0.22); border-bottom: 2px solid @theme_selected_bg_color; }
+.pane-header { padding: 3px 4px 4px 4px; background: alpha(@theme_fg_color, 0.04); border-bottom: 1px solid @sr_line; }
+.pane-header.active { padding: 3px 4px; background: alpha(@theme_selected_bg_color, 0.22); border-bottom: 2px solid @theme_selected_bg_color; }
 .pane-header.active label { font-weight: bold; }
 /* the inactive side is dimmed (darker in dark themes, greyer in light ones); the active side keeps the normal base */
-.inactive-pane, .inactive-pane treeview.view, .inactive-pane .icongrid { background: shade(@theme_base_color, 0.92); }
+.inactive-pane, .inactive-pane treeview.view, .inactive-pane .icongrid, .inactive-pane viewport, .inactive-pane flowbox { background-color: shade(@sr_surface, 0.92); }
 .inactive-pane .pane-header label { color: alpha(@theme_fg_color, 0.6); }
 .pane-header label { font-size: 0.9em; }
-.sidepane { background: alpha(@theme_fg_color, 0.025); }
+.sidepane { background-color: @sr_chrome; }
 .sidepane textview, .sidepane textview text { background: alpha(@theme_fg_color, 0.03); }
 .edit-toolbar button { padding: 2px 8px; min-height: 24px; }
-.bd-error { color: #e5534b; font-family: monospace; font-size: 0.9em; padding: 2px 4px; }
+.bd-error { color: @sr_danger; font-family: monospace; font-size: 0.9em; padding: 2px 4px; }
 .edit-badge { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; padding: 1px 6px; border-radius: 3px;
               color: alpha(@theme_fg_color, 0.55); background: alpha(@theme_fg_color, 0.07); }
-.edit-badge.badge-editing { color: #ffffff; background: #2b8a3e; }
-.edit-badge.badge-dirty { color: #ffffff; background: #d9480f; }
-textview.editing, textview.editing text { background: alpha(#2b8a3e, 0.06); }
-.sidepane textview.editing { border: 2px solid #2b8a3e; border-radius: 4px; }
+.edit-badge.badge-editing { color: #ffffff; background: @sr_ok; }
+.edit-badge.badge-dirty { color: #ffffff; background: @sr_warn; }
+textview.editing, textview.editing text { background: alpha(@sr_ok, 0.06); }
+.sidepane textview.editing { border: 2px solid @sr_ok; border-radius: 4px; }
 .sidepane textview.readonly { border: 2px solid transparent; }
 .edit-toolbar entry { min-height: 24px; }
-.statusbar { background: alpha(@theme_fg_color, 0.04); border-top: 1px solid alpha(@theme_fg_color, 0.08); }
+.statusbar { background: alpha(@theme_fg_color, 0.04); border-top: 1px solid @sr_line; }
 .statusbar label { font-size: 0.92em; }
 .statusbar button { padding: 0 4px; min-height: 22px; min-width: 22px; }
 """
@@ -1252,6 +1273,16 @@ class ExplorerApp(Gtk.Application):
         else:
             Gtk.Window.set_default_icon_name("shotrover")
         WATCHDOG.start(os.path.join(GLib.get_user_cache_dir(), "shotrover", "stalls.log") if PROFILE is not None else None)
+        # The stylesheet. (These lines once sat after the `return True` of _index_tick below, where they could
+        # never run, so the app shipped with none of its own styling. A broken sheet must not stop startup.)
+        try:
+            prov = Gtk.CssProvider()
+            prov.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        except GLib.Error as ex:
+            print("shotrover: stylesheet not loaded —", ex, file=sys.stderr)
+        apply_theme_mode(self.cfg.get("theme", "system"))
+        ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         GLib.timeout_add(400, lambda: (threading.Thread(target=warm_workers, daemon=True).start(), False)[1])
         GLib.timeout_add(1500, self._index_startup)
 
@@ -1277,9 +1308,6 @@ class ExplorerApp(Gtk.Application):
             if (time.time() - INDEX.progress.get("finished", 0)) / 3600.0 > float(cfg.get("index_interval_h", 6)):
                 INDEX.crawl(cfg.get("index_roots", [HOME]), cfg.get("index_network", False), cfg.get("index_hidden", False))
         return True
-        prov = Gtk.CssProvider()
-        prov.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def _on_report(self, path: str):
         """CrashReporter hook (GTK thread): an error happened at run time — show the bar in the active window."""
@@ -1310,6 +1338,9 @@ class ExplorerApp(Gtk.Application):
             path = HOME
         w = MainWindow(self, path)
         w.present()
+        if not self.cfg.get("setup_done") and DEMO is None and STRESS is None and not getattr(self, "_welcomed", False):
+            self._welcomed = True                    # once per run, on the first window, however it was opened
+            GLib.timeout_add(350, lambda: (WelcomeDialog(w, self.cfg, w.apply_cfg), False)[1])
         return w
 
 
@@ -1511,7 +1542,7 @@ def main():
         print("FAILED:", (m or {}).get("error", "no result"))
         return 1
     if "--demo" in sys.argv[1:]:
-        # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (see docs/DEMO.md)
+        # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (internal; not in the public docs)
         i = sys.argv.index("--demo")
         if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
             root = sys.argv[i + 1]

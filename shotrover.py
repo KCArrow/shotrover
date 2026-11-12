@@ -11,7 +11,6 @@ Native GTK 3 application, no pip dependencies: needs only python3, python3-gobje
 and gtk3, which most Linux desktops already have (package names per distro are in the README).
 
 Usage:  shotrover [folder ...]
-        shotrover --demo [ShotroverDemo folder]     fictional machine for screenshots (docs/DEMO.md)
         shotrover --selftest | --preview-bench | --stress | --nav-bench | --profile | --probe-gl | --probe-model
 """
 from __future__ import annotations
@@ -76,7 +75,7 @@ def bench(label: str):
 APP_ID = "io.github.KCArrow.Shotrover"
 APP_NAME = "Shotrover"
 APP_FULL_NAME = "Shotrover"
-VERSION = "1.1"
+VERSION = "1.1.1"
 # the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
 # file and the portable build show it in the title bar, task switcher and About box without installing
 APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
@@ -138,6 +137,13 @@ def app_icon(size: int):
     return _APP_ICONS[size]
 HOME = os.path.expanduser("~")
 
+# ---- colour tokens: the only place status colours are spelled out. The stylesheet (CSS, in the last part)
+# defines the same values as @sr_ok / @sr_warn / @sr_danger; Pango markup and cell renderers use these names.
+COL_OK = "#3fa66a"          # installed, saved, editing
+COL_WARN = "#d9822b"        # needs attention: unsaved changes, system files
+COL_DANGER = "#e5534b"      # missing, failed, destructive
+COL_DIM = "#8c8c8c"         # secondary text where the theme's dim-label class cannot reach (cell renderers)
+
 # --------------------------------------------------------------------------- demo mode (shotrover --demo folder)
 # A fictional machine for screenshots and demos: drives, disks, free space, user folders, user name, Quick access
 # and Recent all come from the demo folder; the real config is neither read nor written.
@@ -190,6 +196,8 @@ def demo_config() -> dict:
                                  j("Home", "Documents", "timesheet_oct.csv")) if os.path.isfile(p)]
     cfg["frequent"] = {j("Projects", "Hollowmere", "shots"): 41, j("Projects", "Hollowmere", "assets"): 37, j("Home", "Pictures"): 12, j("Archive"): 9}
     cfg["preview_pane"] = cfg["details_pane"] = True
+    cfg["setup_done"] = True
+    cfg["index_roots"] = [DEMO["home"]]             # never the real home folder, even as a default in Preferences
     return cfg
 
 
@@ -275,6 +283,9 @@ DEFAULT_CONFIG = {
     "window": [1100, 700], "nav_width": 220, "preview_width": 300, "side_width": 0, "side_split": 0,
     "pinned": [], "recent": [], "frequent": {},
     "pc_drives": [],          # folders shown as drives in This PC: [{"path": …, "label": …}]
+    "icons": "shotrover",     # shotrover (built-in set) | system (the desktop's icon theme)
+    "theme": "system",        # system | light | dark, for this app only
+    "setup_done": False,      # the first-start "choose how Shotrover looks" question has been answered
 }
 COLUMN_TITLES = {"name": "Name", "modified": "Date modified", "type": "Type", "size": "Size", "created": "Date created",
                  "accessed": "Date accessed", "owner": "Owner", "perms": "Permissions", "location": "Folder path",
@@ -421,7 +432,7 @@ def entry_from_info(info: Gio.FileInfo, parent: Gio.File) -> Entry:
     if e.is_dir:
         e.type = "File folder"
     else:
-        e.type = Gio.content_type_get_description(e.content_type) if e.content_type else "File"
+        e.type = type_name(info.get_name() or "", e.content_type)
     if e.is_link:
         e.type += " (link)"
     e.icon = info.get_icon()
@@ -483,13 +494,47 @@ _CT_CACHE: Dict[str, Tuple[str, Gio.Icon]] = {}
 _FOLDER_ICON = Gio.ThemedIcon.new("folder")
 
 
+# The desktop's MIME database knows little about production formats and guesses badly from the extension alone
+# (.obj → "TGIF document", .abc → "ABC music", .ma → "Mathematica notebook"). These names win over its guess.
+TYPE_NAMES = {
+    ".obj": "OBJ model", ".mtl": "OBJ material", ".fbx": "FBX model", ".abc": "Alembic cache", ".stl": "STL model", ".ply": "PLY model",
+    ".usd": "USD scene", ".usda": "USD scene (text)", ".usdc": "USD scene (binary)", ".usdz": "USD package",
+    ".gltf": "glTF model", ".glb": "glTF model (binary)", ".dae": "Collada model", ".3ds": "3DS model", ".lwo": "LightWave model",
+    ".blend": "Blender scene", ".ma": "Maya ASCII scene", ".mb": "Maya binary scene", ".hip": "Houdini scene", ".hiplc": "Houdini scene",
+    ".hipnc": "Houdini scene", ".hda": "Houdini digital asset", ".otl": "Houdini digital asset", ".nk": "Nuke script",
+    ".bgeo": "Houdini geometry", ".vdb": "OpenVDB volume",
+    ".exr": "EXR image", ".hdr": "Radiance HDR image", ".dpx": "DPX image", ".cin": "Cineon image", ".tx": "Mip-mapped texture",
+    ".iff": "Maya IFF image", ".ptex": "Ptex texture", ".psb": "Photoshop large document",
+    ".mtlx": "MaterialX document", ".osl": "OSL shader", ".oso": "Compiled OSL shader", ".ies": "IES light profile",
+    ".uasset": "Unreal asset", ".umap": "Unreal level", ".uproject": "Unreal project", ".prefab": "Unity prefab", ".unity": "Unity scene",
+    ".mxf": "MXF video", ".r3d": "RED raw video", ".braw": "Blackmagic raw video", ".ari": "ARRI raw image",
+    ".cube": "LUT (cube)", ".ocio": "OpenColorIO config", ".rib": "RenderMan scene",
+    ".vrscene": "V-Ray scene", ".sbs": "Substance Designer graph", ".sbsar": "Substance archive", ".spp": "Substance Painter project",
+    ".ztl": "ZBrush tool", ".zpr": "ZBrush project", ".c4d": "Cinema 4D scene", ".max": "3ds Max scene", ".aep": "After Effects project",
+    ".prproj": "Premiere project", ".drp": "DaVinci Resolve project", ".edl": "Edit decision list", ".otio": "OpenTimelineIO timeline",
+}
+
+
+def type_name(name: str, ct: str) -> str:
+    """The Type shown for a file: our own name for production formats, otherwise the desktop's description."""
+    low = name.lower()
+    if low.endswith((".bgeo.sc", ".bgeo.gz", ".geo.sc", ".geo.gz")):
+        return "Houdini geometry"
+    own = TYPE_NAMES.get(os.path.splitext(low)[1])
+    if own:
+        return own
+    return Gio.content_type_get_description(ct) if ct else "File"
+
+
 def _ct_info(name: str) -> Tuple[str, str, Gio.Icon]:
     """(content_type, description, icon) for a file name — cached by extension/content type."""
     ext = os.path.splitext(name)[1].lower() or name.lower()
+    if ext in (".sc", ".gz") and name.lower().endswith((".bgeo.sc", ".bgeo.gz", ".geo.sc", ".geo.gz")):
+        ext = ".bgeo" + ext                 # named as a pair, not by the last part
     hit = _CT_CACHE.get(ext)
     if hit is None:
         ct, _ = Gio.content_type_guess(name, None)
-        hit = (ct, Gio.content_type_get_description(ct), Gio.content_type_get_icon(ct))
+        hit = (ct, type_name(name, ct), Gio.content_type_get_icon(ct))
         _CT_CACHE[ext] = hit
     return hit
 
@@ -2296,21 +2341,27 @@ def _tool(*names) -> Optional[str]:
     return None
 
 
-def convert_with_tools(path: str, ct: str, max_w: int, max_h: int) -> Optional[Tuple[str, str]]:
-    """Try installed converters; returns (png_path, tool_name) or None. Caller deletes the png."""
-    out = os.path.join(tempfile.gettempdir(), f"shotrover-preview-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.png")
+def convert_with_tools(path: str, ct: str, max_w: int, max_h: int, tag: str = "preview", page: int = 1) -> Optional[Tuple[str, str]]:
+    """Try installed converters; returns (png_path, tool_name) or None. Caller deletes the png. `tag` keeps
+    callers apart (the preview pane and the thumbnailer can convert the same file at the same moment);
+    `page` is the PDF page to render (1-based)."""
+    out = os.path.join(tempfile.gettempdir(), f"shotrover-{tag}-{os.getpid()}-{threading.get_ident() & 0xffff:x}-{abs(hash(path)) & 0xffffff:x}.png")
     low = path.lower()
     attempts = []
     is_video = ct.startswith("video/") or low.endswith((".mov", ".mp4", ".mkv", ".avi", ".webm", ".mxf", ".r3d"))
     if is_video:
         ff = _tool("ffmpeg")
         if ff:
-            attempts.append((ff, [ff, "-v", "error", "-y", "-ss", "1", "-i", path, "-frames:v", "1",
-                                  "-vf", f"scale='min({max_w},iw)':-2", out]))
+            for seek in ("1", "0"):                 # a clip shorter than a second has no frame at 1 s
+                attempts.append((ff, [ff, "-v", "error", "-y", "-ss", seek, "-i", path, "-frames:v", "1",
+                                      "-vf", f"scale='min({max_w},iw)':-2", out]))
     if low.endswith(".pdf"):
         pt = _tool("pdftoppm")
         if pt:
-            attempts.append((pt, [pt, "-png", "-singlefile", "-r", "40", "-f", "1", "-l", "1", path, out[:-4]]))
+            # resolution from the space on offer (a page is ~8.3 in wide), not a fixed 40 dpi: the preview pane
+            # showed a blurry stamp of the page; a thumbnail asks for far less
+            dpi = str(int(max(30, min(150, max_w / 4.0))))        # ~2× the box: the image widget scales it to fit
+            attempts.append((pt, [pt, "-png", "-singlefile", "-r", dpi, "-f", str(page), "-l", str(page), path, out[:-4]]))
     oiio = _tool("oiiotool")
     if oiio:
         attempts.append((oiio, [oiio, path, "--subimage", "0", "--ch", "R,G,B", "--resize", f"{max_w}x{max_h}", "--colorconvert", "linear", "sRGB", "-o", out]))
@@ -2336,30 +2387,34 @@ def convert_with_tools(path: str, ct: str, max_w: int, max_h: int) -> Optional[T
 
 
 # --------------------------------------------------------------------------- information previews (text)
-def describe_archive(path: str) -> Optional[str]:
+ARCHIVE_PREVIEW_MAX = 2000          # rows shown in the preview pane; the summary line still counts them all
+
+
+def list_archive(path: str) -> Optional[dict]:
+    """What is inside an archive, without extracting it: {'entries': [(inner path, size, is_dir)],
+    'summary': str} — or {'error': str} when it can't be read, or None when this isn't an archive we know.
+    zip and tar are read with the standard library; everything else goes through 7-Zip when installed."""
     import zipfile, tarfile
+    cap = ARCHIVE_PREVIEW_MAX
     try:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as z:
                 infos = z.infolist()
                 total = sum(i.file_size for i in infos)
-                lines = [f"{len(infos)} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk", ""]
-                lines += [f"{fmt_size(i.file_size):>10}   {i.filename}" for i in infos[:400]]
-                if len(infos) > 400:
-                    lines.append(f"… {len(infos) - 400} more")
-                return "\n".join(lines)
+                return {"entries": [(i.filename.rstrip("/"), i.file_size, i.is_dir()) for i in infos[:cap]], "count": len(infos),
+                        "summary": f"{len(infos):,} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk"}
         if tarfile.is_tarfile(path):
             with tarfile.open(path) as t:
                 members = []
                 for m in t:
                     members.append(m)
-                    if len(members) > 400:
+                    if len(members) > cap:
                         break
-                lines = [f"{'400+' if len(members) > 400 else len(members)} entries · {fmt_size(os.path.getsize(path))} on disk", ""]
-                lines += [f"{fmt_size(m.size):>10}   {m.name}{'/' if m.isdir() else ''}" for m in members[:400]]
-                return "\n".join(lines)
+                more = len(members) > cap
+                return {"entries": [(m.name, m.size, m.isdir()) for m in members[:cap]], "count": len(members),
+                        "summary": f"{f'{cap:,}+' if more else f'{len(members):,}'} entries · {fmt_size(os.path.getsize(path))} on disk"}
     except Exception as ex:
-        return f"Could not read archive: {ex}"
+        return {"error": f"Could not read archive: {ex}"}
     sz = sevenzip()
     if sz:
         try:
@@ -2380,20 +2435,55 @@ def describe_archive(path: str) -> Optional[str]:
                     entries.append(cur)
                 entries = [e for e in entries if not (e.get("Path") in (path, os.path.basename(path)) and "Type" in e)]
                 total = sum(int(e.get("Size") or 0) for e in entries)
-                lines = [f"{len(entries)} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk  (7-Zip)", ""]
-                for e in entries[:400]:
+                rows = []
+                for e in entries[:cap]:
                     is_dir = (e.get("Attributes") or "").startswith("D") or (e.get("Folder") == "+")
-                    lines.append(f"{'' if is_dir else fmt_size(int(e.get('Size') or 0)):>10}   {e['Path']}{'/' if is_dir else ''}")
-                if len(entries) > 400:
-                    lines.append(f"… {len(entries) - 400} more")
-                return "\n".join(lines)
+                    rows.append((e["Path"], 0 if is_dir else int(e.get("Size") or 0), is_dir))
+                return {"entries": rows, "count": len(entries),
+                        "summary": f"{len(entries):,} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk  (7-Zip)"}
             if r.returncode != 0:
-                return f"7-Zip could not read this archive: {(r.stderr.strip().splitlines() or ['unknown error'])[-1]}"
+                return {"error": f"7-Zip could not read this archive: {(r.stderr.strip().splitlines() or ['unknown error'])[-1]}"}
         except (OSError, subprocess.TimeoutExpired) as ex:
-            return f"Could not read archive: {ex}"
+            return {"error": f"Could not read archive: {ex}"}
     elif path.lower().endswith(SEVENZIP_EXTS):
-        return "This archive type needs 7-Zip to list and extract.\nTools → Dependencies (p7zip)"
+        return {"error": "This archive type needs 7-Zip to list and extract.\nTools → Dependencies (p7zip)"}
     return None
+
+
+def describe_archive(path: str) -> Optional[str]:
+    """The same listing as plain text (reports, tests)."""
+    res = list_archive(path)
+    if res is None:
+        return None
+    if "error" in res:
+        return res["error"]
+    lines = [res["summary"], ""]
+    lines += [f"{'' if d else fmt_size(size):>10}   {name}{'/' if d else ''}" for name, size, d in res["entries"]]
+    if res["count"] > len(res["entries"]):
+        lines.append(f"… {res['count'] - len(res['entries'])} more")
+    return "\n".join(lines)
+
+
+def pdf_page_count(path: str) -> int:
+    """Pages in a PDF: pdfinfo when installed (poppler-utils, same package as pdftoppm), else a scan of the
+    file for its page-tree count. 0 when unknown."""
+    tool = _tool("pdfinfo")
+    if tool:
+        try:
+            r = subprocess.run([tool, path], capture_output=True, text=True, errors="replace", timeout=10)
+            for line in r.stdout.splitlines():
+                if line.startswith("Pages:"):
+                    return int(line.split(":", 1)[1].strip())
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+    try:
+        with open(path, "rb") as f:
+            data = f.read(8 << 20)
+        counts = [int(m) for m in re.findall(rb"/Type\s*/Pages\b[^>]*?/Count\s+(\d+)", data)] + \
+                 [int(m) for m in re.findall(rb"/Count\s+(\d+)[^>]*?/Type\s*/Pages\b", data)]
+        return max(counts) if counts else 0
+    except (OSError, ValueError):
+        return 0
 
 
 def gif_info(path: str) -> Optional[dict]:
@@ -2630,6 +2720,10 @@ def warm_workers():
         get_render_worker()
     except Exception:
         pass
+    try:
+        warm_thumb_pool()
+    except Exception:
+        pass
 
 
 def run_heavy(fn, *args):
@@ -2672,6 +2766,10 @@ def shutdown_workers():
     """Quit: kill the decoder pool and the render process instead of letting multiprocessing's exit handler
     join them — a worker busy with a big model or EXR made closing the window hang for seconds."""
     global _POOL, _SEQ_POOL
+    try:
+        shutdown_thumb_pool()
+    except Exception:
+        pass
     pools, _POOL, _SEQ_POOL = (_POOL, _SEQ_POOL), None, None
     for pool in pools:
         if pool is None:
@@ -2701,9 +2799,10 @@ PREVIEW_DECODERS = {".iff": decode_maya_iff, ".tdi": decode_maya_iff, ".exr": de
                     ".psd": decode_psd, ".psb": decode_psd}
 
 
-def generate_preview(path: str, ct: str, max_w: int, max_h: int) -> dict:
-    """Worker-thread entry point. Returns {'raw': RawImage} | {'png': path, 'tool': name} | {'text': str} | {}
-    always with an 'info' list for the quick-view card."""
+def generate_preview(path: str, ct: str, max_w: int, max_h: int, page: int = 1) -> dict:
+    """Worker-thread entry point. Returns {'raw': RawImage} | {'png': path, 'tool': name} | {'text': str} |
+    {'archive': list_archive() result} | {} — always with an 'info' list for the quick-view card. A PDF also
+    carries 'pages' (count) and 'page' (the one rendered, 1-based)."""
     ext = os.path.splitext(path)[1].lower()
     info: List[Tuple[str, str]] = []
     try:
@@ -2718,10 +2817,19 @@ def generate_preview(path: str, ct: str, max_w: int, max_h: int) -> dict:
             info += describe_obj(path)
         if ct.startswith(("video/", "audio/")) or ext in (".mov", ".mp4", ".mkv", ".mxf", ".wav", ".flac", ".mp3", ".aif", ".aiff"):
             info += describe_media(path)
-        arch = describe_archive(path) if (ext in (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".jar", ".whl") or path.lower().endswith(SEVENZIP_EXTS)) else None
+        arch = list_archive(path) if (ext in (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".jar", ".whl") or path.lower().endswith(SEVENZIP_EXTS)) else None
         if arch:
-            return {"text": arch, "info": info}
-        conv = convert_with_tools(path, ct, max_w, max_h)
+            return {"archive": arch, "info": info}
+        pages = 0
+        if ext == ".pdf" or ct == "application/pdf":
+            pages = pdf_page_count(path)
+            if pages:
+                info.append(("Pages", f"{pages:,}"))
+        conv = convert_with_tools(path, ct, max_w, max_h, page=max(1, page))
+        if conv and pages:
+            png, tool = conv
+            info.append(("Preview via", tool))
+            return {"png": png, "tool": tool, "info": info, "pages": pages, "page": max(1, page)}
         if conv:
             png, tool = conv
             info.append(("Preview via", tool))
@@ -5497,7 +5605,8 @@ class PropertiesDialog(Gtk.Dialog):
         e, st, cfg = self.e, self.st, self.cfg
         g = self._grid()
         hb = Gtk.Box(spacing=8)
-        img = Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
+        pb = ICONS.pixbuf(e.icon or Gio.ThemedIcon.new("text-x-generic"), 48, e)
+        img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
         hb.pack_start(img, False, False, 0)
         self.name_entry = Gtk.Entry(text=e.name, hexpand=True)
         hb.pack_start(self.name_entry, True, True, 0)
@@ -5765,6 +5874,15 @@ class OptionsDialog(Gtk.Dialog):
         self._heading(b, "Panes")
         for key, lab in (("nav_pane", "Show navigation pane"), ("preview_pane", "Show preview pane"), ("details_pane", "Show details pane")):
             self._check(b, key, lab)
+        self._heading(b, "Appearance")
+        row = Gtk.Box(spacing=24)
+        for key, title, options in (("icons", "Icons", (("shotrover", "Shotrover icons"), ("system", "System icons (your desktop's icon theme)"))),
+                                    ("theme", "Colours", (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")))):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            col.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            self._radios(col, key, options)
+            row.pack_start(col, False, False, 0)
+        b.pack_start(row, False, False, 0)
         self._heading(b, "Date format (strftime)")
         e = Gtk.Entry(text=self.cfg["date_format"])
         b.pack_start(e, False, False, 0)
@@ -5788,7 +5906,10 @@ class OptionsDialog(Gtk.Dialog):
         for r in self.cfg.get("index_roots", [HOME]):
             self.roots_store.append([r])
         tv = Gtk.TreeView(model=self.roots_store, headers_visible=False)
-        tv.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0))
+        rcell = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.MIDDLE)
+        rcol = Gtk.TreeViewColumn("", rcell)
+        rcol.set_cell_data_func(rcell, lambda c, cell, m, it, d=None: cell.set_property("text", pretty_path(m[it][0])), None)
+        tv.append_column(rcol)
         sw = Gtk.ScrolledWindow(min_content_height=90)
         sw.add(tv)
         b.pack_start(sw, False, False, 0)
@@ -5953,7 +6074,7 @@ class OptionsDialog(Gtk.Dialog):
                 name.set_tooltip_text(dep["cmd"])
                 self.dep_grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup("<span foreground='#2e8b57'>installed</span>" if dep["found"] else "<span foreground='#c0392b'>missing</span>")
+                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
@@ -6019,7 +6140,7 @@ class OptionsDialog(Gtk.Dialog):
     def _response(self, d, r):
         if r == 10:
             for k, v in DEFAULT_CONFIG.items():
-                if k not in ("pinned", "recent", "frequent", "window", "nav_width", "preview_width", "side_width", "side_split", "rv_path", "index_roots"):
+                if k not in ("pinned", "recent", "frequent", "window", "nav_width", "preview_width", "side_width", "side_split", "rv_path", "index_roots", "setup_done"):
                     self.cfg[k] = json.loads(json.dumps(v))
             self.on_apply()
             self.destroy()
@@ -6204,7 +6325,7 @@ class BatchRenameDialog(Gtk.Dialog):
             col.set_resizable(True)
             col.set_expand(i < 2)
             if i == 2:
-                rend.set_property("foreground", "#d04040")
+                rend.set_property("foreground", COL_DANGER)
             tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         sw.add(tv)
@@ -7118,7 +7239,7 @@ class LargeFilesWindow(Gtk.Window):
             kind = it.kind + (" (sequence)" if it.is_sequence else "")
             notes, colour = "", None
             if it.flag == "system":
-                notes, colour = "⚠ System · " + it.reason, "#d9822b"
+                notes, colour = "⚠ System · " + it.reason, COL_WARN
                 tip += "\n⚠ " + it.reason
             elif it.flag == "info":
                 notes = it.reason
@@ -7170,7 +7291,7 @@ class LargeFilesWindow(Gtk.Window):
             text = f"{len(chk):,} ticked · {fmt_size(sum(x.size for x in chk))} would be freed"
             if nsys:
                 self.sel_label.set_markup(GLib.markup_escape_text(text) +
-                                          f"  <span foreground='#d9822b'>⚠ {nsys} system file{'s' if nsys != 1 else ''}</span>")
+                                          f"  <span foreground='{COL_WARN}'>⚠ {nsys} system file{'s' if nsys != 1 else ''}</span>")
             else:
                 self.sel_label.set_text(text)
         else:
@@ -7312,6 +7433,324 @@ class LargeFilesWindow(Gtk.Window):
             self.status.set_text(f"Moved {len(gone):,} item{'s' if len(gone) != 1 else ''} ({fmt_size(freed)}) to the Recycle Bin. "
                                  "Empty the Recycle Bin (Tools menu) to get the space back.")
         return False
+
+
+# =========================================================================== Shotrover icon set + colour scheme
+# Two looks for file, folder and drive icons: "system" (whatever icon theme the desktop uses) and "shotrover",
+# a built-in set in the spirit of a classic desktop file manager: yellow folders, white sheets with a coloured
+# mark per file type, grey drives. The set is drawn here as small SVGs so the app stays one file and looks the
+# same on every distribution. Toolbar glyphs stay the desktop's symbolic icons in both modes.
+#
+# The pictures are original to Shotrover. If librsvg's pixbuf loader is missing the set quietly falls back to
+# the system icons.
+
+_SR_FOLDER_GLYPHS = {
+    "desktop": "<rect x='2' y='4' width='20' height='13' rx='2'/><rect x='10.5' y='17' width='3' height='2.5'/><rect x='7' y='19.5' width='10' height='2' rx='1'/>",
+    "documents": "<rect x='4' y='5' width='16' height='2.6' rx='1.3'/><rect x='4' y='10.7' width='16' height='2.6' rx='1.3'/><rect x='4' y='16.4' width='10' height='2.6' rx='1.3'/>",
+    "downloads": "<path d='M10.4 3h3.2v8.5h4.6L12 18 5.8 11.5h4.6z'/><rect x='5' y='19.6' width='14' height='2.2' rx='1.1'/>",
+    "music": "<circle cx='8' cy='18' r='3.3'/><rect x='9.4' y='5' width='2' height='13'/><path d='M9.4 4.5l9-2.3v4.6l-9 2.3z'/><circle cx='17' cy='15.6' r='2.6'/><rect x='17.6' y='3' width='1.9' height='12.6'/>",
+    "pictures": "<path d='M2 20l6.5-9 4.5 6 3-3.6 6 6.6z'/><circle cx='17' cy='6.5' r='2.4'/>",
+    "videos": "<path d='M7 4l13 8-13 8z'/>",
+    "home": "<path d='M12 2.5L1.8 12H5v9.5h5v-6.3h4v6.3h5V12h3.2z'/>",
+}
+
+
+def _sr_folder(glyph: str = "") -> str:
+    g = ""
+    if glyph:
+        g = f"<g transform='translate(20,27.5)' fill='#9A6200' fill-opacity='0.82'>{_SR_FOLDER_GLYPHS[glyph]}</g>"
+    return ("<defs><linearGradient id='f' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#FFE08A'/>"
+            "<stop offset='1' stop-color='#FFC42E'/></linearGradient></defs>"
+            "<path d='M6 15a4 4 0 0 1 4-4h13.5a3 3 0 0 1 2.2 1l3.6 4H54a4 4 0 0 1 4 4v30a4 4 0 0 1-4 4H10a4 4 0 0 1-4-4z' fill='#E5A50A'/>"
+            "<rect x='6' y='21' width='52' height='35' rx='4' fill='url(#f)'/>"
+            "<rect x='6' y='21' width='52' height='4' rx='2' fill='#FFF3C4' fill-opacity='0.75'/>" + g)
+
+
+def _sr_sheet(inner: str, fill: str = "#FBFCFD", edge: str = "#AEB8C4", fold: str = "#D9E0E8") -> str:
+    return (f"<path d='M14 5h25l13 13v37a4 4 0 0 1-4 4H14a4 4 0 0 1-4-4V9a4 4 0 0 1 4-4z' fill='{fill}' stroke='{edge}' stroke-width='1.6'/>"
+            f"<path d='M39 5v9a4 4 0 0 0 4 4h9z' fill='{fold}' stroke='{edge}' stroke-width='1.6' stroke-linejoin='round'/>" + inner)
+
+
+def _sr_lines(colour: str) -> str:
+    return "".join(f"<rect x='17' y='{y}' width='{w}' height='3' rx='1.5' fill='{colour}'/>" for y, w in ((26, 28), (33, 28), (40, 28), (47, 17)))
+
+
+def _sr_drive(extra: str = "", y: int = 20) -> str:
+    return ("<defs><linearGradient id='d' x1='0' y1='0' x2='0' y2='1'><stop offset='0' stop-color='#F1F4F6'/>"
+            "<stop offset='1' stop-color='#C3CDD4'/></linearGradient></defs>"
+            f"<rect x='5' y='{y}' width='54' height='27' rx='5' fill='url(#d)' stroke='#8799A5' stroke-width='1.6'/>"
+            f"<path d='M5 {y + 16}h54v6a5 5 0 0 1-5 5H10a5 5 0 0 1-5-5z' fill='#8799A5'/>"
+            f"<rect x='11' y='{y + 20}' width='24' height='3' rx='1.5' fill='#566772'/>"
+            f"<circle cx='50' cy='{y + 21.5}' r='2.7' fill='#4FC3F7'/>" + extra)
+
+
+_SR_ICONS: Dict[str, str] = {
+    "folder": _sr_folder(),
+    "folder-home": _sr_folder("home"), "folder-desktop": _sr_folder("desktop"), "folder-documents": _sr_folder("documents"),
+    "folder-downloads": _sr_folder("downloads"), "folder-music": _sr_folder("music"), "folder-pictures": _sr_folder("pictures"),
+    "folder-videos": _sr_folder("videos"),
+    "file": _sr_sheet(_sr_lines("#C5CCD5")),
+    "text": _sr_sheet(_sr_lines("#7B8CA3")),
+    "image": _sr_sheet("<rect x='15' y='25' width='34' height='26' rx='3' fill='#4FC3F7'/>"
+                       "<circle cx='41' cy='32' r='3.2' fill='#FFF59D'/>"
+                       "<path d='M15 48v-3l10-10 7 8 5-5 12 10v0a3 3 0 0 1-3 3H18a3 3 0 0 1-3-3z' fill='#43A047'/>"),
+    "video": _sr_sheet("<rect x='15' y='25' width='34' height='26' rx='3' fill='#7E57C2'/><path d='M27.5 31l12 7-12 7z' fill='#fff'/>"),
+    "audio": _sr_sheet("<g transform='translate(19.5,25) scale(1.08)' fill='#FB8C00'>" + _SR_FOLDER_GLYPHS["music"] + "</g>"),
+    "pdf": _sr_sheet("<rect x='4' y='30' width='43' height='18' rx='3' fill='#E53935'/>"
+                     "<text x='25.5' y='44' text-anchor='middle' font-family='sans-serif' font-weight='bold' font-size='13' fill='#fff'>PDF</text>"),
+    "archive": _sr_sheet("".join(f"<rect x='{24 if i % 2 else 28}' y='{8 + i * 4.5}' width='4' height='3.2' fill='#8D6E63'/>" for i in range(7))
+                         + "<rect x='22.5' y='40' width='11' height='12' rx='2.5' fill='#fff' stroke='#8D6E63' stroke-width='2.4'/>"
+                           "<rect x='26.5' y='44' width='3' height='4' fill='#8D6E63'/>", fill="#FFF4D0", edge="#CFA43A", fold="#F2DC9C"),
+    "code": _sr_sheet("<g fill='none' stroke='#1E88E5' stroke-width='3.6' stroke-linecap='round' stroke-linejoin='round'>"
+                      "<path d='M25 30l-8 8 8 8'/><path d='M39 30l8 8-8 8'/></g>"
+                      "<path d='M35 27l-6 22' stroke='#90A4AE' stroke-width='3' stroke-linecap='round'/>"),
+    "model": _sr_sheet("<path d='M32 23l13 6.5-13 6.5-13-6.5z' fill='#4DD0E1'/><path d='M19 29.5l13 6.5v16l-13-6.5z' fill='#00ACC1'/>"
+                       "<path d='M45 29.5v16L32 52V36z' fill='#00838F'/>"),
+    "volume": _sr_sheet("<g fill='#9575CD'><circle cx='24.5' cy='42' r='7.5'/><circle cx='34' cy='36' r='10'/><circle cx='42' cy='43' r='6.5'/>"
+                        "<rect x='22' y='41' width='24' height='8.5' rx='4'/></g>"),
+    "scene": _sr_sheet("<g stroke='#66BB6A' stroke-width='2.8'><path d='M22 31l20 8.5M22 48l20-8.5'/></g>"
+                       "<circle cx='22' cy='31' r='5' fill='#66BB6A'/><circle cx='22' cy='48' r='5' fill='#66BB6A'/><circle cx='42' cy='39.5' r='6' fill='#2E7D32'/>"),
+    "sheet": _sr_sheet("<rect x='15.5' y='26' width='33' height='25' rx='2.5' fill='#fff' stroke='#43A047' stroke-width='2'/>"
+                       "<path d='M15.5 28.5a2.5 2.5 0 0 1 2.5-2.5h28a2.5 2.5 0 0 1 2.5 2.5V33h-33z' fill='#43A047'/>"
+                       "<path d='M26.5 33v18M37.5 33v18M15.5 42h33' stroke='#43A047' stroke-width='2'/>"),
+    "font": _sr_sheet("<text x='31' y='49' text-anchor='middle' font-family='serif' font-weight='bold' font-size='22' fill='#455A64'>Aa</text>"),
+    "exec": _sr_sheet("<rect x='15' y='25' width='34' height='26' rx='3' fill='#37474F'/>"
+                      "<path d='M20.5 32l6 6-6 6' fill='none' stroke='#80CBC4' stroke-width='2.8' stroke-linecap='round' stroke-linejoin='round'/>"
+                      "<rect x='29' y='42.5' width='10' height='2.8' rx='1.4' fill='#80CBC4'/>"),
+    "drive": _sr_drive(),
+    "drive-usb": ("<rect x='8' y='21' width='34' height='22' rx='5' fill='#607D8B'/><rect x='8' y='21' width='34' height='9' rx='4.5' fill='#78909C'/>"
+                  "<rect x='42' y='25' width='15' height='14' fill='#DCE3E8' stroke='#8799A5' stroke-width='1.6'/>"
+                  "<rect x='47' y='28.5' width='5' height='2.4' fill='#8799A5'/><rect x='47' y='33.1' width='5' height='2.4' fill='#8799A5'/>"
+                  "<circle cx='16.5' cy='36' r='2.7' fill='#4FC3F7'/>"),
+    "drive-network": _sr_drive("<rect x='30.3' y='41' width='3.4' height='9' fill='#566772'/><rect x='9' y='52' width='46' height='3.4' rx='1.7' fill='#566772'/>"
+                               "<circle cx='32' cy='53.7' r='5' fill='#26A69A' stroke='#fff' stroke-width='1.4'/>", y=13),
+    "computer": ("<defs><linearGradient id='s' x1='0' y1='0' x2='1' y2='1'><stop offset='0' stop-color='#63CDF8'/><stop offset='1' stop-color='#1976D2'/></linearGradient></defs>"
+                 "<rect x='5' y='9' width='54' height='36' rx='4' fill='#37474F'/><rect x='9' y='13' width='46' height='28' rx='2' fill='url(#s)'/>"
+                 "<rect x='27.5' y='45' width='9' height='6' fill='#78909C'/><rect x='19' y='51' width='26' height='4.4' rx='2.2' fill='#90A4AE'/>"),
+    "network": ("<circle cx='32' cy='32' r='23' fill='#29B6F6' stroke='#0277BD' stroke-width='2'/>"
+                "<g fill='none' stroke='#fff' stroke-width='2.2' stroke-opacity='0.85'><ellipse cx='32' cy='32' rx='9.5' ry='23'/>"
+                "<path d='M9 32h46M13.5 20.5h37M13.5 43.5h37'/></g>"),
+    "trash": ("<rect x='15' y='19' width='34' height='38' rx='5' fill='#90A4AE'/><rect x='11' y='13' width='42' height='7' rx='3.5' fill='#607D8B'/>"
+              "<path d='M26 13V9.5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2V13' fill='none' stroke='#607D8B' stroke-width='3'/>"
+              + "".join(f"<rect x='{x}' y='26' width='3.4' height='24' rx='1.7' fill='#ECEFF1'/>" for x in (22.3, 30.3, 38.3))),
+    "recent": ("<circle cx='32' cy='32' r='22' fill='#F4F6F8' stroke='#546E7A' stroke-width='4.5'/>"
+               "<path d='M32 18.5V32l9.5 6' fill='none' stroke='#1E88E5' stroke-width='4.5' stroke-linecap='round' stroke-linejoin='round'/>"),
+    "star": "<path d='M32 6l7.9 16.4 18 2.4-13.2 12.5 3.3 17.9L32 46.4 16 55.2l3.3-17.9L6.1 24.8l18-2.4z' fill='#FFC42E' stroke='#E5A50A' stroke-width='2' stroke-linejoin='round'/>",
+}
+
+# extension → picture, for the formats a desktop MIME database knows least about (or guesses wrong)
+_SR_EXT_KIND: Dict[str, str] = {}
+for _kind, _exts in (
+        ("model", "obj fbx abc stl ply usd usda usdc usdz gltf glb dae 3ds lwo x3d ztl zpr"),
+        ("volume", "vdb bgeo geo sim bhclassic ifd"),
+        ("scene", "ma mb hip hiplc hipnc hda hdalc otl nk nknc blend c4d max mud spp sbs sbsar aep prproj drp katana gaffer"),
+        ("image", "exr dpx cin tif tiff png jpg jpeg jpe tga iff hdr sgi rgb psd psb tx tex rat pic bmp gif webp svg ico heic avif xcf kra cr2 cr3 nef arw dng raf"),
+        ("video", "mov mp4 m4v mkv avi webm mxf mpg mpeg wmv flv r3d braw ari ogv"),
+        ("audio", "wav aif aiff mp3 flac ogg oga opus m4a aac wma"),
+        ("archive", "zip tar gz tgz bz2 tbz2 xz txz zst 7z rar cpio iso rpm deb jar"),
+        ("code", "py pyw sh bash zsh csh js ts jsx tsx c h cpp hpp cc cs java go rs rb pl lua mel vex vfl osl glsl frag vert json xml yaml yml toml ini cfg conf html htm css"),
+        ("text", "txt md rst log nfo doc docx odt rtf tex"),
+        ("sheet", "csv tsv xls xlsx ods"),
+        ("pdf", "pdf"),
+        ("font", "ttf otf woff woff2 pfb"),
+        ("exec", "run appimage exe msi desktop")):
+    for _x in _exts.split():
+        _SR_EXT_KIND.setdefault("." + _x, _kind)
+
+# system icon name (exact, then prefix) → picture, for everything that is not a plain file
+_SR_NAME_KIND = (
+    ("user-home", "folder-home"), ("user-desktop", "folder-desktop"), ("folder-documents", "folder-documents"),
+    ("folder-download", "folder-downloads"), ("folder-music", "folder-music"), ("folder-pictures", "folder-pictures"),
+    ("folder-videos", "folder-videos"), ("folder", "folder"), ("inode-directory", "folder"),
+    ("drive-removable", "drive-usb"), ("media-removable", "drive-usb"), ("media-flash", "drive-usb"),
+    ("network-server", "drive-network"), ("folder-remote", "drive-network"), ("drive-", "drive"), ("media-", "drive"),
+    ("computer", "computer"), ("network", "network"), ("user-trash", "trash"), ("document-open-recent", "recent"),
+    ("starred", "star"), ("user-bookmarks", "star"),
+    ("application-pdf", "pdf"), ("x-office-spreadsheet", "sheet"), ("x-office-document", "text"), ("font-", "font"),
+    ("package-", "archive"), ("application-x-executable", "exec"), ("application-x-shellscript", "code"), ("text-x-script", "code"),
+    ("text-html", "code"), ("image-", "image"), ("video-", "video"), ("audio-", "audio"), ("text-", "text"),
+    ("application-x-generic", "file"), ("unknown", "file"),
+)
+
+
+def sr_icon_kind(icon, entry=None) -> Optional[str]:
+    """Which Shotrover picture stands for this icon / entry, or None to keep the system icon."""
+    names: List[str] = []
+    if isinstance(icon, Gio.ThemedIcon):
+        names = list(icon.get_names())
+    if entry is not None and not getattr(entry, "is_dir", False) and getattr(entry, "name", "") \
+            and not getattr(entry, "drive_kind", "") and getattr(entry, "usage", None) is None:
+        low = entry.name.lower()
+        ext = os.path.splitext(low)[1]
+        if low.endswith((".bgeo.sc", ".bgeo.gz", ".geo.sc", ".geo.gz")):
+            return "volume"
+        if low.endswith((".tar.gz", ".tar.bz2", ".tar.xz", ".tar.zst")):
+            return "archive"
+        k = _SR_EXT_KIND.get(ext)
+        if k:
+            return k
+    for n in names:
+        base = n[:-9] if n.endswith("-symbolic") else n
+        for key, kind in _SR_NAME_KIND:
+            if base == key or (key.endswith("-") and base.startswith(key)) or base.startswith(key + "-"):
+                return kind
+    if entry is not None and not getattr(entry, "is_dir", False) and getattr(entry, "name", "") and names:
+        return "file"
+    return None
+
+
+_SR_SVG_OK: Optional[bool] = None
+
+
+def sr_icon_pixbuf(kind: str, size: int) -> Optional[GdkPixbuf.Pixbuf]:
+    """Render one picture of the built-in set at `size` px. None if this system cannot rasterise SVG."""
+    global _SR_SVG_OK
+    body = _SR_ICONS.get(kind)
+    if body is None or _SR_SVG_OK is False:
+        return None
+    svg = f"<svg xmlns='http://www.w3.org/2000/svg' width='{size}' height='{size}' viewBox='0 0 64 64'>{body}</svg>"
+    try:
+        stream = Gio.MemoryInputStream.new_from_bytes(GLib.Bytes.new(svg.encode()))
+        pb = GdkPixbuf.Pixbuf.new_from_stream_at_scale(stream, size, size, True, None)
+        _SR_SVG_OK = True
+        return pb
+    except GLib.Error:
+        if _SR_SVG_OK is None:
+            _SR_SVG_OK = False
+        return None
+
+
+# ---- colour scheme: follow the desktop, or force a light / dark look for this app only
+_THEME_ORIG: Optional[Tuple[str, bool]] = None
+
+
+def _gtk_theme_exists(name: str) -> bool:
+    if name in ("Adwaita", "HighContrast", "HighContrastInverse"):
+        return True                                   # built into GTK
+    dirs = [os.path.join(HOME, ".themes"), os.path.join(GLib.get_user_data_dir(), "themes")]
+    dirs += [os.path.join(d, "themes") for d in GLib.get_system_data_dirs()]
+    return any(os.path.isfile(os.path.join(d, name, "gtk-3.0", "gtk.css")) for d in dirs)
+
+
+def theme_variant(name: str, dark: bool) -> Tuple[str, bool]:
+    """(theme name, prefer-dark flag) that shows `name` in its light or dark form. Themes differ: some honour
+    the prefer-dark flag (Adwaita, anything shipping a gtk-dark.css), most ship the two looks as separate
+    themes (Foo / Foo-Dark, Foo-Light / Foo-Dark, Foo-light / Foo-dark). When this theme has neither, GTK's
+    own Adwaita is used so the choice always takes effect."""
+    import re
+    if name in ("Adwaita", "Adwaita-dark"):
+        return "Adwaita", dark
+    tok = re.search(r"(?i)[-_ ](dark|light)(?=$|[-_ ])", name)
+    has = tok.group(1).lower() if tok else ""
+    if has == ("dark" if dark else "light"):
+        return name, dark
+    base, tail = (name[:tok.start()], name[tok.end():]) if tok else (name, "")
+    if dark:
+        cands = [base + "-Dark" + tail, base + "-dark" + tail]
+    else:
+        cands = [base + "-Light" + tail, base + "-light" + tail] + ([base + tail] if has else [])
+    for c in cands:
+        if _gtk_theme_exists(c):
+            return c, dark
+    if not has:
+        if not dark:
+            return name, False                        # a plain theme is its own light form
+        dirs = [os.path.join(HOME, ".themes"), os.path.join(GLib.get_user_data_dir(), "themes")]
+        dirs += [os.path.join(d, "themes") for d in GLib.get_system_data_dirs()]
+        if any(os.path.isfile(os.path.join(d, name, "gtk-3.0", "gtk-dark.css")) for d in dirs):
+            return name, True
+    return "Adwaita", dark
+
+
+def apply_theme_mode(mode: str):
+    """'system' restores what the desktop asked for; 'light' / 'dark' override it for this process only."""
+    global _THEME_ORIG
+    st = Gtk.Settings.get_default()
+    if st is None:
+        return
+    if _THEME_ORIG is None:
+        _THEME_ORIG = (st.get_property("gtk-theme-name") or "Adwaita", bool(st.get_property("gtk-application-prefer-dark-theme")))
+    name, prefer = _THEME_ORIG
+    if mode in ("light", "dark"):
+        name, prefer = theme_variant(_THEME_ORIG[0], mode == "dark")
+    if st.get_property("gtk-theme-name") != name:
+        st.set_property("gtk-theme-name", name)
+    if bool(st.get_property("gtk-application-prefer-dark-theme")) != prefer:
+        st.set_property("gtk-application-prefer-dark-theme", prefer)
+
+
+# ---- first start: pick the look once (Preferences → View changes it later)
+class WelcomeDialog(Gtk.Dialog):
+    SAMPLES = (("folder", None), ("folder-documents", None), ("drive-harddisk", None), ("image-x-generic", "a.png"),
+               ("video-x-generic", "a.mp4"), ("application-x-generic", "a.abc"), ("application-pdf", "a.pdf"))
+
+    def __init__(self, parent, cfg: dict, on_done: Callable):
+        super().__init__(title="Welcome to Shotrover", transient_for=parent, modal=True)
+        self.cfg, self.on_done = cfg, on_done
+        self.set_resizable(False)
+        self.add_button("_Continue", Gtk.ResponseType.OK)
+        self.set_default_response(Gtk.ResponseType.OK)
+        box = self.get_content_area()
+        box.set_border_width(18)
+        box.set_spacing(10)
+        head = Gtk.Label(xalign=0)
+        head.set_markup("<span size='x-large' weight='bold'>Choose how Shotrover looks</span>")
+        box.pack_start(head, False, False, 0)
+        sub = Gtk.Label(label="You can change both later in Preferences → View.", xalign=0)
+        sub.get_style_context().add_class("dim-label")
+        box.pack_start(sub, False, False, 0)
+
+        lab = Gtk.Label(xalign=0, margin_top=8)
+        lab.set_markup("<b>Icons</b>")
+        box.pack_start(lab, False, False, 0)
+        self.icon_radios = {}
+        group = None
+        for value, title, note in (("shotrover", "Shotrover icons", "Yellow folders and a clear picture for every production file type"),
+                                   ("system", "System icons", "The icon theme your desktop already uses")):
+            rb = Gtk.RadioButton.new_from_widget(group)
+            group = group or rb
+            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+            t = Gtk.Label(xalign=0)
+            t.set_markup(f"<b>{title}</b>\n<small>{GLib.markup_escape_text(note)}</small>")
+            card.pack_start(t, False, False, 0)
+            row = Gtk.Box(spacing=10)
+            for name, fname in self.SAMPLES:
+                ent = None
+                if fname:
+                    ent = Entry()
+                    ent.name = fname
+                pb = ICONS.pixbuf(Gio.ThemedIcon.new_with_default_fallbacks(name), 48, ent, mode=value)
+                row.pack_start(Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_icon_name(name, Gtk.IconSize.DIALOG), False, False, 0)
+            card.pack_start(row, False, False, 0)
+            rb.add(card)
+            rb.set_active(cfg.get("icons", "shotrover") == value)
+            box.pack_start(rb, False, False, 0)
+            self.icon_radios[value] = rb
+
+        lab = Gtk.Label(xalign=0, margin_top=8)
+        lab.set_markup("<b>Colours</b>")
+        box.pack_start(lab, False, False, 0)
+        trow = Gtk.Box(spacing=18)
+        self.theme_radios = {}
+        group = None
+        for value, title in (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")):
+            rb = Gtk.RadioButton.new_with_label_from_widget(group, title)
+            group = group or rb
+            rb.set_active(cfg.get("theme", "system") == value)
+            rb.connect("toggled", lambda b, v=value: b.get_active() and apply_theme_mode(v))     # live, so the choice is seen
+            trow.pack_start(rb, False, False, 0)
+            self.theme_radios[value] = rb
+        box.pack_start(trow, False, False, 0)
+        self.connect("response", self._response)
+        self.show_all()
+
+    def _response(self, d, r):
+        # closing the window any other way keeps what is selected too: the question is asked once
+        self.cfg["icons"] = next((v for v, rb in self.icon_radios.items() if rb.get_active()), "shotrover")
+        self.cfg["theme"] = next((v for v, rb in self.theme_radios.items() if rb.get_active()), "system")
+        self.cfg["setup_done"] = True
+        self.destroy()
+        self.on_done()
 
 
 # --------------------------------------------------------------------------- input diagnostics
@@ -7698,16 +8137,17 @@ class IconGrid(Gtk.Layout):
         self._relayout()
 
     # ---- layout
-    def configure(self, icon_size: int, horizontal: bool, item_width: int, single_click: bool):
+    def configure(self, icon_size: int, horizontal: bool, item_width: int, single_click: bool, extra_lines: int = 0):
+        """extra_lines: more text rows than the layout normally has (search results add where the file is)."""
         self.icon_size, self.horizontal, self.single_click = icon_size, horizontal, single_click
         probe = self.create_pango_layout("Xg")
         line = probe.get_pixel_size()[1] + 1
         if horizontal:
-            self.text_lines = 3 if icon_size >= 48 else 1
+            self.text_lines = (3 + extra_lines) if icon_size >= 48 else 1
             self.tile_w = item_width
             self.tile_h = max(icon_size, self.text_lines * line) + 12
         else:
-            self.text_lines = 2
+            self.text_lines = 2 + extra_lines
             self.tile_w = max(90, item_width)
             self.tile_h = icon_size + 10 + self.text_lines * line + 10
         self._layout_cache.clear()
@@ -7745,6 +8185,9 @@ class IconGrid(Gtk.Layout):
     # ---- drawing
     def _draw(self, w, cr):
         n = self._n()
+        # Gtk.Layout paints no backdrop of its own: without this the grid showed the window colour while the
+        # list layouts showed the theme's base colour, so the file area changed shade with the layout.
+        Gtk.render_background(self.get_style_context(), cr, 0, 0, self.get_allocated_width(), self.get_allocated_height())
         if n == 0:
             return False
         # GTK 3.24 hands us a widget-relative cairo context; the scrolled canvas lives in the bin window,
@@ -8093,6 +8536,62 @@ def _rounded(cr, x, y, w, h, r):
     cr.close_path()
 
 
+def draw_capacity_bar(cr, sc: Gtk.StyleContext, x: float, y: float, w: float, h: float, frac: Optional[float]):
+    """A used-space pill: faint track, fill in the theme's accent (the danger colour past 90 %). The fill is
+    never narrower than the bar is tall, so a nearly empty drive shows a round dot rather than a sliver."""
+    fg = sc.get_color(Gtk.StateFlags.NORMAL)
+    r = h / 2.0
+    _rounded(cr, x, y, w, h, r)
+    cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.14)
+    cr.fill()
+    if frac is None:
+        return
+    f = max(0.0, min(1.0, frac))
+    if f <= 0:
+        return
+    _rounded(cr, x, y, max(h, w * f), h, r)
+    if f > 0.9:
+        d = Gdk.RGBA()
+        d.parse(COL_DANGER)
+        cr.set_source_rgb(d.red, d.green, d.blue)
+    else:
+        ok, sel = sc.lookup_color("theme_selected_bg_color")
+        if ok:
+            cr.set_source_rgb(sel.red, sel.green, sel.blue)
+        else:
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.6)
+    cr.fill()
+
+
+class UsageRenderer(Gtk.CellRenderer):
+    """'Space used' cell in the list layouts: the same pill as the This PC tiles, with the percentage beside
+    it. (Gtk.CellRendererProgress drew a fat trough with the text on top of the fill, and a blob at 13 %.)"""
+
+    fraction = GObject.Property(type=float, default=0.0)
+    text = GObject.Property(type=str, default="")
+
+    def do_get_preferred_width(self, widget):
+        return 120, 170
+
+    def do_get_preferred_height(self, widget):
+        return 14, 14
+
+    def do_render(self, cr, widget, background_area, cell_area, flags):
+        sc = widget.get_style_context()
+        pad = 6
+        bar_w = max(40, min(96, cell_area.width - 2 * pad - 70))
+        bar_h = 6
+        y = cell_area.y + (cell_area.height - bar_h) / 2.0
+        draw_capacity_bar(cr, sc, cell_area.x + pad, y, bar_w, bar_h, self.fraction)
+        lay = widget.create_pango_layout(self.text or "")
+        tw, th = lay.get_pixel_size()
+        if cell_area.width - bar_w - 3 * pad >= tw:
+            fg = sc.get_color(Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.75)
+            cr.move_to(cell_area.x + pad + bar_w + pad + 2, cell_area.y + (cell_area.height - th) / 2.0)
+            PangoCairo.show_layout(cr, lay)
+
+
 # --------------------------------------------------------------------------- This PC: Windows-style tile view
 class DriveBar(Gtk.DrawingArea):
     """The thin capacity bar under a drive's name: used/total, red past 90 % like Explorer."""
@@ -8109,21 +8608,7 @@ class DriveBar(Gtk.DrawingArea):
 
     def _draw(self, w, cr):
         a = self.get_allocation()
-        sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
-        _rounded(cr, 0, 2, a.width, a.height - 4, 2)
-        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.15)
-        cr.fill()
-        if self.frac is not None:
-            f = max(0.0, min(1.0, self.frac))
-            if f > 0:
-                _rounded(cr, 0, 2, max(4, a.width * f), a.height - 4, 2)
-                if f > 0.9:
-                    cr.set_source_rgb(0.85, 0.22, 0.2)
-                else:
-                    ok, sel = sc.lookup_color("theme_selected_bg_color")
-                    cr.set_source_rgb(sel.red, sel.green, sel.blue) if ok else cr.set_source_rgb(0.2, 0.5, 0.9)
-                cr.fill()
+        draw_capacity_bar(cr, self.get_style_context(), 0, 2, a.width, a.height - 4, self.frac)
         return False
 
 
@@ -8183,7 +8668,6 @@ class PCView(Gtk.ScrolledWindow):
             self.flows.append(fb)
             self.box.pack_start(exp, False, False, 0)
             sep = Gtk.Separator()
-            sep.set_opacity(0.35)
             self.box.pack_start(sep, False, False, 2)
         self.box.show_all()
         self.refresh()
@@ -8191,7 +8675,7 @@ class PCView(Gtk.ScrolledWindow):
     def _make_tile(self, e: Entry):
         is_drive = e.section not in ("Folders",) and (getattr(e, "drive_kind", "") or e.usage is not None)
         h = Gtk.Box(spacing=10, margin=6)
-        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
+        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
         img.set_valign(Gtk.Align.START)
         h.pack_start(img, False, False, 0)
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -8206,7 +8690,7 @@ class PCView(Gtk.ScrolledWindow):
             v.pack_start(info, False, False, 0)
             h.set_size_request(250, -1)
         else:
-            sub = Gtk.Label(label=e.location or "", xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
+            sub = Gtk.Label(label=pretty_path(e.location or ""), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
             sub.get_style_context().add_class("dim-label")
             v.pack_start(sub, False, False, 0)
             h.set_size_request(200, -1)
@@ -11096,7 +11580,7 @@ def optional_deps() -> List[dict]:
              found=shutil.which("magick") or shutil.which("convert"), cmd=pkg_install("ImageMagick", "imagemagick", "imagemagick", "ImageMagick")),
         dict(key="ffmpeg", name="ffmpeg", gives="video frame thumbnails and media info",
              found=shutil.which("ffmpeg"), cmd=pkg_install("ffmpeg-free", "ffmpeg", "ffmpeg", "ffmpeg")),
-        dict(key="pdftoppm", name="poppler-utils", gives="PDF first-page previews",
+        dict(key="pdftoppm", name="poppler-utils", gives="PDF page previews and thumbnails",
              found=shutil.which("pdftoppm"), cmd=pkg_install("poppler-utils", "poppler-utils", "poppler", "poppler-tools")),
         dict(key="gtksourceview", name="GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
              found="loaded" if GtkSource is not None else None, cmd=pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4")),
@@ -17515,17 +17999,184 @@ def scene_object_model(path: str, key: str, max_faces: int = 400000, maya: str =
 
 
 # --------------------------------------------------------------------------- icon / thumbnail cache
+# Which files get a picture of their contents in the icon layouts, and how it is made:
+#   pixbuf  – GdkPixbuf reads it (PNG, JPEG, TIFF, WebP, SVG…)
+#   decode  – our own decoders (EXR, HDR, PSD, Maya IFF), in a worker process
+#   tool    – ffmpeg / pdftoppm / oiiotool / ImageMagick render one frame or page
+#   model   – the 3D reader plus the software rasteriser, in a worker process (needs numpy)
+THUMB_VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mxf", ".ogv", ".mpg", ".mpeg", ".wmv", ".flv", ".ts")
+THUMB_TOOL_EXTS = (".pdf", ".dds", ".dpx", ".cin", ".tx", ".tex", ".tga", ".sgi", ".rgb", ".jp2", ".j2k", ".heic", ".avif")
+THUMB_MODEL_EXTS = (".obj", ".stl", ".ply", ".fbx", ".usd", ".usda", ".usdc", ".usdz", ".abc", ".gltf", ".glb", ".dae", ".3ds", ".x3d", ".lwo", ".off")
+THUMB_MODEL_TEXT_CAP = 64 << 20         # formats parsed whole (OBJ, ASCII STL / PLY…)
+THUMB_MODEL_CAP = 512 << 20             # Alembic / USD / Houdini caches: only the first sample is read
+
+
+def thumb_kind(e: "Entry") -> str:
+    """'' when the entry keeps its file-type icon, else how its thumbnail is produced (see above)."""
+    if not e.path or e.is_dir or e.size is None or e.size < 64:
+        return ""
+    ext = e.ext.lower()
+    ct = e.content_type or ""
+    if ext in PREVIEW_DECODERS:
+        return "decode" if e.size < (200 << 20) else ""
+    if ext == ".blend":
+        return "blend"
+    if ext in THUMB_MODEL_EXTS or houdini_kind(e.name):
+        if np is None:
+            return ""
+        binary = ext in (".abc", ".usd", ".usdc", ".usdz", ".fbx", ".glb") or bool(houdini_kind(e.name))
+        return "model" if e.size < (THUMB_MODEL_CAP if binary else THUMB_MODEL_TEXT_CAP) else ""
+    if ct.startswith("video/") or ext in THUMB_VIDEO_EXTS:
+        return "tool"
+    if ext in THUMB_TOOL_EXTS or ct == "application/pdf":
+        return "tool"
+    if ct.startswith("image/"):
+        return "pixbuf" if e.size < (40 << 20) else ""         # a folder of giant TIFFs stays quick to open
+    return ""
+
+
+def _thumb_decode(path: str, size: int):
+    """Worker process: built-in decoder → ('rgb', w, h, bytes) or None."""
+    fn = PREVIEW_DECODERS.get(os.path.splitext(path)[1].lower())
+    img = fn(path, size, size) if fn else None
+    return ("rgb", img.w, img.h, img.rgb) if img is not None else None
+
+
+def _thumb_blend(path: str, size: int):
+    """Worker process: the thumbnail Blender stores in the file."""
+    img = blend_thumbnail(BlendFile(path))
+    return ("rgb", img.w, img.h, img.rgb) if img is not None else None
+
+
+_THUMB_KEY = (255, 0, 255)       # never produced by the mesh shader, so it can stand for "no surface here"
+
+
+def _thumb_model(path: str, size: int):
+    """Worker process: read the model (first sample, capped face count), render one three-quarter view with
+    the software rasteriser → ('rgba', w, h, bytes). The backdrop is keyed out so the tile shows through."""
+    m = load_model(path, 150000)
+    if not m or "error" in m:
+        return None
+    f32 = np.float32
+    V = np.asarray(m["verts"], dtype=f32).reshape(-1, 3)
+    F = np.asarray(m["faces"], dtype=np.int32).reshape(-1, 3)
+    N = np.asarray(m["normals"], dtype=f32).reshape(-1, 3) if m.get("normals") is not None and len(m["normals"]) else None
+    VN = np.asarray(m["vnormals"], dtype=f32).reshape(-1, 3) if m.get("vnormals") is not None and len(m["vnormals"]) else None
+    EX = {k: m[k] for k in ("points", "pcolor", "psize", "vpts", "vden", "vsize") if k in m} or None
+    px = max(96, size) * 2                       # rendered at 2× and averaged down: the rasteriser has no anti-aliasing
+    keyed = EX is None
+    bg = _THUMB_KEY if keyed else (30, 30, 32)
+    res = software_render(V, F, N, VN, (px, px, 0.6, 0.35, 1.0, 0, 0, True, False, bg, (1.0, 1.0, 1.0)), EX)
+    if res is None:
+        return None
+    if isinstance(res, tuple):
+        w, h, buf = res
+        a = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
+    else:
+        a = np.asarray(res, dtype=np.uint8)
+        h, w = a.shape[:2]
+    rgb = a[:, :, 2::-1].astype(np.float32)                          # BGRX → RGB
+    if keyed:
+        alpha = np.where((a[:, :, 2] == bg[0]) & (a[:, :, 1] == bg[1]) & (a[:, :, 0] == bg[2]), 0.0, 255.0).astype(np.float32)
+    else:
+        alpha = np.full((h, w), 255.0, dtype=np.float32)
+    # 2×2 box filter, colour weighted by coverage so the keyed backdrop never tints the silhouette
+    h2, w2 = h // 2, w // 2
+    al = alpha[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2)
+    cov = al.sum(axis=(1, 3))
+    col = (rgb[:h2 * 2, :w2 * 2] * alpha[:h2 * 2, :w2 * 2, None]).reshape(h2, 2, w2, 2, 3).sum(axis=(1, 3))
+    out = np.zeros((h2, w2, 4), dtype=np.uint8)
+    out[:, :, :3] = np.clip(col / np.maximum(cov, 1.0)[:, :, None], 0, 255).astype(np.uint8)
+    out[:, :, 3] = np.clip(cov / 4.0, 0, 255).astype(np.uint8)
+    return ("rgba", w2, h2, out.tobytes())
+
+
+_THUMB_POOL = None
+_THUMB_POOL_LOCK = threading.Lock()
+
+
+def thumb_heavy(fn, *args, timeout: float = 45.0):
+    """Run a thumbnail job in its own small pool of worker processes, apart from the preview pane's decoder:
+    a folder of EXRs queueing forty decodes must not hold up the file the user just clicked on. A job that
+    hangs or crashes its worker costs that one thumbnail: the pool is torn down and rebuilt on the next call."""
+    global _THUMB_POOL
+    try:
+        with _THUMB_POOL_LOCK:
+            if _THUMB_POOL is None:
+                from concurrent.futures import ProcessPoolExecutor
+                import multiprocessing
+                _THUMB_POOL = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("fork"), initializer=pin_worker)
+            pool = _THUMB_POOL
+        return pool.submit(fn, *args).result(timeout=timeout)
+    except Exception:
+        with _THUMB_POOL_LOCK:
+            pool, _THUMB_POOL = _THUMB_POOL, None
+        if pool is not None:
+            try:
+                for p in list(getattr(pool, "_processes", {}).values()):
+                    p.kill()
+                pool.shutdown(wait=False)
+            except Exception:
+                pass
+        return None
+
+
+def warm_thumb_pool():
+    """Fork both thumbnail workers at startup, while the process is small (see warm_workers)."""
+    global _THUMB_POOL
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+    with _THUMB_POOL_LOCK:
+        if _THUMB_POOL is None:
+            _THUMB_POOL = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("fork"), initializer=pin_worker)
+        pool = _THUMB_POOL
+    for f in [pool.submit(time.sleep, 0.2), pool.submit(time.sleep, 0.2)]:      # two at once → two processes
+        f.result(timeout=10)
+
+
+def shutdown_thumb_pool():
+    global _THUMB_POOL
+    with _THUMB_POOL_LOCK:
+        pool, _THUMB_POOL = _THUMB_POOL, None
+    if pool is not None:
+        try:
+            for p in list(getattr(pool, "_processes", {}).values()):
+                p.kill()
+            pool.shutdown(wait=False)
+        except Exception:
+            pass
+
+
 class IconCache:
+    THREADS = 3                 # the work itself happens in GdkPixbuf (GIL released), a tool or a worker process
+    MAX_THUMBS = 6000           # in memory only: nothing about the user's files is written to a cache on disk
+
     def __init__(self):
         self.cache: Dict[Tuple[str, int], GdkPixbuf.Pixbuf] = {}
         self.thumbs: Dict[Tuple[str, int], Optional[GdkPixbuf.Pixbuf]] = {}
         self.pending: set = set()
         self.theme = Gtk.IconTheme.get_default()
         self.lock = threading.Lock()
-        self.queue: List[Tuple[str, int, Callable]] = []
-        self.worker: Optional[threading.Thread] = None
+        self.queue: List[Tuple[str, int, Callable, str, str]] = []
+        self.workers = 0
 
-    def pixbuf(self, icon: Optional[Gio.Icon], size: int) -> Optional[GdkPixbuf.Pixbuf]:
+    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (p2e)
+
+    def set_icon_set(self, name: str):
+        self.icon_set = "shotrover" if name == "shotrover" else "system"
+
+    def pixbuf(self, icon: Optional[Gio.Icon], size: int, entry=None, mode: Optional[str] = None) -> Optional[GdkPixbuf.Pixbuf]:
+        """The picture for an icon at `size` px. Pass the Entry when there is one: the built-in set picks by file
+        extension (a desktop icon theme cannot tell an Alembic cache from any other unknown binary)."""
+        if (mode or self.icon_set) == "shotrover":
+            kind = sr_icon_kind(icon, entry)
+            if kind:
+                skey = ("sr:" + kind, size)
+                pb = self.cache.get(skey)
+                if pb is None and skey not in self.cache:
+                    pb = self.cache[skey] = sr_icon_pixbuf(kind, size)
+                if pb is not None:
+                    return pb
         key = (icon.to_string() if icon else "text-x-generic", size)
         pb = self.cache.get(key)
         if pb is not None:
@@ -17559,7 +18210,8 @@ class IconCache:
 
     def thumbnail(self, e: Entry, size: int, on_ready: Callable) -> Optional[GdkPixbuf.Pixbuf]:
         """Return a cached thumbnail, or None and schedule generation."""
-        if not e.path or not (e.content_type or "").startswith("image/") or (e.size is not None and e.size < 64):
+        kind = thumb_kind(e)
+        if not kind:
             return None
         key = (e.path, size)
         if key in self.thumbs:
@@ -17568,28 +18220,76 @@ class IconCache:
             return None
         self.pending.add(key)
         with self.lock:
-            self.queue.append((e.path, size, on_ready))
-            if self.worker is None or not self.worker.is_alive():
-                self.worker = threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True)
-                self.worker.start()
+            self.queue.append((e.path, size, on_ready, kind, e.content_type or ""))
+            if len(self.queue) > 600:                     # scrolled far past them: forget the oldest requests
+                for path, sz, _cb, _k, _ct in self.queue[:-600]:
+                    self.pending.discard((path, sz))
+                del self.queue[:-600]
+            if self.workers < self.THREADS:
+                self.workers += 1
+                threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True).start()
         return None
 
     def _work(self):
         while True:
             with self.lock:
                 if not self.queue:
+                    self.workers -= 1
                     return
-                path, size, cb = self.queue.pop()
+                path, size, cb, kind, ct = self.queue.pop()         # newest first: what is on screen now
             pb = None
             try:
-                if os.path.getsize(path) < 40 << 20:
-                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
-                    pb = pb.apply_embedded_orientation() or pb
+                pb = self._make(path, size, kind, ct)
             except Exception:
                 pb = None
             GLib.idle_add(self._done, path, size, pb, cb)
 
+    @staticmethod
+    def _fit(pb: GdkPixbuf.Pixbuf, size: int) -> GdkPixbuf.Pixbuf:
+        w, h = pb.get_width(), pb.get_height()
+        if w <= size and h <= size:
+            return pb
+        k = min(size / w, size / h)
+        return pb.scale_simple(max(1, int(w * k)), max(1, int(h * k)), GdkPixbuf.InterpType.BILINEAR)
+
+    def _make(self, path: str, size: int, kind: str, ct: str) -> Optional[GdkPixbuf.Pixbuf]:
+        """Worker thread: build the thumbnail for one file (None = keep the file-type icon)."""
+        if kind == "pixbuf":
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                return pb.apply_embedded_orientation() or pb
+            except GLib.Error:
+                kind = "tool"                   # an image type GdkPixbuf has no loader for here
+        res = None
+        if kind == "decode":
+            res = thumb_heavy(_thumb_decode, path, size)
+            if res is None:
+                kind = "tool"                   # e.g. an EXR compression the built-in reader doesn't do
+        elif kind == "blend":
+            res = thumb_heavy(_thumb_blend, path, size, timeout=20.0)
+        elif kind == "model":
+            res = thumb_heavy(_thumb_model, path, size)
+        if res is not None:
+            mode, w, h, data = res
+            alpha = mode == "rgba"
+            pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, alpha, 8, w, h, w * (4 if alpha else 3))
+            return self._fit(pb, size)
+        if kind == "tool":
+            conv = convert_with_tools(path, ct, size * 2, size * 2, tag="thumb")
+            if conv:
+                try:
+                    return GdkPixbuf.Pixbuf.new_from_file_at_scale(conv[0], size, size, True)
+                finally:
+                    try:
+                        os.remove(conv[0])
+                    except OSError:
+                        pass
+        return None
+
     def _done(self, path, size, pb, cb):
+        if len(self.thumbs) >= self.MAX_THUMBS:
+            for k in list(self.thumbs)[:self.MAX_THUMBS // 4]:      # dicts keep insertion order: drop the oldest quarter
+                del self.thumbs[k]
         self.thumbs[(path, size)] = pb
         self.pending.discard((path, size))
         if pb is not None:
@@ -17678,7 +18378,7 @@ class FolderView(Gtk.Box):
         # slim header shown only in split view
         self.header = Gtk.Box(spacing=4)
         self.header.get_style_context().add_class("pane-header")
-        self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, margin_start=8)
+        self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, margin_start=8)
         self.header.pack_start(self.header_label, True, True, 0)
         hclose = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         hclose.set_relief(Gtk.ReliefStyle.NONE)
@@ -17697,6 +18397,7 @@ class FolderView(Gtk.Box):
         self.store = Gtk.ListStore(GObject.TYPE_PYOBJECT, bool, GdkPixbuf.Pixbuf, str)
         self._index: Optional[Dict[str, int]] = None
         self.stack = Gtk.Stack()
+        self.stack.get_style_context().add_class("filearea")        # one backdrop for every layout (see CSS)
         self.pack_start(self.stack, True, True, 0)
         self.err_label = Gtk.Label(xalign=0.5)
         self.err_label.get_style_context().add_class("dim-label")
@@ -17747,10 +18448,18 @@ class FolderView(Gtk.Box):
             cols.remove("size")
             cols.insert(1, "size")
         if self.search or self.path in (TRASH, QUICK, RECENT):
-            if "location" not in cols:
-                cols.append("location")
+            # right after Name and Size, not at the far end: with the preview pane open the last column sits
+            # off-screen, and search results that differ only by folder then look like duplicates
+            if "location" in cols:
+                cols.remove("location")
+            cols.insert(min(2, len(cols)), "location")
+        if self.layout == "content":
+            # the second line under each name already says type and size: repeating them as columns is noise
+            cols = [c for c in cols if c not in ("size", "type")]
+            if "modified" not in cols:
+                cols.append("modified")
         if self.path == TRASH:
-            cols.insert(2, "deleted")
+            cols.insert(min(2, len(cols)), "deleted")
         if self.path == THISPC:
             cols = ["name", "usage", "type"]
         if self.path == NETWORK:
@@ -17778,7 +18487,7 @@ class FolderView(Gtk.Box):
                 col.set_expand(True)
                 col.set_min_width(180)
             elif key == "usage":
-                prog = Gtk.CellRendererProgress()
+                prog = UsageRenderer()
                 col.pack_start(prog, True)
                 col.set_cell_data_func(prog, self._usage_data)
                 col.set_min_width(160)
@@ -17811,26 +18520,35 @@ class FolderView(Gtk.Box):
             cell.set_property("pixbuf", None)
             return
         size = 32 if self.layout == "content" else 16
-        pb = ICONS.pixbuf(v.icon, size)
+        pb = None
+        if size >= 32 and len(self.entries) <= 2500:
+            pb = ICONS.thumbnail(v, size, self._thumb_ready)
+        pb = pb or ICONS.pixbuf(v.icon, size, v)
         cell.set_property("pixbuf", ICONS.desaturated(pb) if self.muted else pb)
 
     def _name_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
         v = model[it][0]
         if not isinstance(v, Entry):
-            cell.set_property("markup", f"<span foreground='#1a5fb4'><b>{GLib.markup_escape_text(str(v))}</b></span>")
+            cell.set_property("markup", f"<span alpha='72%'><b>{GLib.markup_escape_text(str(v))}</b></span>")
             cell.set_property("foreground-set", False)
             return
         name = self.win.display_name(v)
         if self.layout == "content":
-            sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {v.location}" if v.location else "")
-            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='#777'>{GLib.markup_escape_text(sub)}</span></small>")
+            sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {pretty_path(v.location)}" if v.location else "")
+            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>")
         else:
             cell.set_property("markup", GLib.markup_escape_text(name))
         cut = self.win.clipboard["mode"] == "cut" and v.path in self.win.clipboard["paths"]
         dim = cut or v.hidden or self.muted
-        cell.set_property("foreground", "#999999" if dim else None)
-        cell.set_property("foreground-set", bool(dim))
+        cell.set_property("foreground-rgba", self._dim_rgba() if dim else None)
+
+    def _dim_rgba(self):
+        """Dimmed text (inactive split pane, hidden and cut files) relative to the text colour right now, so it
+        stays dimmer than normal text when the window is unfocused and the theme has already greyed everything."""
+        ctx = self.tree.get_style_context()
+        fg = ctx.get_color(Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
+        return Gdk.RGBA(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
 
     def _text_data(self, col, cell, model, it, key):
         hover_bg(self.tree, cell, model, it)
@@ -17839,8 +18557,7 @@ class FolderView(Gtk.Box):
             cell.set_property("text", "")
             return
         cell.set_property("text", self.win.cell_text(v, key))
-        cell.set_property("foreground", "#999999" if self.muted else None)
-        cell.set_property("foreground-set", self.muted)
+        cell.set_property("foreground-rgba", self._dim_rgba() if self.muted else None)
 
     def _usage_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
@@ -17848,7 +18565,7 @@ class FolderView(Gtk.Box):
         if isinstance(v, Entry) and v.usage:
             used, total = v.usage
             pct = int(100 * used / total) if total else 0
-            cell.set_property("value", pct)
+            cell.set_property("fraction", used / total if total else 0.0)
             cell.set_property("text", f"{pct}% used")
             cell.set_property("visible", True)
         else:
@@ -17903,16 +18620,49 @@ class FolderView(Gtk.Box):
         pb = None
         if size >= 48 and len(self.entries) <= 2500:
             pb = ICONS.thumbnail(e, size, self._thumb_ready)
-        return (pb or ICONS.pixbuf(e.icon, size), self._iv_markup(e))
+        return (pb or ICONS.pixbuf(e.icon, size, e), self._iv_markup(e))
+
+    @staticmethod
+    def _breakable(name: str) -> str:
+        """Zero-width break points at the joints of a file name (before a dot, after _ and -), so a name too
+        wide for its tile wraps as 'dailies_ / notes.md' instead of mid-word."""
+        return re.sub(r"(?<=[_\-])(?=[^_\-])|(?<=[^.])(?=\.)", "\u200b", name) if len(name) > 10 else name
+
+    def shows_where(self) -> bool:
+        """Rows come from more than one folder (search results, Recent, Quick access, Recycle Bin), so every
+        layout has to say where each one lives — two files called big.zip are otherwise indistinguishable."""
+        return bool(self.search) or self.path in (TRASH, QUICK, RECENT)
+
+    def _where(self, e: Entry) -> str:
+        """Short 'where is it' text for an entry: relative to the folder being searched when inside it."""
+        loc = e.location
+        if not loc:
+            return ""
+        if self.search and self.path not in VIRTUAL:
+            if loc == self.path:
+                return os.path.basename(self.path.rstrip("/")) or "/"
+            if loc.startswith(self.path.rstrip("/") + "/"):
+                return loc[len(self.path.rstrip("/")) + 1:]
+        shown = pretty_path(loc)
+        return "~" + shown[len(HOME):] if shown == HOME or shown.startswith(HOME + "/") else shown
 
     def _iv_markup(self, e: Entry) -> str:
-        name = GLib.markup_escape_text(self.win.display_name(e))
+        name = self.win.display_name(e)
+        if self.layout in ("xlarge", "large", "medium"):
+            name = self._breakable(name)
+        name = GLib.markup_escape_text(name)
         cut = self.win.clipboard["mode"] == "cut" and e.path in self.win.clipboard["paths"]
         if cut or e.hidden:
-            name = f"<span foreground='#999999'>{name}</span>"
+            name = f"<span foreground='{COL_DIM}'>{name}</span>"
+        where = GLib.markup_escape_text(self._where(e)) if self.shows_where() else ""
         if self.layout == "tiles":
-            sub = e.type + ("" if e.is_dir else f"\n{fmt_size(e.size, self.cfg['size_in_bytes'])}")
-            return f"{name}\n<small><span foreground='#777'>{GLib.markup_escape_text(sub)}</span></small>"
+            sub = e.type + ("" if e.is_dir else f"  ·  {fmt_size(e.size, self.cfg['size_in_bytes'])}" if where else f"\n{fmt_size(e.size, self.cfg['size_in_bytes'])}")
+            sub = GLib.markup_escape_text(sub) + (f"\n{where}" if where else "")
+            return f"{name}\n<small><span foreground='{COL_DIM}'>{sub}</span></small>"
+        if where:
+            if self.layout in ("list", "small"):            # one line per tile: the folder follows the name
+                return f"{name}  <small><span foreground='{COL_DIM}'>{where}</span></small>"
+            return f"{name}\n<small><span foreground='{COL_DIM}'>{where}</span></small>"
         return name
 
     def _row_index(self) -> Dict[str, int]:
@@ -17969,12 +18719,13 @@ class FolderView(Gtk.Box):
         else:
             self.stack.set_visible_child_name("icons")
             size = LAYOUT_ICON_SIZE.get(lay, 48)
+            where = self.shows_where()
             if lay in ("list", "small"):
-                self.icons.configure(size, True, 220, self.cfg["single_click"])
+                self.icons.configure(size, True, 360 if where else 220, self.cfg["single_click"])
             elif lay == "tiles":
-                self.icons.configure(size, True, 260, self.cfg["single_click"])
+                self.icons.configure(size, True, 300 if where else 260, self.cfg["single_click"])
             else:
-                self.icons.configure(size, False, size + 44, self.cfg["single_click"])
+                self.icons.configure(size, False, max(size + 44, 116), self.cfg["single_click"], extra_lines=1 if where else 0)
             self.icons.invalidate()
         self.tree.queue_draw()      # visible rows re-run their data funcs; no need to signal every row
         # details rows carry section / group header rows, icon rows don't: switching between the two families
@@ -18196,25 +18947,30 @@ class FolderView(Gtk.Box):
             return f"Search Results in {self.win.display_path(self.path)}"
         return self.win.display_path(self.path)
 
+    def shown_path(self) -> str:
+        """The folder's full path as the user should read it (split-pane header, tab tooltip): the home
+        folder as ~, and in demo mode the fictional mount points rather than the real location on disk."""
+        p = self.path
+        if p in VIRTUAL:
+            return self.win.display_path(p)
+        if p == HOME:
+            return "~"
+        if p.startswith(HOME + "/"):
+            return "~/" + p[len(HOME) + 1:]
+        return pretty_path(p)
+
     def short_title(self) -> str:
-        """Tab label: parent + own folder, e.g. ~/Documents/Autodesk/ or …/parent/name/"""
+        """Tab label: the folder's own name, as on its breadcrumb. (It used to be '…/parent/name/', which the
+        tab then cut in the middle — '…/Hollow…owcase/' told you neither part.) The full path is the tooltip."""
         p = self.path
         if p in VIRTUAL:
             return self.win.display_path(p)
         if self.search:
             return "Search: " + self.search_text
         if p == HOME:
-            return "~/"
-        if p.startswith(HOME + "/"):
-            rel = "~/" + p[len(HOME) + 1:]
-        else:
-            rel = pretty_path(p)
-        parts = [x for x in rel.split("/") if x]
-        if rel.startswith("/"):
-            parts.insert(0, "")
-        if len(parts) > 3:
-            return "…/" + "/".join(parts[-2:]) + "/"
-        return "/".join(parts) + "/" if parts != [""] else "/"
+            return "Home"
+        shown = pretty_path(p)
+        return os.path.basename(shown.rstrip("/")) or self.win.display_path(p)
 
     def load(self, keep_selection: bool = True):
         self.gen += 1
@@ -18411,19 +19167,24 @@ class FolderView(Gtk.Box):
                 rec["shown"] = time.perf_counter()
                 rec["stalls_during"] = len(WATCHDOG.records) - rec["stalls_before"]
                 break
+        old_names = old_names or self.__dict__.pop("_restore_names", None)
+        self.__dict__.pop("_restore_names", None)
         if old_names:
             self.select_names(old_names, scroll=False)
         self.win.on_tab_loaded(self)
 
-    def resort(self):
-        """Re-sort what is already loaded (no disk access); sorting happens off the main thread."""
+    def resort(self, keep: Optional[List[str]] = None):
+        """Re-sort what is already loaded (no disk access); sorting happens off the main thread. `keep`:
+        names to select afterwards (default: what is selected now)."""
         if self.search or self.path in (THISPC, QUICK) or not self.entries:
+            if self.search and keep is not None:
+                return                      # a layout switch: the results are already on screen
             self.load()
             return
         self.gen += 1
         gen = self.gen
         ents, cfg = list(self.entries), self.cfg
-        old = [e.name for e in self.selected_entries()]
+        old = keep if keep is not None else [e.name for e in self.selected_entries()]
 
         def work():
             res = sort_entries(ents, cfg["sort_key"], cfg["sort_desc"], cfg["folders_first"])
@@ -18520,7 +19281,7 @@ class Page(Gtk.Box):
         self.pack_start(self.paned, True, True, 0)
         self.panes: List[FolderView] = []
         self.active: Optional[FolderView] = None
-        self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.MIDDLE, xalign=0)
+        self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.END, xalign=0)
         self.add_pane(path)
         self.active = self.panes[0]
 
@@ -18593,15 +19354,14 @@ class Page(Gtk.Box):
                 fv.icons.muted = muted
                 fv.icons.queue_draw()
                 fv.tree.queue_draw()
-            fv.header_label.set_text(fv.path if fv.path not in VIRTUAL else self.win.display_path(fv.path))
         self.update_label()
 
     def update_label(self):
         fv = self.active or self.panes[0]
         self.label.set_text(fv.short_title() if not self.split else " | ".join(p.short_title() for p in self.panes))
-        self.label.set_tooltip_text(" | ".join(p.path for p in self.panes))
+        self.label.set_tooltip_text(" | ".join(p.shown_path() for p in self.panes))
         for p in self.panes:
-            p.header_label.set_text(p.path if p.path not in VIRTUAL else self.win.display_path(p.path))
+            p.header_label.set_text(p.shown_path())
 
 
 # --------------------------------------------------------------------------- menu construction helpers
@@ -19178,7 +19938,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if n.kind == "root":
             cell.set_property("markup", f"<b>{GLib.markup_escape_text(n.label)}</b>")
         elif n.kind == "info":
-            cell.set_property("markup", f"<span foreground='#888'>{GLib.markup_escape_text(n.label)}</span>")
+            cell.set_property("markup", f"<span foreground='{COL_DIM}'>{GLib.markup_escape_text(n.label)}</span>")
         else:
             cell.set_property("markup", GLib.markup_escape_text(n.label))
 
@@ -19700,18 +20460,19 @@ class MainWindow(Gtk.ApplicationWindow):
         fcol.pack_start(ftxt, True)
         fcol.set_expand(True)
         fcol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-        fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16)), None)
+        fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16, m[it][0])), None)
         fcol.set_cell_data_func(ftxt, lambda c, cell, m, it, d=None: cell.set_property("text", m[it][0].name), None)
         ftv.append_column(fcol)
         fsize = Gtk.CellRendererText(xalign=1.0)
-        fsize.set_property("foreground", "#888888")
+        fsize.set_property("foreground", COL_DIM)
         fsize.set_fixed_size(-1, fsize_fixed)
         scol = Gtk.TreeViewColumn("", fsize, text=1)
         scol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         scol.set_fixed_width(90)
         ftv.append_column(scol)
         ftv.set_fixed_height_mode(True)
-        ftv.connect("row-activated", lambda t, p, c: self.activate_entry(self.preview_folder[p][0]))
+        # (rows of an archive listing have no path of their own: nothing to open)
+        ftv.connect("row-activated", lambda t, p, c: self.preview_folder[p][0].path and self.activate_entry(self.preview_folder[p][0]))
         fsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         fsw.add(ftv)
         self.model_view = None            # created on the first model preview (GL context setup is ~300 ms)
@@ -19786,12 +20547,36 @@ class MainWindow(Gtk.ApplicationWindow):
         mbox.pack_start(sbar, False, False, 0)
         mbox.pack_start(self.seq_label, False, False, 0)
         mbox.reorder_child(self.seq_label, 1)            # current frame's file name: between the bar and the viewer
-        mhint = Gtk.Label(label="LMB orbit · MMB pan · Alt+RMB or wheel zoom · double-click reset · W wireframe · S flat/smooth", ellipsize=Pango.EllipsizeMode.END)
+        mhint = Gtk.Label(wrap=True, lines=2, ellipsize=Pango.EllipsizeMode.END, justify=Gtk.Justification.CENTER, max_width_chars=30)
+        mhint.set_markup("<small>Drag to orbit · middle-drag to pan · wheel to zoom\ndouble-click resets · W wireframe · S flat / smooth</small>")
+        mhint.set_tooltip_text("Left drag: orbit\nMiddle drag: pan\nWheel or Alt + right drag: zoom\nDouble-click: reset the view\nW: wireframe\nS: flat / smooth shading")
         mhint.get_style_context().add_class("dim-label")
         mbox.pack_start(mhint, False, False, 0)
         self.preview_stack.add_named(mbox, "model")
         self.preview_stack.add_named(self._build_breakdown_page(), "breakdown")
-        self.preview_stack.add_named(self.preview_image, "image")
+        # image page = the picture plus (PDFs only) a page stepper underneath
+        ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        ibox.pack_start(self.preview_image, True, True, 0)
+        self.pdf_bar = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        self.pdf_prev = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU)
+        self.pdf_next = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU)
+        self.pdf_label = Gtk.Label()
+        self.pdf_label.get_style_context().add_class("dim-label")
+        for b, d, tip in ((self.pdf_prev, -1, "Previous page (or scroll up over the page)"), (self.pdf_next, 1, "Next page (or scroll down over the page)")):
+            b.get_style_context().add_class("flat")
+            b.set_tooltip_text(tip)
+            b.connect("clicked", lambda w, d=d: self._pdf_go(d))
+        self.pdf_bar.pack_start(self.pdf_prev, False, False, 0)
+        self.pdf_bar.pack_start(self.pdf_label, False, False, 0)
+        self.pdf_bar.pack_start(self.pdf_next, False, False, 0)
+        self.pdf_bar.show_all()
+        self.pdf_bar.set_no_show_all(True)
+        self.pdf_bar.hide()
+        ibox.pack_start(self.pdf_bar, False, False, 0)
+        self._pdf = None                  # {'entry', 'page', 'pages'} while a multi-page PDF is on screen
+        self.preview_image.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+        self.preview_image.connect("scroll-event", self._pdf_scroll)
+        self.preview_stack.add_named(ibox, "image")
         self.video = VideoPreview() if gst_sink_available() else None
         if self.video is not None:
             self.video.sink_widget.set_size_request(-1, 0)      # no minimum: the pane decides
@@ -19967,10 +20752,17 @@ class MainWindow(Gtk.ApplicationWindow):
         # re-decoding a model or a big image on every click made double-clicks feel laggy.
         key = (e.path, e.size, e.mtime) if e is not None else None
         shown = self.preview_stack.get_visible_child_name()
-        if key is not None and key == getattr(self, "_preview_key", None) and shown not in ("info", None):
+        # Only when that item's preview has actually landed: a second selection signal for the same item
+        # (select_names → select + set_cursor, after a rename / paste / jump-to-reference) arrives while the
+        # first load is still running; returning here would orphan it (its generation is stale) and leave
+        # the previous file's preview and caption on screen for good.
+        if (key is not None and key == getattr(self, "_preview_key", None) and shown not in ("info", None)
+                and getattr(self, "_content_key", None) == key):
             self._drop_snapshot()               # nothing changes: let the held snapshot go at once
             return
         self._preview_key = key
+        self._pdf = None                        # page stepper belongs to the PDF that was on screen
+        self._pdf_req = getattr(self, "_pdf_req", 0) + 1
         if self.video is not None and shown == "video":
             self.video.stop()                   # leaving the player: release the decoder, stop the sound
         self._set_caption("")
@@ -20075,6 +20867,7 @@ class MainWindow(Gtk.ApplicationWindow):
             def done(pb, dims):
                 if gen != self._side_gen:
                     return False
+                self.pdf_bar.hide()
                 self.preview_image.set_from_pixbuf(pb)
                 self._show_preview("image")
                 if dims:
@@ -20145,6 +20938,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if anim is None:
                 self._preview_as_icon(e, "Couldn't decode this image")
                 return False
+            self.pdf_bar.hide()
             self.preview_image.set_animation(anim)
             self._qv_add("Dimensions", f"{anim.get_width()} × {anim.get_height()} px")
             if info and info["frames"] > 1:
@@ -20472,11 +21266,19 @@ class MainWindow(Gtk.ApplicationWindow):
         if "raw" in res:
             img = res["raw"]
             pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
+            self.pdf_bar.hide()
             self.preview_image.set_from_pixbuf(pb)
             self._show_preview("image")
         elif "png" in res:
             try:
                 pb = GdkPixbuf.Pixbuf.new_from_file(res["png"])
+                pages = int(res.get("pages") or 0)
+                if pages > 1:
+                    self._pdf = {"entry": e, "page": int(res.get("page") or 1), "pages": pages}
+                    self.pdf_label.set_text(f"Page {self._pdf['page']:,} of {pages:,}")
+                    self.pdf_prev.set_sensitive(self._pdf["page"] > 1)
+                    self.pdf_next.set_sensitive(self._pdf["page"] < pages)
+                self.pdf_bar.set_visible(pages > 1)
                 self.preview_image.set_from_pixbuf(pb)
                 self._show_preview("image")
             except GLib.Error:
@@ -20486,6 +21288,23 @@ class MainWindow(Gtk.ApplicationWindow):
                     os.remove(res["png"])
                 except OSError:
                     pass
+        elif "archive" in res:
+            arch = res["archive"]
+            if "error" in arch:
+                self._preview_as_icon(e, arch["error"])
+                return False
+            # the contents as a list, like a folder's — not as text in the editor
+            self.preview_folder.clear()
+            in_bytes = self.cfg["size_in_bytes"]
+            for name, size, is_dir in arch["entries"]:
+                k = Entry()
+                k.name, k.is_dir, k.path = name, bool(is_dir), ""
+                k.icon = _FOLDER_ICON if is_dir else _ct_info(os.path.basename(name))[2]
+                self.preview_folder.append([k, "" if is_dir else fmt_size(size, in_bytes)])
+            self._qv_add("Contents", arch["summary"])
+            if arch["count"] > len(arch["entries"]):
+                self._qv_add("Listed", f"first {len(arch['entries']):,}")
+            self._show_preview("folder")
         elif "text" in res:
             self.edit_toggle.set_sensitive(False)
             buf = self.preview_text.get_buffer()
@@ -20499,6 +21318,59 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self._preview_as_icon(e, "No preview available")
         return False
+
+    def _pdf_go(self, delta: int):
+        """Step the PDF on screen by `delta` pages (rendered off-thread; the current page stays until it lands)."""
+        st = self._pdf
+        if not st:
+            return
+        page = max(1, min(st["pages"], st["page"] + delta))
+        if page == st["page"]:
+            return
+        st["page"] = page
+        self.pdf_label.set_text(f"Page {page:,} of {st['pages']:,}")
+        self.pdf_prev.set_sensitive(page > 1)
+        self.pdf_next.set_sensitive(page < st["pages"])
+        self._pdf_req = req = getattr(self, "_pdf_req", 0) + 1
+        e, gen = st["entry"], self._side_gen
+        w = max(120, self.side.get_allocated_width() - 24)
+        h = max(120, self.preview_box.get_allocated_height() - 24)
+
+        def work():
+            conv = convert_with_tools(e.path, e.content_type or "application/pdf", w, h, tag="page", page=page)
+            GLib.idle_add(done, conv)
+
+        def done(conv):
+            try:
+                if conv and req == self._pdf_req and gen == self._side_gen:
+                    self.preview_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(conv[0]))
+            except GLib.Error:
+                pass
+            finally:
+                if conv:
+                    try:
+                        os.remove(conv[0])
+                    except OSError:
+                        pass
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pdf_scroll(self, w, event):
+        if not self._pdf or not self.pdf_bar.get_visible():
+            return False
+        if event.direction == Gdk.ScrollDirection.SMOOTH:
+            self._pdf_dy = getattr(self, "_pdf_dy", 0.0) + event.delta_y
+            if abs(self._pdf_dy) < 1.0:
+                return True
+            d, self._pdf_dy = (1 if self._pdf_dy > 0 else -1), 0.0
+        elif event.direction == Gdk.ScrollDirection.DOWN:
+            d = 1
+        elif event.direction == Gdk.ScrollDirection.UP:
+            d = -1
+        else:
+            return False
+        self._pdf_go(d)
+        return True
 
     def _qv_add(self, key: str, value: str):
         """Append (or update) a row in the quick-view card."""
@@ -20559,7 +21431,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.cfg.get("gl_preview", True):
             self.cfg["gl_preview"] = True
             self.toggle_gl_preview()          # flips to False and swaps in ModelView
-        self.model_count.set_markup(f"<span foreground='#c0392b'>OpenGL failed: {GLib.markup_escape_text(msg[:160])}</span>")
+        self.model_count.set_markup(f"<span foreground='{COL_DANGER}'>OpenGL failed: {GLib.markup_escape_text(msg[:160])}</span>")
         self.model_count.set_tooltip_text(msg)
 
     def _ensure_model_view(self, software: bool = False):
@@ -21153,7 +22025,7 @@ class MainWindow(Gtk.ApplicationWindow):
         st = self.bd_store
         self.bd_view.set_model(None)                          # detached: tens of thousands of rows fill fast
         st.clear()
-        missing = "#e5534b"
+        missing = COL_DANGER
 
         def add(parent, nodes):
             for label, detail, kids, path, ok in nodes:
@@ -21558,6 +22430,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if name != "info":
             self._content_gen = self._side_gen          # real content for the current selection is on screen
+            self._content_key = getattr(self, "_preview_key", None)
             self._apply_caption()
         stack.set_visible_child_name(name)
         self._crossfade_from_snapshot()
@@ -21673,7 +22546,7 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _preview_as_icon(self, e: Entry, note: str):
-        pb = ICONS.pixbuf(e.icon, 128)
+        pb = ICONS.pixbuf(e.icon, 128, e)
         self.preview_icon_img.set_from_pixbuf(pb)
         self.preview_icon_lab.set_text(note)
         self._show_preview("icon")
@@ -21724,7 +22597,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 rows.append(("Types", ", ".join(exts[:8]) + ("…" if len(exts) > 8 else "")))
         else:
             e = sel[0]
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32))
+            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32, e))
             self.details_title.set_markup(f"<b>{GLib.markup_escape_text(e.name)}</b>")
             self.qv_subtitle.set_text(e.type)
             rows = []
@@ -22220,7 +23093,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if key == "perms":
             return _stat.filemode(e.mode)[1:] if e.mode else ""
         if key == "location":
-            return e.location
+            return pretty_path(e.location)
         if key == "deleted":
             return fmt_date(e.deleted, f)
         return ""
@@ -22231,6 +23104,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if PATHS.isdir(p):
                 e = entry_for_path(p)
                 e.section = "Pinned folders"
+                e.location = os.path.dirname(p)
                 out.append(e)
         if self.cfg["show_frequent"]:
             for p in self.frequent_folders()[:8]:
@@ -22416,9 +23290,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cfg["layout"] = lay
         t = self.tab
         if t is not None:
+            # the selection lives in whichever widget shows the current layout (list or icon grid); carry it
+            # over by name, or switching layout would deselect everything and blank the preview pane
+            keep = [e.name for e in t.selected_entries()]
             t.layout = lay
+            t._restore_names = keep
             t.apply_layout()
-            t.resort()
+            if keep and not t.pc_mode:
+                t.select_names(keep)
+            t.resort(keep)
 
     def toggle_column(self, key: str):
         cols = self.cfg["columns"]
@@ -22440,6 +23320,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.cfg["gl_preview"] = not self.cfg["gl_preview"]
             self.toggle_gl_preview()         # flips it back and swaps the viewer in place
         self._apply_panes()
+        apply_theme_mode(self.cfg.get("theme", "system"))
+        ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         for t in self._tabs():
             t.apply_layout()
         self.rebuild_nav()
@@ -22471,6 +23353,7 @@ class MainWindow(Gtk.ApplicationWindow):
         t = self.tab
         if t.search:
             t.stop_search()
+            t.apply_layout()            # tiles go back to their normal size (search results carry a "where" line)
             t.load()
         self.searchbox.set_text("")
         self._update_title()
@@ -23325,7 +24208,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
                 grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='#2e8b57'>installed</span>" if dep["found"] else "<span foreground='#c0392b'>missing</span>")
+                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
@@ -23764,8 +24647,31 @@ class MainWindow(Gtk.ApplicationWindow):
 
 
 # --------------------------------------------------------------------------- application
-CSS = b"""
+# Two surfaces, on purpose: @sr_surface is where files are listed (every layout, This PC, search results);
+# @sr_chrome is everything around it (bars, navigation pane, preview / details pane). Status colours come
+# from the COL_* tokens so markup, cell renderers and the stylesheet can never drift apart.
+CSS = (f"@define-color sr_ok {COL_OK};\n@define-color sr_warn {COL_WARN};\n@define-color sr_danger {COL_DANGER};\n").encode() + b"""
+@define-color sr_surface @theme_base_color;
+@define-color sr_chrome @theme_bg_color;
+/* every structural divider (pane edges, status bar, column headers, separators) is this one solid 1px colour.
+   Solid, not translucent: a translucent line reads differently on each background, and a paned handle paints twice. */
+@define-color sr_line mix(@theme_bg_color, @theme_fg_color, 0.08);
+/* An unfocused window keeps its surfaces; only the text dims, and it does so at once. Themes otherwise darken
+   some surfaces but not ours, and fade buttons and fields while everything else switches instantly. */
+*:backdrop { transition: none; }
+.background:backdrop, menubar:backdrop { background-color: @sr_chrome; }
+button, entry, scrollbar { transition-property: background-color, box-shadow; }
+separator { background-image: none; background-color: @sr_line; min-width: 1px; min-height: 1px; }
 /* ---- Windows 11 "Fluent" flavour on top of the current GTK theme ---- */
+.filearea, .filearea treeview.view, .filearea .icongrid, .filearea viewport, .filearea flowbox { background-color: @sr_surface; }
+.navpane, .navpane treeview.view { background-color: @sr_chrome; }
+/* the selection colour always comes with its own text colour: themes may pair their tree selection differently
+   (ZorinGrey-Dark: white text on a faint tint), and our light bar under that white text was unreadable */
+.navpane treeview.view:selected, .filearea treeview.view:selected { background-color: alpha(@theme_selected_bg_color, 0.85); color: @theme_selected_fg_color; }
+button.destructive-action:not(:disabled) { background-image: none; background-color: @sr_danger; color: #ffffff;
+           border-color: shade(@sr_danger, 0.85); text-shadow: none; box-shadow: none; }
+button.destructive-action:not(:disabled):hover { background-color: shade(@sr_danger, 1.08); }
+button.destructive-action:not(:disabled) label { color: #ffffff; }
 menubar { padding: 0 4px; }
 menubar > menuitem { padding: 4px 8px; border-radius: 4px; }
 menubar > menuitem:hover { background: alpha(@theme_fg_color, 0.08); color: @theme_fg_color; box-shadow: none; }
@@ -23789,44 +24695,42 @@ entry.search { border-radius: 6px; min-height: 30px; }
 .commandbar button.cmd { padding: 4px 10px; min-height: 30px; border-radius: 6px; }
 .commandbar button.cmd:hover { background: alpha(@theme_fg_color, 0.08); }
 .commandbar button.cmd label { font-size: 0.95em; }
-.navpane treeview { padding: 2px 0; }
 .navpane treeview:selected { border-radius: 4px; }
-.navpane { background: alpha(@theme_fg_color, 0.025); }
-paned > separator { min-width: 1px; min-height: 1px; background: alpha(@theme_fg_color, 0.12); background-clip: content-box;
-                    margin: 0; border: none; box-shadow: none; }
-treeview.view { padding: 1px 0; }
-treeview.view header button { padding: 4px 8px; background: none; border-style: solid; border-color: alpha(@theme_fg_color, 0.12);
+/* a hairline with no gutter: some themes pad the separator, which left a strip of chrome colour between panes */
+paned > separator { min-width: 1px; min-height: 1px; background-image: none; background-color: @sr_line;
+                    margin: 0; padding: 0; border: none; box-shadow: none; }
+treeview.view header button { padding: 3px 8px; background: none; border-style: solid; border-color: @sr_line;
                                border-width: 0 1px 1px 0; border-radius: 0; }
 treeview.view header button:last-child { border-right-width: 0; }
 treeview.view header button:hover { background: alpha(@theme_fg_color, 0.06); }
 treeview.view header button label { font-weight: 600; color: alpha(@theme_fg_color, 0.75); }
-treeview.view:selected { background: alpha(@theme_selected_bg_color, 0.85); border-radius: 3px; }
+treeview.view:selected { background: alpha(@theme_selected_bg_color, 0.85); color: @theme_selected_fg_color; border-radius: 3px; }
 iconview:selected { background: alpha(@theme_selected_bg_color, 0.8); border-radius: 6px; }
 notebook > header { background: alpha(@theme_fg_color, 0.04); border: none; padding: 4px 4px 0 4px; }
 notebook > header tab { padding: 4px 10px; margin: 0 2px; border: none; border-radius: 6px 6px 0 0; min-width: 120px; }
-notebook > header tab:checked { background: @theme_base_color; }
+notebook > header tab:checked { background: @sr_surface; }
 notebook > header tab:hover:not(:checked) { background: alpha(@theme_fg_color, 0.06); }
 notebook > header tab button.tab-close { min-width: 18px; min-height: 18px; padding: 0; border-radius: 4px; }
-.pane-header { padding: 3px 4px; background: alpha(@theme_fg_color, 0.04); border-bottom: 2px solid alpha(@theme_fg_color, 0.1); }
-.pane-header.active { background: alpha(@theme_selected_bg_color, 0.22); border-bottom: 2px solid @theme_selected_bg_color; }
+.pane-header { padding: 3px 4px 4px 4px; background: alpha(@theme_fg_color, 0.04); border-bottom: 1px solid @sr_line; }
+.pane-header.active { padding: 3px 4px; background: alpha(@theme_selected_bg_color, 0.22); border-bottom: 2px solid @theme_selected_bg_color; }
 .pane-header.active label { font-weight: bold; }
 /* the inactive side is dimmed (darker in dark themes, greyer in light ones); the active side keeps the normal base */
-.inactive-pane, .inactive-pane treeview.view, .inactive-pane .icongrid { background: shade(@theme_base_color, 0.92); }
+.inactive-pane, .inactive-pane treeview.view, .inactive-pane .icongrid, .inactive-pane viewport, .inactive-pane flowbox { background-color: shade(@sr_surface, 0.92); }
 .inactive-pane .pane-header label { color: alpha(@theme_fg_color, 0.6); }
 .pane-header label { font-size: 0.9em; }
-.sidepane { background: alpha(@theme_fg_color, 0.025); }
+.sidepane { background-color: @sr_chrome; }
 .sidepane textview, .sidepane textview text { background: alpha(@theme_fg_color, 0.03); }
 .edit-toolbar button { padding: 2px 8px; min-height: 24px; }
-.bd-error { color: #e5534b; font-family: monospace; font-size: 0.9em; padding: 2px 4px; }
+.bd-error { color: @sr_danger; font-family: monospace; font-size: 0.9em; padding: 2px 4px; }
 .edit-badge { font-size: 0.75em; font-weight: bold; letter-spacing: 1px; padding: 1px 6px; border-radius: 3px;
               color: alpha(@theme_fg_color, 0.55); background: alpha(@theme_fg_color, 0.07); }
-.edit-badge.badge-editing { color: #ffffff; background: #2b8a3e; }
-.edit-badge.badge-dirty { color: #ffffff; background: #d9480f; }
-textview.editing, textview.editing text { background: alpha(#2b8a3e, 0.06); }
-.sidepane textview.editing { border: 2px solid #2b8a3e; border-radius: 4px; }
+.edit-badge.badge-editing { color: #ffffff; background: @sr_ok; }
+.edit-badge.badge-dirty { color: #ffffff; background: @sr_warn; }
+textview.editing, textview.editing text { background: alpha(@sr_ok, 0.06); }
+.sidepane textview.editing { border: 2px solid @sr_ok; border-radius: 4px; }
 .sidepane textview.readonly { border: 2px solid transparent; }
 .edit-toolbar entry { min-height: 24px; }
-.statusbar { background: alpha(@theme_fg_color, 0.04); border-top: 1px solid alpha(@theme_fg_color, 0.08); }
+.statusbar { background: alpha(@theme_fg_color, 0.04); border-top: 1px solid @sr_line; }
 .statusbar label { font-size: 0.92em; }
 .statusbar button { padding: 0 4px; min-height: 22px; min-width: 22px; }
 """
@@ -23845,6 +24749,16 @@ class ExplorerApp(Gtk.Application):
         else:
             Gtk.Window.set_default_icon_name("shotrover")
         WATCHDOG.start(os.path.join(GLib.get_user_cache_dir(), "shotrover", "stalls.log") if PROFILE is not None else None)
+        # The stylesheet. (These lines once sat after the `return True` of _index_tick below, where they could
+        # never run, so the app shipped with none of its own styling. A broken sheet must not stop startup.)
+        try:
+            prov = Gtk.CssProvider()
+            prov.load_from_data(CSS)
+            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+        except GLib.Error as ex:
+            print("shotrover: stylesheet not loaded —", ex, file=sys.stderr)
+        apply_theme_mode(self.cfg.get("theme", "system"))
+        ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         GLib.timeout_add(400, lambda: (threading.Thread(target=warm_workers, daemon=True).start(), False)[1])
         GLib.timeout_add(1500, self._index_startup)
 
@@ -23870,9 +24784,6 @@ class ExplorerApp(Gtk.Application):
             if (time.time() - INDEX.progress.get("finished", 0)) / 3600.0 > float(cfg.get("index_interval_h", 6)):
                 INDEX.crawl(cfg.get("index_roots", [HOME]), cfg.get("index_network", False), cfg.get("index_hidden", False))
         return True
-        prov = Gtk.CssProvider()
-        prov.load_from_data(CSS)
-        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
 
     def _on_report(self, path: str):
         """CrashReporter hook (GTK thread): an error happened at run time — show the bar in the active window."""
@@ -23903,6 +24814,9 @@ class ExplorerApp(Gtk.Application):
             path = HOME
         w = MainWindow(self, path)
         w.present()
+        if not self.cfg.get("setup_done") and DEMO is None and STRESS is None and not getattr(self, "_welcomed", False):
+            self._welcomed = True                    # once per run, on the first window, however it was opened
+            GLib.timeout_add(350, lambda: (WelcomeDialog(w, self.cfg, w.apply_cfg), False)[1])
         return w
 
 
@@ -24104,7 +25018,7 @@ def main():
         print("FAILED:", (m or {}).get("error", "no result"))
         return 1
     if "--demo" in sys.argv[1:]:
-        # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (see docs/DEMO.md)
+        # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (internal; not in the public docs)
         i = sys.argv.index("--demo")
         if i + 1 < len(sys.argv) and not sys.argv[i + 1].startswith("-"):
             root = sys.argv[i + 1]

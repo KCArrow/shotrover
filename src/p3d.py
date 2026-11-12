@@ -744,7 +744,7 @@ def optional_deps() -> List[dict]:
              found=shutil.which("magick") or shutil.which("convert"), cmd=pkg_install("ImageMagick", "imagemagick", "imagemagick", "ImageMagick")),
         dict(key="ffmpeg", name="ffmpeg", gives="video frame thumbnails and media info",
              found=shutil.which("ffmpeg"), cmd=pkg_install("ffmpeg-free", "ffmpeg", "ffmpeg", "ffmpeg")),
-        dict(key="pdftoppm", name="poppler-utils", gives="PDF first-page previews",
+        dict(key="pdftoppm", name="poppler-utils", gives="PDF page previews and thumbnails",
              found=shutil.which("pdftoppm"), cmd=pkg_install("poppler-utils", "poppler-utils", "poppler", "poppler-tools")),
         dict(key="gtksourceview", name="GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
              found="loaded" if GtkSource is not None else None, cmd=pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4")),

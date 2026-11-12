@@ -1,1 +1,1 @@
-Screenshots referenced from the main README. Take them with `shotrover --demo` (see ../DEMO.md).
+Screenshots referenced from the main README. Stills are 1600×1000 and GIFs 960×600; they show a fictional machine, not a real one.

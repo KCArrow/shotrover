@@ -1,17 +1,184 @@
 
 
 # --------------------------------------------------------------------------- icon / thumbnail cache
+# Which files get a picture of their contents in the icon layouts, and how it is made:
+#   pixbuf  – GdkPixbuf reads it (PNG, JPEG, TIFF, WebP, SVG…)
+#   decode  – our own decoders (EXR, HDR, PSD, Maya IFF), in a worker process
+#   tool    – ffmpeg / pdftoppm / oiiotool / ImageMagick render one frame or page
+#   model   – the 3D reader plus the software rasteriser, in a worker process (needs numpy)
+THUMB_VIDEO_EXTS = (".mov", ".mp4", ".m4v", ".mkv", ".avi", ".webm", ".mxf", ".ogv", ".mpg", ".mpeg", ".wmv", ".flv", ".ts")
+THUMB_TOOL_EXTS = (".pdf", ".dds", ".dpx", ".cin", ".tx", ".tex", ".tga", ".sgi", ".rgb", ".jp2", ".j2k", ".heic", ".avif")
+THUMB_MODEL_EXTS = (".obj", ".stl", ".ply", ".fbx", ".usd", ".usda", ".usdc", ".usdz", ".abc", ".gltf", ".glb", ".dae", ".3ds", ".x3d", ".lwo", ".off")
+THUMB_MODEL_TEXT_CAP = 64 << 20         # formats parsed whole (OBJ, ASCII STL / PLY…)
+THUMB_MODEL_CAP = 512 << 20             # Alembic / USD / Houdini caches: only the first sample is read
+
+
+def thumb_kind(e: "Entry") -> str:
+    """'' when the entry keeps its file-type icon, else how its thumbnail is produced (see above)."""
+    if not e.path or e.is_dir or e.size is None or e.size < 64:
+        return ""
+    ext = e.ext.lower()
+    ct = e.content_type or ""
+    if ext in PREVIEW_DECODERS:
+        return "decode" if e.size < (200 << 20) else ""
+    if ext == ".blend":
+        return "blend"
+    if ext in THUMB_MODEL_EXTS or houdini_kind(e.name):
+        if np is None:
+            return ""
+        binary = ext in (".abc", ".usd", ".usdc", ".usdz", ".fbx", ".glb") or bool(houdini_kind(e.name))
+        return "model" if e.size < (THUMB_MODEL_CAP if binary else THUMB_MODEL_TEXT_CAP) else ""
+    if ct.startswith("video/") or ext in THUMB_VIDEO_EXTS:
+        return "tool"
+    if ext in THUMB_TOOL_EXTS or ct == "application/pdf":
+        return "tool"
+    if ct.startswith("image/"):
+        return "pixbuf" if e.size < (40 << 20) else ""         # a folder of giant TIFFs stays quick to open
+    return ""
+
+
+def _thumb_decode(path: str, size: int):
+    """Worker process: built-in decoder → ('rgb', w, h, bytes) or None."""
+    fn = PREVIEW_DECODERS.get(os.path.splitext(path)[1].lower())
+    img = fn(path, size, size) if fn else None
+    return ("rgb", img.w, img.h, img.rgb) if img is not None else None
+
+
+def _thumb_blend(path: str, size: int):
+    """Worker process: the thumbnail Blender stores in the file."""
+    img = blend_thumbnail(BlendFile(path))
+    return ("rgb", img.w, img.h, img.rgb) if img is not None else None
+
+
+_THUMB_KEY = (255, 0, 255)       # never produced by the mesh shader, so it can stand for "no surface here"
+
+
+def _thumb_model(path: str, size: int):
+    """Worker process: read the model (first sample, capped face count), render one three-quarter view with
+    the software rasteriser → ('rgba', w, h, bytes). The backdrop is keyed out so the tile shows through."""
+    m = load_model(path, 150000)
+    if not m or "error" in m:
+        return None
+    f32 = np.float32
+    V = np.asarray(m["verts"], dtype=f32).reshape(-1, 3)
+    F = np.asarray(m["faces"], dtype=np.int32).reshape(-1, 3)
+    N = np.asarray(m["normals"], dtype=f32).reshape(-1, 3) if m.get("normals") is not None and len(m["normals"]) else None
+    VN = np.asarray(m["vnormals"], dtype=f32).reshape(-1, 3) if m.get("vnormals") is not None and len(m["vnormals"]) else None
+    EX = {k: m[k] for k in ("points", "pcolor", "psize", "vpts", "vden", "vsize") if k in m} or None
+    px = max(96, size) * 2                       # rendered at 2× and averaged down: the rasteriser has no anti-aliasing
+    keyed = EX is None
+    bg = _THUMB_KEY if keyed else (30, 30, 32)
+    res = software_render(V, F, N, VN, (px, px, 0.6, 0.35, 1.0, 0, 0, True, False, bg, (1.0, 1.0, 1.0)), EX)
+    if res is None:
+        return None
+    if isinstance(res, tuple):
+        w, h, buf = res
+        a = np.frombuffer(buf, dtype=np.uint8).reshape(h, w, 4)
+    else:
+        a = np.asarray(res, dtype=np.uint8)
+        h, w = a.shape[:2]
+    rgb = a[:, :, 2::-1].astype(np.float32)                          # BGRX → RGB
+    if keyed:
+        alpha = np.where((a[:, :, 2] == bg[0]) & (a[:, :, 1] == bg[1]) & (a[:, :, 0] == bg[2]), 0.0, 255.0).astype(np.float32)
+    else:
+        alpha = np.full((h, w), 255.0, dtype=np.float32)
+    # 2×2 box filter, colour weighted by coverage so the keyed backdrop never tints the silhouette
+    h2, w2 = h // 2, w // 2
+    al = alpha[:h2 * 2, :w2 * 2].reshape(h2, 2, w2, 2)
+    cov = al.sum(axis=(1, 3))
+    col = (rgb[:h2 * 2, :w2 * 2] * alpha[:h2 * 2, :w2 * 2, None]).reshape(h2, 2, w2, 2, 3).sum(axis=(1, 3))
+    out = np.zeros((h2, w2, 4), dtype=np.uint8)
+    out[:, :, :3] = np.clip(col / np.maximum(cov, 1.0)[:, :, None], 0, 255).astype(np.uint8)
+    out[:, :, 3] = np.clip(cov / 4.0, 0, 255).astype(np.uint8)
+    return ("rgba", w2, h2, out.tobytes())
+
+
+_THUMB_POOL = None
+_THUMB_POOL_LOCK = threading.Lock()
+
+
+def thumb_heavy(fn, *args, timeout: float = 45.0):
+    """Run a thumbnail job in its own small pool of worker processes, apart from the preview pane's decoder:
+    a folder of EXRs queueing forty decodes must not hold up the file the user just clicked on. A job that
+    hangs or crashes its worker costs that one thumbnail: the pool is torn down and rebuilt on the next call."""
+    global _THUMB_POOL
+    try:
+        with _THUMB_POOL_LOCK:
+            if _THUMB_POOL is None:
+                from concurrent.futures import ProcessPoolExecutor
+                import multiprocessing
+                _THUMB_POOL = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("fork"), initializer=pin_worker)
+            pool = _THUMB_POOL
+        return pool.submit(fn, *args).result(timeout=timeout)
+    except Exception:
+        with _THUMB_POOL_LOCK:
+            pool, _THUMB_POOL = _THUMB_POOL, None
+        if pool is not None:
+            try:
+                for p in list(getattr(pool, "_processes", {}).values()):
+                    p.kill()
+                pool.shutdown(wait=False)
+            except Exception:
+                pass
+        return None
+
+
+def warm_thumb_pool():
+    """Fork both thumbnail workers at startup, while the process is small (see warm_workers)."""
+    global _THUMB_POOL
+    from concurrent.futures import ProcessPoolExecutor
+    import multiprocessing
+    with _THUMB_POOL_LOCK:
+        if _THUMB_POOL is None:
+            _THUMB_POOL = ProcessPoolExecutor(max_workers=2, mp_context=multiprocessing.get_context("fork"), initializer=pin_worker)
+        pool = _THUMB_POOL
+    for f in [pool.submit(time.sleep, 0.2), pool.submit(time.sleep, 0.2)]:      # two at once → two processes
+        f.result(timeout=10)
+
+
+def shutdown_thumb_pool():
+    global _THUMB_POOL
+    with _THUMB_POOL_LOCK:
+        pool, _THUMB_POOL = _THUMB_POOL, None
+    if pool is not None:
+        try:
+            for p in list(getattr(pool, "_processes", {}).values()):
+                p.kill()
+            pool.shutdown(wait=False)
+        except Exception:
+            pass
+
+
 class IconCache:
+    THREADS = 3                 # the work itself happens in GdkPixbuf (GIL released), a tool or a worker process
+    MAX_THUMBS = 6000           # in memory only: nothing about the user's files is written to a cache on disk
+
     def __init__(self):
         self.cache: Dict[Tuple[str, int], GdkPixbuf.Pixbuf] = {}
         self.thumbs: Dict[Tuple[str, int], Optional[GdkPixbuf.Pixbuf]] = {}
         self.pending: set = set()
         self.theme = Gtk.IconTheme.get_default()
         self.lock = threading.Lock()
-        self.queue: List[Tuple[str, int, Callable]] = []
-        self.worker: Optional[threading.Thread] = None
+        self.queue: List[Tuple[str, int, Callable, str, str]] = []
+        self.workers = 0
 
-    def pixbuf(self, icon: Optional[Gio.Icon], size: int) -> Optional[GdkPixbuf.Pixbuf]:
+    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (p2e)
+
+    def set_icon_set(self, name: str):
+        self.icon_set = "shotrover" if name == "shotrover" else "system"
+
+    def pixbuf(self, icon: Optional[Gio.Icon], size: int, entry=None, mode: Optional[str] = None) -> Optional[GdkPixbuf.Pixbuf]:
+        """The picture for an icon at `size` px. Pass the Entry when there is one: the built-in set picks by file
+        extension (a desktop icon theme cannot tell an Alembic cache from any other unknown binary)."""
+        if (mode or self.icon_set) == "shotrover":
+            kind = sr_icon_kind(icon, entry)
+            if kind:
+                skey = ("sr:" + kind, size)
+                pb = self.cache.get(skey)
+                if pb is None and skey not in self.cache:
+                    pb = self.cache[skey] = sr_icon_pixbuf(kind, size)
+                if pb is not None:
+                    return pb
         key = (icon.to_string() if icon else "text-x-generic", size)
         pb = self.cache.get(key)
         if pb is not None:
@@ -45,7 +212,8 @@ class IconCache:
 
     def thumbnail(self, e: Entry, size: int, on_ready: Callable) -> Optional[GdkPixbuf.Pixbuf]:
         """Return a cached thumbnail, or None and schedule generation."""
-        if not e.path or not (e.content_type or "").startswith("image/") or (e.size is not None and e.size < 64):
+        kind = thumb_kind(e)
+        if not kind:
             return None
         key = (e.path, size)
         if key in self.thumbs:
@@ -54,28 +222,76 @@ class IconCache:
             return None
         self.pending.add(key)
         with self.lock:
-            self.queue.append((e.path, size, on_ready))
-            if self.worker is None or not self.worker.is_alive():
-                self.worker = threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True)
-                self.worker.start()
+            self.queue.append((e.path, size, on_ready, kind, e.content_type or ""))
+            if len(self.queue) > 600:                     # scrolled far past them: forget the oldest requests
+                for path, sz, _cb, _k, _ct in self.queue[:-600]:
+                    self.pending.discard((path, sz))
+                del self.queue[:-600]
+            if self.workers < self.THREADS:
+                self.workers += 1
+                threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True).start()
         return None
 
     def _work(self):
         while True:
             with self.lock:
                 if not self.queue:
+                    self.workers -= 1
                     return
-                path, size, cb = self.queue.pop()
+                path, size, cb, kind, ct = self.queue.pop()         # newest first: what is on screen now
             pb = None
             try:
-                if os.path.getsize(path) < 40 << 20:
-                    pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
-                    pb = pb.apply_embedded_orientation() or pb
+                pb = self._make(path, size, kind, ct)
             except Exception:
                 pb = None
             GLib.idle_add(self._done, path, size, pb, cb)
 
+    @staticmethod
+    def _fit(pb: GdkPixbuf.Pixbuf, size: int) -> GdkPixbuf.Pixbuf:
+        w, h = pb.get_width(), pb.get_height()
+        if w <= size and h <= size:
+            return pb
+        k = min(size / w, size / h)
+        return pb.scale_simple(max(1, int(w * k)), max(1, int(h * k)), GdkPixbuf.InterpType.BILINEAR)
+
+    def _make(self, path: str, size: int, kind: str, ct: str) -> Optional[GdkPixbuf.Pixbuf]:
+        """Worker thread: build the thumbnail for one file (None = keep the file-type icon)."""
+        if kind == "pixbuf":
+            try:
+                pb = GdkPixbuf.Pixbuf.new_from_file_at_scale(path, size, size, True)
+                return pb.apply_embedded_orientation() or pb
+            except GLib.Error:
+                kind = "tool"                   # an image type GdkPixbuf has no loader for here
+        res = None
+        if kind == "decode":
+            res = thumb_heavy(_thumb_decode, path, size)
+            if res is None:
+                kind = "tool"                   # e.g. an EXR compression the built-in reader doesn't do
+        elif kind == "blend":
+            res = thumb_heavy(_thumb_blend, path, size, timeout=20.0)
+        elif kind == "model":
+            res = thumb_heavy(_thumb_model, path, size)
+        if res is not None:
+            mode, w, h, data = res
+            alpha = mode == "rgba"
+            pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(data), GdkPixbuf.Colorspace.RGB, alpha, 8, w, h, w * (4 if alpha else 3))
+            return self._fit(pb, size)
+        if kind == "tool":
+            conv = convert_with_tools(path, ct, size * 2, size * 2, tag="thumb")
+            if conv:
+                try:
+                    return GdkPixbuf.Pixbuf.new_from_file_at_scale(conv[0], size, size, True)
+                finally:
+                    try:
+                        os.remove(conv[0])
+                    except OSError:
+                        pass
+        return None
+
     def _done(self, path, size, pb, cb):
+        if len(self.thumbs) >= self.MAX_THUMBS:
+            for k in list(self.thumbs)[:self.MAX_THUMBS // 4]:      # dicts keep insertion order: drop the oldest quarter
+                del self.thumbs[k]
         self.thumbs[(path, size)] = pb
         self.pending.discard((path, size))
         if pb is not None:
@@ -164,7 +380,7 @@ class FolderView(Gtk.Box):
         # slim header shown only in split view
         self.header = Gtk.Box(spacing=4)
         self.header.get_style_context().add_class("pane-header")
-        self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, margin_start=8)
+        self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, margin_start=8)
         self.header.pack_start(self.header_label, True, True, 0)
         hclose = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
         hclose.set_relief(Gtk.ReliefStyle.NONE)
@@ -183,6 +399,7 @@ class FolderView(Gtk.Box):
         self.store = Gtk.ListStore(GObject.TYPE_PYOBJECT, bool, GdkPixbuf.Pixbuf, str)
         self._index: Optional[Dict[str, int]] = None
         self.stack = Gtk.Stack()
+        self.stack.get_style_context().add_class("filearea")        # one backdrop for every layout (see CSS)
         self.pack_start(self.stack, True, True, 0)
         self.err_label = Gtk.Label(xalign=0.5)
         self.err_label.get_style_context().add_class("dim-label")
@@ -233,10 +450,18 @@ class FolderView(Gtk.Box):
             cols.remove("size")
             cols.insert(1, "size")
         if self.search or self.path in (TRASH, QUICK, RECENT):
-            if "location" not in cols:
-                cols.append("location")
+            # right after Name and Size, not at the far end: with the preview pane open the last column sits
+            # off-screen, and search results that differ only by folder then look like duplicates
+            if "location" in cols:
+                cols.remove("location")
+            cols.insert(min(2, len(cols)), "location")
+        if self.layout == "content":
+            # the second line under each name already says type and size: repeating them as columns is noise
+            cols = [c for c in cols if c not in ("size", "type")]
+            if "modified" not in cols:
+                cols.append("modified")
         if self.path == TRASH:
-            cols.insert(2, "deleted")
+            cols.insert(min(2, len(cols)), "deleted")
         if self.path == THISPC:
             cols = ["name", "usage", "type"]
         if self.path == NETWORK:
@@ -264,7 +489,7 @@ class FolderView(Gtk.Box):
                 col.set_expand(True)
                 col.set_min_width(180)
             elif key == "usage":
-                prog = Gtk.CellRendererProgress()
+                prog = UsageRenderer()
                 col.pack_start(prog, True)
                 col.set_cell_data_func(prog, self._usage_data)
                 col.set_min_width(160)
@@ -297,26 +522,35 @@ class FolderView(Gtk.Box):
             cell.set_property("pixbuf", None)
             return
         size = 32 if self.layout == "content" else 16
-        pb = ICONS.pixbuf(v.icon, size)
+        pb = None
+        if size >= 32 and len(self.entries) <= 2500:
+            pb = ICONS.thumbnail(v, size, self._thumb_ready)
+        pb = pb or ICONS.pixbuf(v.icon, size, v)
         cell.set_property("pixbuf", ICONS.desaturated(pb) if self.muted else pb)
 
     def _name_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
         v = model[it][0]
         if not isinstance(v, Entry):
-            cell.set_property("markup", f"<span foreground='#1a5fb4'><b>{GLib.markup_escape_text(str(v))}</b></span>")
+            cell.set_property("markup", f"<span alpha='72%'><b>{GLib.markup_escape_text(str(v))}</b></span>")
             cell.set_property("foreground-set", False)
             return
         name = self.win.display_name(v)
         if self.layout == "content":
-            sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {v.location}" if v.location else "")
-            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='#777'>{GLib.markup_escape_text(sub)}</span></small>")
+            sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {pretty_path(v.location)}" if v.location else "")
+            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>")
         else:
             cell.set_property("markup", GLib.markup_escape_text(name))
         cut = self.win.clipboard["mode"] == "cut" and v.path in self.win.clipboard["paths"]
         dim = cut or v.hidden or self.muted
-        cell.set_property("foreground", "#999999" if dim else None)
-        cell.set_property("foreground-set", bool(dim))
+        cell.set_property("foreground-rgba", self._dim_rgba() if dim else None)
+
+    def _dim_rgba(self):
+        """Dimmed text (inactive split pane, hidden and cut files) relative to the text colour right now, so it
+        stays dimmer than normal text when the window is unfocused and the theme has already greyed everything."""
+        ctx = self.tree.get_style_context()
+        fg = ctx.get_color(Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
+        return Gdk.RGBA(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
 
     def _text_data(self, col, cell, model, it, key):
         hover_bg(self.tree, cell, model, it)
@@ -325,8 +559,7 @@ class FolderView(Gtk.Box):
             cell.set_property("text", "")
             return
         cell.set_property("text", self.win.cell_text(v, key))
-        cell.set_property("foreground", "#999999" if self.muted else None)
-        cell.set_property("foreground-set", self.muted)
+        cell.set_property("foreground-rgba", self._dim_rgba() if self.muted else None)
 
     def _usage_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
@@ -334,7 +567,7 @@ class FolderView(Gtk.Box):
         if isinstance(v, Entry) and v.usage:
             used, total = v.usage
             pct = int(100 * used / total) if total else 0
-            cell.set_property("value", pct)
+            cell.set_property("fraction", used / total if total else 0.0)
             cell.set_property("text", f"{pct}% used")
             cell.set_property("visible", True)
         else:
@@ -389,16 +622,49 @@ class FolderView(Gtk.Box):
         pb = None
         if size >= 48 and len(self.entries) <= 2500:
             pb = ICONS.thumbnail(e, size, self._thumb_ready)
-        return (pb or ICONS.pixbuf(e.icon, size), self._iv_markup(e))
+        return (pb or ICONS.pixbuf(e.icon, size, e), self._iv_markup(e))
+
+    @staticmethod
+    def _breakable(name: str) -> str:
+        """Zero-width break points at the joints of a file name (before a dot, after _ and -), so a name too
+        wide for its tile wraps as 'dailies_ / notes.md' instead of mid-word."""
+        return re.sub(r"(?<=[_\-])(?=[^_\-])|(?<=[^.])(?=\.)", "\u200b", name) if len(name) > 10 else name
+
+    def shows_where(self) -> bool:
+        """Rows come from more than one folder (search results, Recent, Quick access, Recycle Bin), so every
+        layout has to say where each one lives — two files called big.zip are otherwise indistinguishable."""
+        return bool(self.search) or self.path in (TRASH, QUICK, RECENT)
+
+    def _where(self, e: Entry) -> str:
+        """Short 'where is it' text for an entry: relative to the folder being searched when inside it."""
+        loc = e.location
+        if not loc:
+            return ""
+        if self.search and self.path not in VIRTUAL:
+            if loc == self.path:
+                return os.path.basename(self.path.rstrip("/")) or "/"
+            if loc.startswith(self.path.rstrip("/") + "/"):
+                return loc[len(self.path.rstrip("/")) + 1:]
+        shown = pretty_path(loc)
+        return "~" + shown[len(HOME):] if shown == HOME or shown.startswith(HOME + "/") else shown
 
     def _iv_markup(self, e: Entry) -> str:
-        name = GLib.markup_escape_text(self.win.display_name(e))
+        name = self.win.display_name(e)
+        if self.layout in ("xlarge", "large", "medium"):
+            name = self._breakable(name)
+        name = GLib.markup_escape_text(name)
         cut = self.win.clipboard["mode"] == "cut" and e.path in self.win.clipboard["paths"]
         if cut or e.hidden:
-            name = f"<span foreground='#999999'>{name}</span>"
+            name = f"<span foreground='{COL_DIM}'>{name}</span>"
+        where = GLib.markup_escape_text(self._where(e)) if self.shows_where() else ""
         if self.layout == "tiles":
-            sub = e.type + ("" if e.is_dir else f"\n{fmt_size(e.size, self.cfg['size_in_bytes'])}")
-            return f"{name}\n<small><span foreground='#777'>{GLib.markup_escape_text(sub)}</span></small>"
+            sub = e.type + ("" if e.is_dir else f"  ·  {fmt_size(e.size, self.cfg['size_in_bytes'])}" if where else f"\n{fmt_size(e.size, self.cfg['size_in_bytes'])}")
+            sub = GLib.markup_escape_text(sub) + (f"\n{where}" if where else "")
+            return f"{name}\n<small><span foreground='{COL_DIM}'>{sub}</span></small>"
+        if where:
+            if self.layout in ("list", "small"):            # one line per tile: the folder follows the name
+                return f"{name}  <small><span foreground='{COL_DIM}'>{where}</span></small>"
+            return f"{name}\n<small><span foreground='{COL_DIM}'>{where}</span></small>"
         return name
 
     def _row_index(self) -> Dict[str, int]:
@@ -455,12 +721,13 @@ class FolderView(Gtk.Box):
         else:
             self.stack.set_visible_child_name("icons")
             size = LAYOUT_ICON_SIZE.get(lay, 48)
+            where = self.shows_where()
             if lay in ("list", "small"):
-                self.icons.configure(size, True, 220, self.cfg["single_click"])
+                self.icons.configure(size, True, 360 if where else 220, self.cfg["single_click"])
             elif lay == "tiles":
-                self.icons.configure(size, True, 260, self.cfg["single_click"])
+                self.icons.configure(size, True, 300 if where else 260, self.cfg["single_click"])
             else:
-                self.icons.configure(size, False, size + 44, self.cfg["single_click"])
+                self.icons.configure(size, False, max(size + 44, 116), self.cfg["single_click"], extra_lines=1 if where else 0)
             self.icons.invalidate()
         self.tree.queue_draw()      # visible rows re-run their data funcs; no need to signal every row
         # details rows carry section / group header rows, icon rows don't: switching between the two families
@@ -682,25 +949,30 @@ class FolderView(Gtk.Box):
             return f"Search Results in {self.win.display_path(self.path)}"
         return self.win.display_path(self.path)
 
+    def shown_path(self) -> str:
+        """The folder's full path as the user should read it (split-pane header, tab tooltip): the home
+        folder as ~, and in demo mode the fictional mount points rather than the real location on disk."""
+        p = self.path
+        if p in VIRTUAL:
+            return self.win.display_path(p)
+        if p == HOME:
+            return "~"
+        if p.startswith(HOME + "/"):
+            return "~/" + p[len(HOME) + 1:]
+        return pretty_path(p)
+
     def short_title(self) -> str:
-        """Tab label: parent + own folder, e.g. ~/Documents/Autodesk/ or …/parent/name/"""
+        """Tab label: the folder's own name, as on its breadcrumb. (It used to be '…/parent/name/', which the
+        tab then cut in the middle — '…/Hollow…owcase/' told you neither part.) The full path is the tooltip."""
         p = self.path
         if p in VIRTUAL:
             return self.win.display_path(p)
         if self.search:
             return "Search: " + self.search_text
         if p == HOME:
-            return "~/"
-        if p.startswith(HOME + "/"):
-            rel = "~/" + p[len(HOME) + 1:]
-        else:
-            rel = pretty_path(p)
-        parts = [x for x in rel.split("/") if x]
-        if rel.startswith("/"):
-            parts.insert(0, "")
-        if len(parts) > 3:
-            return "…/" + "/".join(parts[-2:]) + "/"
-        return "/".join(parts) + "/" if parts != [""] else "/"
+            return "Home"
+        shown = pretty_path(p)
+        return os.path.basename(shown.rstrip("/")) or self.win.display_path(p)
 
     def load(self, keep_selection: bool = True):
         self.gen += 1
@@ -897,19 +1169,24 @@ class FolderView(Gtk.Box):
                 rec["shown"] = time.perf_counter()
                 rec["stalls_during"] = len(WATCHDOG.records) - rec["stalls_before"]
                 break
+        old_names = old_names or self.__dict__.pop("_restore_names", None)
+        self.__dict__.pop("_restore_names", None)
         if old_names:
             self.select_names(old_names, scroll=False)
         self.win.on_tab_loaded(self)
 
-    def resort(self):
-        """Re-sort what is already loaded (no disk access); sorting happens off the main thread."""
+    def resort(self, keep: Optional[List[str]] = None):
+        """Re-sort what is already loaded (no disk access); sorting happens off the main thread. `keep`:
+        names to select afterwards (default: what is selected now)."""
         if self.search or self.path in (THISPC, QUICK) or not self.entries:
+            if self.search and keep is not None:
+                return                      # a layout switch: the results are already on screen
             self.load()
             return
         self.gen += 1
         gen = self.gen
         ents, cfg = list(self.entries), self.cfg
-        old = [e.name for e in self.selected_entries()]
+        old = keep if keep is not None else [e.name for e in self.selected_entries()]
 
         def work():
             res = sort_entries(ents, cfg["sort_key"], cfg["sort_desc"], cfg["folders_first"])
@@ -1006,7 +1283,7 @@ class Page(Gtk.Box):
         self.pack_start(self.paned, True, True, 0)
         self.panes: List[FolderView] = []
         self.active: Optional[FolderView] = None
-        self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.MIDDLE, xalign=0)
+        self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.END, xalign=0)
         self.add_pane(path)
         self.active = self.panes[0]
 
@@ -1079,12 +1356,11 @@ class Page(Gtk.Box):
                 fv.icons.muted = muted
                 fv.icons.queue_draw()
                 fv.tree.queue_draw()
-            fv.header_label.set_text(fv.path if fv.path not in VIRTUAL else self.win.display_path(fv.path))
         self.update_label()
 
     def update_label(self):
         fv = self.active or self.panes[0]
         self.label.set_text(fv.short_title() if not self.split else " | ".join(p.short_title() for p in self.panes))
-        self.label.set_tooltip_text(" | ".join(p.path for p in self.panes))
+        self.label.set_tooltip_text(" | ".join(p.shown_path() for p in self.panes))
         for p in self.panes:
-            p.header_label.set_text(p.path if p.path not in VIRTUAL else self.win.display_path(p.path))
+            p.header_label.set_text(p.shown_path())

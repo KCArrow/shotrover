@@ -15,6 +15,7 @@ namespace, so a part may use anything defined in an earlier part, and a class de
 | `p2.py`  | ~850  | dialogs: message/ask helpers, `ProgressDialog`, Properties, `OptionsDialog` (Preferences: General / View / Search / Optional), shortcuts, about |
 | `p2b.py` | ~250  | Batch rename dialog and `apply_renames` |
 | `p2d.py` | ~610  | Find large files: `scan_large_files` (iterative scandir walk, frame-sequence grouping, one filesystem), `find_duplicates`, `cleanup_kind`, `LargeFilesWindow` |
+| `p2e.py` | ~310  | Built-in icon set (`_SR_ICONS` SVGs, `sr_icon_kind`, `sr_icon_pixbuf`), colour scheme (`theme_variant`, `apply_theme_mode`), first-start `WelcomeDialog` |
 | `p2c.py` | ~90   | `ReportDialog` (review / edit / send a report), `open_report` |
 | `p3b.py` | ~850  | custom widgets: `FitImage`, row hover, soft grid lines, virtualised `IconGrid`, This PC tile view (`PCView`, `DriveBar`) |
 | `p3c.py` | ~1400 | 3D preview: `load_model` + `_finish_model_numpy` (triangulation, decimation, normals), software rasteriser (`_rasterize`, `software_render`) and its `RenderWorker` process, `ModelView` (cairo) and `GLModelView` (Gtk.GLArea), GStreamer `VideoPreview` |

@@ -384,16 +384,17 @@ class IconGrid(Gtk.Layout):
         self._relayout()
 
     # ---- layout
-    def configure(self, icon_size: int, horizontal: bool, item_width: int, single_click: bool):
+    def configure(self, icon_size: int, horizontal: bool, item_width: int, single_click: bool, extra_lines: int = 0):
+        """extra_lines: more text rows than the layout normally has (search results add where the file is)."""
         self.icon_size, self.horizontal, self.single_click = icon_size, horizontal, single_click
         probe = self.create_pango_layout("Xg")
         line = probe.get_pixel_size()[1] + 1
         if horizontal:
-            self.text_lines = 3 if icon_size >= 48 else 1
+            self.text_lines = (3 + extra_lines) if icon_size >= 48 else 1
             self.tile_w = item_width
             self.tile_h = max(icon_size, self.text_lines * line) + 12
         else:
-            self.text_lines = 2
+            self.text_lines = 2 + extra_lines
             self.tile_w = max(90, item_width)
             self.tile_h = icon_size + 10 + self.text_lines * line + 10
         self._layout_cache.clear()
@@ -431,6 +432,9 @@ class IconGrid(Gtk.Layout):
     # ---- drawing
     def _draw(self, w, cr):
         n = self._n()
+        # Gtk.Layout paints no backdrop of its own: without this the grid showed the window colour while the
+        # list layouts showed the theme's base colour, so the file area changed shade with the layout.
+        Gtk.render_background(self.get_style_context(), cr, 0, 0, self.get_allocated_width(), self.get_allocated_height())
         if n == 0:
             return False
         # GTK 3.24 hands us a widget-relative cairo context; the scrolled canvas lives in the bin window,
@@ -779,6 +783,62 @@ def _rounded(cr, x, y, w, h, r):
     cr.close_path()
 
 
+def draw_capacity_bar(cr, sc: Gtk.StyleContext, x: float, y: float, w: float, h: float, frac: Optional[float]):
+    """A used-space pill: faint track, fill in the theme's accent (the danger colour past 90 %). The fill is
+    never narrower than the bar is tall, so a nearly empty drive shows a round dot rather than a sliver."""
+    fg = sc.get_color(Gtk.StateFlags.NORMAL)
+    r = h / 2.0
+    _rounded(cr, x, y, w, h, r)
+    cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.14)
+    cr.fill()
+    if frac is None:
+        return
+    f = max(0.0, min(1.0, frac))
+    if f <= 0:
+        return
+    _rounded(cr, x, y, max(h, w * f), h, r)
+    if f > 0.9:
+        d = Gdk.RGBA()
+        d.parse(COL_DANGER)
+        cr.set_source_rgb(d.red, d.green, d.blue)
+    else:
+        ok, sel = sc.lookup_color("theme_selected_bg_color")
+        if ok:
+            cr.set_source_rgb(sel.red, sel.green, sel.blue)
+        else:
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.6)
+    cr.fill()
+
+
+class UsageRenderer(Gtk.CellRenderer):
+    """'Space used' cell in the list layouts: the same pill as the This PC tiles, with the percentage beside
+    it. (Gtk.CellRendererProgress drew a fat trough with the text on top of the fill, and a blob at 13 %.)"""
+
+    fraction = GObject.Property(type=float, default=0.0)
+    text = GObject.Property(type=str, default="")
+
+    def do_get_preferred_width(self, widget):
+        return 120, 170
+
+    def do_get_preferred_height(self, widget):
+        return 14, 14
+
+    def do_render(self, cr, widget, background_area, cell_area, flags):
+        sc = widget.get_style_context()
+        pad = 6
+        bar_w = max(40, min(96, cell_area.width - 2 * pad - 70))
+        bar_h = 6
+        y = cell_area.y + (cell_area.height - bar_h) / 2.0
+        draw_capacity_bar(cr, sc, cell_area.x + pad, y, bar_w, bar_h, self.fraction)
+        lay = widget.create_pango_layout(self.text or "")
+        tw, th = lay.get_pixel_size()
+        if cell_area.width - bar_w - 3 * pad >= tw:
+            fg = sc.get_color(Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
+            cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.75)
+            cr.move_to(cell_area.x + pad + bar_w + pad + 2, cell_area.y + (cell_area.height - th) / 2.0)
+            PangoCairo.show_layout(cr, lay)
+
+
 # --------------------------------------------------------------------------- This PC: Windows-style tile view
 class DriveBar(Gtk.DrawingArea):
     """The thin capacity bar under a drive's name: used/total, red past 90 % like Explorer."""
@@ -795,21 +855,7 @@ class DriveBar(Gtk.DrawingArea):
 
     def _draw(self, w, cr):
         a = self.get_allocation()
-        sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
-        _rounded(cr, 0, 2, a.width, a.height - 4, 2)
-        cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.15)
-        cr.fill()
-        if self.frac is not None:
-            f = max(0.0, min(1.0, self.frac))
-            if f > 0:
-                _rounded(cr, 0, 2, max(4, a.width * f), a.height - 4, 2)
-                if f > 0.9:
-                    cr.set_source_rgb(0.85, 0.22, 0.2)
-                else:
-                    ok, sel = sc.lookup_color("theme_selected_bg_color")
-                    cr.set_source_rgb(sel.red, sel.green, sel.blue) if ok else cr.set_source_rgb(0.2, 0.5, 0.9)
-                cr.fill()
+        draw_capacity_bar(cr, self.get_style_context(), 0, 2, a.width, a.height - 4, self.frac)
         return False
 
 
@@ -869,7 +915,6 @@ class PCView(Gtk.ScrolledWindow):
             self.flows.append(fb)
             self.box.pack_start(exp, False, False, 0)
             sep = Gtk.Separator()
-            sep.set_opacity(0.35)
             self.box.pack_start(sep, False, False, 2)
         self.box.show_all()
         self.refresh()
@@ -877,7 +922,7 @@ class PCView(Gtk.ScrolledWindow):
     def _make_tile(self, e: Entry):
         is_drive = e.section not in ("Folders",) and (getattr(e, "drive_kind", "") or e.usage is not None)
         h = Gtk.Box(spacing=10, margin=6)
-        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
+        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
         img.set_valign(Gtk.Align.START)
         h.pack_start(img, False, False, 0)
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
@@ -892,7 +937,7 @@ class PCView(Gtk.ScrolledWindow):
             v.pack_start(info, False, False, 0)
             h.set_size_request(250, -1)
         else:
-            sub = Gtk.Label(label=e.location or "", xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
+            sub = Gtk.Label(label=pretty_path(e.location or ""), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
             sub.get_style_context().add_class("dim-label")
             v.pack_start(sub, False, False, 0)
             h.set_size_request(200, -1)

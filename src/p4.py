@@ -574,7 +574,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if n.kind == "root":
             cell.set_property("markup", f"<b>{GLib.markup_escape_text(n.label)}</b>")
         elif n.kind == "info":
-            cell.set_property("markup", f"<span foreground='#888'>{GLib.markup_escape_text(n.label)}</span>")
+            cell.set_property("markup", f"<span foreground='{COL_DIM}'>{GLib.markup_escape_text(n.label)}</span>")
         else:
             cell.set_property("markup", GLib.markup_escape_text(n.label))
 
@@ -1096,18 +1096,19 @@ class MainWindow(Gtk.ApplicationWindow):
         fcol.pack_start(ftxt, True)
         fcol.set_expand(True)
         fcol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-        fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16)), None)
+        fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16, m[it][0])), None)
         fcol.set_cell_data_func(ftxt, lambda c, cell, m, it, d=None: cell.set_property("text", m[it][0].name), None)
         ftv.append_column(fcol)
         fsize = Gtk.CellRendererText(xalign=1.0)
-        fsize.set_property("foreground", "#888888")
+        fsize.set_property("foreground", COL_DIM)
         fsize.set_fixed_size(-1, fsize_fixed)
         scol = Gtk.TreeViewColumn("", fsize, text=1)
         scol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         scol.set_fixed_width(90)
         ftv.append_column(scol)
         ftv.set_fixed_height_mode(True)
-        ftv.connect("row-activated", lambda t, p, c: self.activate_entry(self.preview_folder[p][0]))
+        # (rows of an archive listing have no path of their own: nothing to open)
+        ftv.connect("row-activated", lambda t, p, c: self.preview_folder[p][0].path and self.activate_entry(self.preview_folder[p][0]))
         fsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         fsw.add(ftv)
         self.model_view = None            # created on the first model preview (GL context setup is ~300 ms)
@@ -1182,12 +1183,36 @@ class MainWindow(Gtk.ApplicationWindow):
         mbox.pack_start(sbar, False, False, 0)
         mbox.pack_start(self.seq_label, False, False, 0)
         mbox.reorder_child(self.seq_label, 1)            # current frame's file name: between the bar and the viewer
-        mhint = Gtk.Label(label="LMB orbit · MMB pan · Alt+RMB or wheel zoom · double-click reset · W wireframe · S flat/smooth", ellipsize=Pango.EllipsizeMode.END)
+        mhint = Gtk.Label(wrap=True, lines=2, ellipsize=Pango.EllipsizeMode.END, justify=Gtk.Justification.CENTER, max_width_chars=30)
+        mhint.set_markup("<small>Drag to orbit · middle-drag to pan · wheel to zoom\ndouble-click resets · W wireframe · S flat / smooth</small>")
+        mhint.set_tooltip_text("Left drag: orbit\nMiddle drag: pan\nWheel or Alt + right drag: zoom\nDouble-click: reset the view\nW: wireframe\nS: flat / smooth shading")
         mhint.get_style_context().add_class("dim-label")
         mbox.pack_start(mhint, False, False, 0)
         self.preview_stack.add_named(mbox, "model")
         self.preview_stack.add_named(self._build_breakdown_page(), "breakdown")
-        self.preview_stack.add_named(self.preview_image, "image")
+        # image page = the picture plus (PDFs only) a page stepper underneath
+        ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+        ibox.pack_start(self.preview_image, True, True, 0)
+        self.pdf_bar = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
+        self.pdf_prev = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU)
+        self.pdf_next = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU)
+        self.pdf_label = Gtk.Label()
+        self.pdf_label.get_style_context().add_class("dim-label")
+        for b, d, tip in ((self.pdf_prev, -1, "Previous page (or scroll up over the page)"), (self.pdf_next, 1, "Next page (or scroll down over the page)")):
+            b.get_style_context().add_class("flat")
+            b.set_tooltip_text(tip)
+            b.connect("clicked", lambda w, d=d: self._pdf_go(d))
+        self.pdf_bar.pack_start(self.pdf_prev, False, False, 0)
+        self.pdf_bar.pack_start(self.pdf_label, False, False, 0)
+        self.pdf_bar.pack_start(self.pdf_next, False, False, 0)
+        self.pdf_bar.show_all()
+        self.pdf_bar.set_no_show_all(True)
+        self.pdf_bar.hide()
+        ibox.pack_start(self.pdf_bar, False, False, 0)
+        self._pdf = None                  # {'entry', 'page', 'pages'} while a multi-page PDF is on screen
+        self.preview_image.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
+        self.preview_image.connect("scroll-event", self._pdf_scroll)
+        self.preview_stack.add_named(ibox, "image")
         self.video = VideoPreview() if gst_sink_available() else None
         if self.video is not None:
             self.video.sink_widget.set_size_request(-1, 0)      # no minimum: the pane decides
@@ -1363,10 +1388,17 @@ class MainWindow(Gtk.ApplicationWindow):
         # re-decoding a model or a big image on every click made double-clicks feel laggy.
         key = (e.path, e.size, e.mtime) if e is not None else None
         shown = self.preview_stack.get_visible_child_name()
-        if key is not None and key == getattr(self, "_preview_key", None) and shown not in ("info", None):
+        # Only when that item's preview has actually landed: a second selection signal for the same item
+        # (select_names → select + set_cursor, after a rename / paste / jump-to-reference) arrives while the
+        # first load is still running; returning here would orphan it (its generation is stale) and leave
+        # the previous file's preview and caption on screen for good.
+        if (key is not None and key == getattr(self, "_preview_key", None) and shown not in ("info", None)
+                and getattr(self, "_content_key", None) == key):
             self._drop_snapshot()               # nothing changes: let the held snapshot go at once
             return
         self._preview_key = key
+        self._pdf = None                        # page stepper belongs to the PDF that was on screen
+        self._pdf_req = getattr(self, "_pdf_req", 0) + 1
         if self.video is not None and shown == "video":
             self.video.stop()                   # leaving the player: release the decoder, stop the sound
         self._set_caption("")
@@ -1471,6 +1503,7 @@ class MainWindow(Gtk.ApplicationWindow):
             def done(pb, dims):
                 if gen != self._side_gen:
                     return False
+                self.pdf_bar.hide()
                 self.preview_image.set_from_pixbuf(pb)
                 self._show_preview("image")
                 if dims:
@@ -1541,6 +1574,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if anim is None:
                 self._preview_as_icon(e, "Couldn't decode this image")
                 return False
+            self.pdf_bar.hide()
             self.preview_image.set_animation(anim)
             self._qv_add("Dimensions", f"{anim.get_width()} × {anim.get_height()} px")
             if info and info["frames"] > 1:
@@ -1868,11 +1902,19 @@ class MainWindow(Gtk.ApplicationWindow):
         if "raw" in res:
             img = res["raw"]
             pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
+            self.pdf_bar.hide()
             self.preview_image.set_from_pixbuf(pb)
             self._show_preview("image")
         elif "png" in res:
             try:
                 pb = GdkPixbuf.Pixbuf.new_from_file(res["png"])
+                pages = int(res.get("pages") or 0)
+                if pages > 1:
+                    self._pdf = {"entry": e, "page": int(res.get("page") or 1), "pages": pages}
+                    self.pdf_label.set_text(f"Page {self._pdf['page']:,} of {pages:,}")
+                    self.pdf_prev.set_sensitive(self._pdf["page"] > 1)
+                    self.pdf_next.set_sensitive(self._pdf["page"] < pages)
+                self.pdf_bar.set_visible(pages > 1)
                 self.preview_image.set_from_pixbuf(pb)
                 self._show_preview("image")
             except GLib.Error:
@@ -1882,6 +1924,23 @@ class MainWindow(Gtk.ApplicationWindow):
                     os.remove(res["png"])
                 except OSError:
                     pass
+        elif "archive" in res:
+            arch = res["archive"]
+            if "error" in arch:
+                self._preview_as_icon(e, arch["error"])
+                return False
+            # the contents as a list, like a folder's — not as text in the editor
+            self.preview_folder.clear()
+            in_bytes = self.cfg["size_in_bytes"]
+            for name, size, is_dir in arch["entries"]:
+                k = Entry()
+                k.name, k.is_dir, k.path = name, bool(is_dir), ""
+                k.icon = _FOLDER_ICON if is_dir else _ct_info(os.path.basename(name))[2]
+                self.preview_folder.append([k, "" if is_dir else fmt_size(size, in_bytes)])
+            self._qv_add("Contents", arch["summary"])
+            if arch["count"] > len(arch["entries"]):
+                self._qv_add("Listed", f"first {len(arch['entries']):,}")
+            self._show_preview("folder")
         elif "text" in res:
             self.edit_toggle.set_sensitive(False)
             buf = self.preview_text.get_buffer()
@@ -1895,6 +1954,59 @@ class MainWindow(Gtk.ApplicationWindow):
         else:
             self._preview_as_icon(e, "No preview available")
         return False
+
+    def _pdf_go(self, delta: int):
+        """Step the PDF on screen by `delta` pages (rendered off-thread; the current page stays until it lands)."""
+        st = self._pdf
+        if not st:
+            return
+        page = max(1, min(st["pages"], st["page"] + delta))
+        if page == st["page"]:
+            return
+        st["page"] = page
+        self.pdf_label.set_text(f"Page {page:,} of {st['pages']:,}")
+        self.pdf_prev.set_sensitive(page > 1)
+        self.pdf_next.set_sensitive(page < st["pages"])
+        self._pdf_req = req = getattr(self, "_pdf_req", 0) + 1
+        e, gen = st["entry"], self._side_gen
+        w = max(120, self.side.get_allocated_width() - 24)
+        h = max(120, self.preview_box.get_allocated_height() - 24)
+
+        def work():
+            conv = convert_with_tools(e.path, e.content_type or "application/pdf", w, h, tag="page", page=page)
+            GLib.idle_add(done, conv)
+
+        def done(conv):
+            try:
+                if conv and req == self._pdf_req and gen == self._side_gen:
+                    self.preview_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(conv[0]))
+            except GLib.Error:
+                pass
+            finally:
+                if conv:
+                    try:
+                        os.remove(conv[0])
+                    except OSError:
+                        pass
+            return False
+        threading.Thread(target=work, daemon=True).start()
+
+    def _pdf_scroll(self, w, event):
+        if not self._pdf or not self.pdf_bar.get_visible():
+            return False
+        if event.direction == Gdk.ScrollDirection.SMOOTH:
+            self._pdf_dy = getattr(self, "_pdf_dy", 0.0) + event.delta_y
+            if abs(self._pdf_dy) < 1.0:
+                return True
+            d, self._pdf_dy = (1 if self._pdf_dy > 0 else -1), 0.0
+        elif event.direction == Gdk.ScrollDirection.DOWN:
+            d = 1
+        elif event.direction == Gdk.ScrollDirection.UP:
+            d = -1
+        else:
+            return False
+        self._pdf_go(d)
+        return True
 
     def _qv_add(self, key: str, value: str):
         """Append (or update) a row in the quick-view card."""
@@ -1955,7 +2067,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.cfg.get("gl_preview", True):
             self.cfg["gl_preview"] = True
             self.toggle_gl_preview()          # flips to False and swaps in ModelView
-        self.model_count.set_markup(f"<span foreground='#c0392b'>OpenGL failed: {GLib.markup_escape_text(msg[:160])}</span>")
+        self.model_count.set_markup(f"<span foreground='{COL_DANGER}'>OpenGL failed: {GLib.markup_escape_text(msg[:160])}</span>")
         self.model_count.set_tooltip_text(msg)
 
     def _ensure_model_view(self, software: bool = False):
@@ -2549,7 +2661,7 @@ class MainWindow(Gtk.ApplicationWindow):
         st = self.bd_store
         self.bd_view.set_model(None)                          # detached: tens of thousands of rows fill fast
         st.clear()
-        missing = "#e5534b"
+        missing = COL_DANGER
 
         def add(parent, nodes):
             for label, detail, kids, path, ok in nodes:
@@ -2954,6 +3066,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return
         if name != "info":
             self._content_gen = self._side_gen          # real content for the current selection is on screen
+            self._content_key = getattr(self, "_preview_key", None)
             self._apply_caption()
         stack.set_visible_child_name(name)
         self._crossfade_from_snapshot()
@@ -3069,7 +3182,7 @@ class MainWindow(Gtk.ApplicationWindow):
         return True
 
     def _preview_as_icon(self, e: Entry, note: str):
-        pb = ICONS.pixbuf(e.icon, 128)
+        pb = ICONS.pixbuf(e.icon, 128, e)
         self.preview_icon_img.set_from_pixbuf(pb)
         self.preview_icon_lab.set_text(note)
         self._show_preview("icon")
@@ -3120,7 +3233,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 rows.append(("Types", ", ".join(exts[:8]) + ("…" if len(exts) > 8 else "")))
         else:
             e = sel[0]
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32))
+            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32, e))
             self.details_title.set_markup(f"<b>{GLib.markup_escape_text(e.name)}</b>")
             self.qv_subtitle.set_text(e.type)
             rows = []
@@ -3616,7 +3729,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if key == "perms":
             return _stat.filemode(e.mode)[1:] if e.mode else ""
         if key == "location":
-            return e.location
+            return pretty_path(e.location)
         if key == "deleted":
             return fmt_date(e.deleted, f)
         return ""
@@ -3627,6 +3740,7 @@ class MainWindow(Gtk.ApplicationWindow):
             if PATHS.isdir(p):
                 e = entry_for_path(p)
                 e.section = "Pinned folders"
+                e.location = os.path.dirname(p)
                 out.append(e)
         if self.cfg["show_frequent"]:
             for p in self.frequent_folders()[:8]:
@@ -3812,9 +3926,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.cfg["layout"] = lay
         t = self.tab
         if t is not None:
+            # the selection lives in whichever widget shows the current layout (list or icon grid); carry it
+            # over by name, or switching layout would deselect everything and blank the preview pane
+            keep = [e.name for e in t.selected_entries()]
             t.layout = lay
+            t._restore_names = keep
             t.apply_layout()
-            t.resort()
+            if keep and not t.pc_mode:
+                t.select_names(keep)
+            t.resort(keep)
 
     def toggle_column(self, key: str):
         cols = self.cfg["columns"]
@@ -3836,6 +3956,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.cfg["gl_preview"] = not self.cfg["gl_preview"]
             self.toggle_gl_preview()         # flips it back and swaps the viewer in place
         self._apply_panes()
+        apply_theme_mode(self.cfg.get("theme", "system"))
+        ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         for t in self._tabs():
             t.apply_layout()
         self.rebuild_nav()
@@ -3867,6 +3989,7 @@ class MainWindow(Gtk.ApplicationWindow):
         t = self.tab
         if t.search:
             t.stop_search()
+            t.apply_layout()            # tiles go back to their normal size (search results carry a "where" line)
             t.load()
         self.searchbox.set_text("")
         self._update_title()

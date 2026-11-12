@@ -1,6 +1,29 @@
 # Changelog
 
-## Unreleased
+## 1.1.1 — 2026-11-12
+
+- Shotrover icons: a built-in icon set for files, folders and drives (yellow folders, a picture per file type including 3D models, volumes and scene files), so the app looks the same on every desktop. Choose between it and your desktop's icon theme in Preferences → View.
+- Colours: follow the desktop, or force a light or dark look for Shotrover only (Preferences → View). It switches to the light or dark sibling of your GTK theme, and to Adwaita when the theme has none.
+- The first start asks once which icons and colours you want.
+- Divider lines are one weight and colour everywhere: pane edges, the status bar, column headers and separators all use the same 1px line. The lines either side of the file area were drawn twice and came out much brighter than the rest.
+- An unfocused window keeps its background shades and its text dims in one step, instead of some parts darkening and buttons fading on their own. The inactive side of a split view stays dimmer than the active side when the window is unfocused.
+- Thumbnails for production files in the icon layouts (and Content): EXR, HDR, PSD, Maya IFF, video, PDF and
+  3D models (OBJ, STL, PLY, FBX, USD, Alembic, glTF, Houdini caches) now show their contents instead of a
+  file-type icon. Made off the main thread in their own worker processes, kept in memory only
+- Fixed: the app's stylesheet was never loaded (the loading code sat after a `return`), so none of the
+  intended styling applied. It loads now, with one backdrop for the file area in every layout and one for the
+  bars and side panes; status colours and the destructive-button colour come from one set of tokens
+- Fixed: the preview pane could stay on the previous file after a rename, paste or jump-to-reference
+- Switching layout keeps the selection (and the preview)
+- Search results, Recent and Quick access say where each item lives in every layout; in Details the folder
+  column sits next to Name instead of off-screen at the far right
+- Archives preview as a file list instead of text in the editor; PDFs get previous / next page (buttons or
+  the mouse wheel) and a sharper page
+- Tabs show the folder name (full path in the tooltip); split-pane headers show `~/…` paths
+- Type names for production formats (`.obj` is "OBJ model", not "TGIF document"; also Alembic, USD, Maya,
+  Houdini, Nuke, VDB and others)
+- Content layout no longer repeats type and size as columns; long names in the icon layouts wrap at
+  `_`, `-` and `.` instead of mid-word; the Space used column draws a clean bar
 
 - Runs the same on any distro: Preferences → Optional and the install hints in error messages now give the
   commands for your package manager (dnf, apt, pacman or zypper) instead of always dnf; EPEL / RPM Fusion are
@@ -99,7 +122,6 @@ nonprofits; commercial licences available — see COMMERCIAL-LICENSE.md).
 - OpenRV integration (Ctrl+Shift+R)
 - Crash and error reporting: exceptions, hard crashes and freezes become reports you can review,
   edit and file as a GitHub issue (Help → Report a problem…)
-- `--demo` mode: fictional drives, disks, user folders and config for screenshots (docs/DEMO.md)
 - Preferences dialog with General / View / Search / Optional tabs and dependency diagnostics
 
 Known issues

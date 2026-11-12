@@ -448,7 +448,8 @@ class PropertiesDialog(Gtk.Dialog):
         e, st, cfg = self.e, self.st, self.cfg
         g = self._grid()
         hb = Gtk.Box(spacing=8)
-        img = Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
+        pb = ICONS.pixbuf(e.icon or Gio.ThemedIcon.new("text-x-generic"), 48, e)
+        img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
         hb.pack_start(img, False, False, 0)
         self.name_entry = Gtk.Entry(text=e.name, hexpand=True)
         hb.pack_start(self.name_entry, True, True, 0)
@@ -716,6 +717,15 @@ class OptionsDialog(Gtk.Dialog):
         self._heading(b, "Panes")
         for key, lab in (("nav_pane", "Show navigation pane"), ("preview_pane", "Show preview pane"), ("details_pane", "Show details pane")):
             self._check(b, key, lab)
+        self._heading(b, "Appearance")
+        row = Gtk.Box(spacing=24)
+        for key, title, options in (("icons", "Icons", (("shotrover", "Shotrover icons"), ("system", "System icons (your desktop's icon theme)"))),
+                                    ("theme", "Colours", (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")))):
+            col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
+            col.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            self._radios(col, key, options)
+            row.pack_start(col, False, False, 0)
+        b.pack_start(row, False, False, 0)
         self._heading(b, "Date format (strftime)")
         e = Gtk.Entry(text=self.cfg["date_format"])
         b.pack_start(e, False, False, 0)
@@ -739,7 +749,10 @@ class OptionsDialog(Gtk.Dialog):
         for r in self.cfg.get("index_roots", [HOME]):
             self.roots_store.append([r])
         tv = Gtk.TreeView(model=self.roots_store, headers_visible=False)
-        tv.append_column(Gtk.TreeViewColumn("", Gtk.CellRendererText(), text=0))
+        rcell = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.MIDDLE)
+        rcol = Gtk.TreeViewColumn("", rcell)
+        rcol.set_cell_data_func(rcell, lambda c, cell, m, it, d=None: cell.set_property("text", pretty_path(m[it][0])), None)
+        tv.append_column(rcol)
         sw = Gtk.ScrolledWindow(min_content_height=90)
         sw.add(tv)
         b.pack_start(sw, False, False, 0)
@@ -904,7 +917,7 @@ class OptionsDialog(Gtk.Dialog):
                 name.set_tooltip_text(dep["cmd"])
                 self.dep_grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup("<span foreground='#2e8b57'>installed</span>" if dep["found"] else "<span foreground='#c0392b'>missing</span>")
+                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
@@ -970,7 +983,7 @@ class OptionsDialog(Gtk.Dialog):
     def _response(self, d, r):
         if r == 10:
             for k, v in DEFAULT_CONFIG.items():
-                if k not in ("pinned", "recent", "frequent", "window", "nav_width", "preview_width", "side_width", "side_split", "rv_path", "index_roots"):
+                if k not in ("pinned", "recent", "frequent", "window", "nav_width", "preview_width", "side_width", "side_split", "rv_path", "index_roots", "setup_done"):
                     self.cfg[k] = json.loads(json.dumps(v))
             self.on_apply()
             self.destroy()

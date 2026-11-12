@@ -124,7 +124,7 @@ class BatchRenameDialog(Gtk.Dialog):
             col.set_resizable(True)
             col.set_expand(i < 2)
             if i == 2:
-                rend.set_property("foreground", "#d04040")
+                rend.set_property("foreground", COL_DANGER)
             tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         sw.add(tv)

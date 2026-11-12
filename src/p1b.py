@@ -574,21 +574,27 @@ def _tool(*names) -> Optional[str]:
     return None
 
 
-def convert_with_tools(path: str, ct: str, max_w: int, max_h: int) -> Optional[Tuple[str, str]]:
-    """Try installed converters; returns (png_path, tool_name) or None. Caller deletes the png."""
-    out = os.path.join(tempfile.gettempdir(), f"shotrover-preview-{os.getpid()}-{abs(hash(path)) & 0xffffff:x}.png")
+def convert_with_tools(path: str, ct: str, max_w: int, max_h: int, tag: str = "preview", page: int = 1) -> Optional[Tuple[str, str]]:
+    """Try installed converters; returns (png_path, tool_name) or None. Caller deletes the png. `tag` keeps
+    callers apart (the preview pane and the thumbnailer can convert the same file at the same moment);
+    `page` is the PDF page to render (1-based)."""
+    out = os.path.join(tempfile.gettempdir(), f"shotrover-{tag}-{os.getpid()}-{threading.get_ident() & 0xffff:x}-{abs(hash(path)) & 0xffffff:x}.png")
     low = path.lower()
     attempts = []
     is_video = ct.startswith("video/") or low.endswith((".mov", ".mp4", ".mkv", ".avi", ".webm", ".mxf", ".r3d"))
     if is_video:
         ff = _tool("ffmpeg")
         if ff:
-            attempts.append((ff, [ff, "-v", "error", "-y", "-ss", "1", "-i", path, "-frames:v", "1",
-                                  "-vf", f"scale='min({max_w},iw)':-2", out]))
+            for seek in ("1", "0"):                 # a clip shorter than a second has no frame at 1 s
+                attempts.append((ff, [ff, "-v", "error", "-y", "-ss", seek, "-i", path, "-frames:v", "1",
+                                      "-vf", f"scale='min({max_w},iw)':-2", out]))
     if low.endswith(".pdf"):
         pt = _tool("pdftoppm")
         if pt:
-            attempts.append((pt, [pt, "-png", "-singlefile", "-r", "40", "-f", "1", "-l", "1", path, out[:-4]]))
+            # resolution from the space on offer (a page is ~8.3 in wide), not a fixed 40 dpi: the preview pane
+            # showed a blurry stamp of the page; a thumbnail asks for far less
+            dpi = str(int(max(30, min(150, max_w / 4.0))))        # ~2× the box: the image widget scales it to fit
+            attempts.append((pt, [pt, "-png", "-singlefile", "-r", dpi, "-f", str(page), "-l", str(page), path, out[:-4]]))
     oiio = _tool("oiiotool")
     if oiio:
         attempts.append((oiio, [oiio, path, "--subimage", "0", "--ch", "R,G,B", "--resize", f"{max_w}x{max_h}", "--colorconvert", "linear", "sRGB", "-o", out]))
@@ -614,30 +620,34 @@ def convert_with_tools(path: str, ct: str, max_w: int, max_h: int) -> Optional[T
 
 
 # --------------------------------------------------------------------------- information previews (text)
-def describe_archive(path: str) -> Optional[str]:
+ARCHIVE_PREVIEW_MAX = 2000          # rows shown in the preview pane; the summary line still counts them all
+
+
+def list_archive(path: str) -> Optional[dict]:
+    """What is inside an archive, without extracting it: {'entries': [(inner path, size, is_dir)],
+    'summary': str} — or {'error': str} when it can't be read, or None when this isn't an archive we know.
+    zip and tar are read with the standard library; everything else goes through 7-Zip when installed."""
     import zipfile, tarfile
+    cap = ARCHIVE_PREVIEW_MAX
     try:
         if zipfile.is_zipfile(path):
             with zipfile.ZipFile(path) as z:
                 infos = z.infolist()
                 total = sum(i.file_size for i in infos)
-                lines = [f"{len(infos)} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk", ""]
-                lines += [f"{fmt_size(i.file_size):>10}   {i.filename}" for i in infos[:400]]
-                if len(infos) > 400:
-                    lines.append(f"… {len(infos) - 400} more")
-                return "\n".join(lines)
+                return {"entries": [(i.filename.rstrip("/"), i.file_size, i.is_dir()) for i in infos[:cap]], "count": len(infos),
+                        "summary": f"{len(infos):,} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk"}
         if tarfile.is_tarfile(path):
             with tarfile.open(path) as t:
                 members = []
                 for m in t:
                     members.append(m)
-                    if len(members) > 400:
+                    if len(members) > cap:
                         break
-                lines = [f"{'400+' if len(members) > 400 else len(members)} entries · {fmt_size(os.path.getsize(path))} on disk", ""]
-                lines += [f"{fmt_size(m.size):>10}   {m.name}{'/' if m.isdir() else ''}" for m in members[:400]]
-                return "\n".join(lines)
+                more = len(members) > cap
+                return {"entries": [(m.name, m.size, m.isdir()) for m in members[:cap]], "count": len(members),
+                        "summary": f"{f'{cap:,}+' if more else f'{len(members):,}'} entries · {fmt_size(os.path.getsize(path))} on disk"}
     except Exception as ex:
-        return f"Could not read archive: {ex}"
+        return {"error": f"Could not read archive: {ex}"}
     sz = sevenzip()
     if sz:
         try:
@@ -658,20 +668,55 @@ def describe_archive(path: str) -> Optional[str]:
                     entries.append(cur)
                 entries = [e for e in entries if not (e.get("Path") in (path, os.path.basename(path)) and "Type" in e)]
                 total = sum(int(e.get("Size") or 0) for e in entries)
-                lines = [f"{len(entries)} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk  (7-Zip)", ""]
-                for e in entries[:400]:
+                rows = []
+                for e in entries[:cap]:
                     is_dir = (e.get("Attributes") or "").startswith("D") or (e.get("Folder") == "+")
-                    lines.append(f"{'' if is_dir else fmt_size(int(e.get('Size') or 0)):>10}   {e['Path']}{'/' if is_dir else ''}")
-                if len(entries) > 400:
-                    lines.append(f"… {len(entries) - 400} more")
-                return "\n".join(lines)
+                    rows.append((e["Path"], 0 if is_dir else int(e.get("Size") or 0), is_dir))
+                return {"entries": rows, "count": len(entries),
+                        "summary": f"{len(entries):,} entries · {fmt_size(total)} uncompressed · {fmt_size(os.path.getsize(path))} on disk  (7-Zip)"}
             if r.returncode != 0:
-                return f"7-Zip could not read this archive: {(r.stderr.strip().splitlines() or ['unknown error'])[-1]}"
+                return {"error": f"7-Zip could not read this archive: {(r.stderr.strip().splitlines() or ['unknown error'])[-1]}"}
         except (OSError, subprocess.TimeoutExpired) as ex:
-            return f"Could not read archive: {ex}"
+            return {"error": f"Could not read archive: {ex}"}
     elif path.lower().endswith(SEVENZIP_EXTS):
-        return "This archive type needs 7-Zip to list and extract.\nTools → Dependencies (p7zip)"
+        return {"error": "This archive type needs 7-Zip to list and extract.\nTools → Dependencies (p7zip)"}
     return None
+
+
+def describe_archive(path: str) -> Optional[str]:
+    """The same listing as plain text (reports, tests)."""
+    res = list_archive(path)
+    if res is None:
+        return None
+    if "error" in res:
+        return res["error"]
+    lines = [res["summary"], ""]
+    lines += [f"{'' if d else fmt_size(size):>10}   {name}{'/' if d else ''}" for name, size, d in res["entries"]]
+    if res["count"] > len(res["entries"]):
+        lines.append(f"… {res['count'] - len(res['entries'])} more")
+    return "\n".join(lines)
+
+
+def pdf_page_count(path: str) -> int:
+    """Pages in a PDF: pdfinfo when installed (poppler-utils, same package as pdftoppm), else a scan of the
+    file for its page-tree count. 0 when unknown."""
+    tool = _tool("pdfinfo")
+    if tool:
+        try:
+            r = subprocess.run([tool, path], capture_output=True, text=True, errors="replace", timeout=10)
+            for line in r.stdout.splitlines():
+                if line.startswith("Pages:"):
+                    return int(line.split(":", 1)[1].strip())
+        except (OSError, subprocess.TimeoutExpired, ValueError):
+            pass
+    try:
+        with open(path, "rb") as f:
+            data = f.read(8 << 20)
+        counts = [int(m) for m in re.findall(rb"/Type\s*/Pages\b[^>]*?/Count\s+(\d+)", data)] + \
+                 [int(m) for m in re.findall(rb"/Count\s+(\d+)[^>]*?/Type\s*/Pages\b", data)]
+        return max(counts) if counts else 0
+    except (OSError, ValueError):
+        return 0
 
 
 def gif_info(path: str) -> Optional[dict]:
@@ -908,6 +953,10 @@ def warm_workers():
         get_render_worker()
     except Exception:
         pass
+    try:
+        warm_thumb_pool()
+    except Exception:
+        pass
 
 
 def run_heavy(fn, *args):
@@ -950,6 +999,10 @@ def shutdown_workers():
     """Quit: kill the decoder pool and the render process instead of letting multiprocessing's exit handler
     join them — a worker busy with a big model or EXR made closing the window hang for seconds."""
     global _POOL, _SEQ_POOL
+    try:
+        shutdown_thumb_pool()
+    except Exception:
+        pass
     pools, _POOL, _SEQ_POOL = (_POOL, _SEQ_POOL), None, None
     for pool in pools:
         if pool is None:
@@ -979,9 +1032,10 @@ PREVIEW_DECODERS = {".iff": decode_maya_iff, ".tdi": decode_maya_iff, ".exr": de
                     ".psd": decode_psd, ".psb": decode_psd}
 
 
-def generate_preview(path: str, ct: str, max_w: int, max_h: int) -> dict:
-    """Worker-thread entry point. Returns {'raw': RawImage} | {'png': path, 'tool': name} | {'text': str} | {}
-    always with an 'info' list for the quick-view card."""
+def generate_preview(path: str, ct: str, max_w: int, max_h: int, page: int = 1) -> dict:
+    """Worker-thread entry point. Returns {'raw': RawImage} | {'png': path, 'tool': name} | {'text': str} |
+    {'archive': list_archive() result} | {} — always with an 'info' list for the quick-view card. A PDF also
+    carries 'pages' (count) and 'page' (the one rendered, 1-based)."""
     ext = os.path.splitext(path)[1].lower()
     info: List[Tuple[str, str]] = []
     try:
@@ -996,10 +1050,19 @@ def generate_preview(path: str, ct: str, max_w: int, max_h: int) -> dict:
             info += describe_obj(path)
         if ct.startswith(("video/", "audio/")) or ext in (".mov", ".mp4", ".mkv", ".mxf", ".wav", ".flac", ".mp3", ".aif", ".aiff"):
             info += describe_media(path)
-        arch = describe_archive(path) if (ext in (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".jar", ".whl") or path.lower().endswith(SEVENZIP_EXTS)) else None
+        arch = list_archive(path) if (ext in (".zip", ".tar", ".gz", ".tgz", ".bz2", ".xz", ".jar", ".whl") or path.lower().endswith(SEVENZIP_EXTS)) else None
         if arch:
-            return {"text": arch, "info": info}
-        conv = convert_with_tools(path, ct, max_w, max_h)
+            return {"archive": arch, "info": info}
+        pages = 0
+        if ext == ".pdf" or ct == "application/pdf":
+            pages = pdf_page_count(path)
+            if pages:
+                info.append(("Pages", f"{pages:,}"))
+        conv = convert_with_tools(path, ct, max_w, max_h, page=max(1, page))
+        if conv and pages:
+            png, tool = conv
+            info.append(("Preview via", tool))
+            return {"png": png, "tool": tool, "info": info, "pages": pages, "page": max(1, page)}
         if conv:
             png, tool = conv
             info.append(("Preview via", tool))

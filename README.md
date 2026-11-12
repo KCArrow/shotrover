@@ -19,7 +19,7 @@ show as a grey icon: EXR, PSD, video, 3D models, VDB smoke, Maya / Blender / Unr
 
 </div>
 
-<!-- Stills taken in demo mode (docs/DEMO.md) — nothing here is a real machine. -->
+<!-- The stills show a fictional machine, not a real one. -->
 ![Shotrover main window](docs/screenshots/hero.png)
 
 ---
@@ -85,11 +85,13 @@ If something doesn't work on your distro, that is a bug.
 
 *VDB smoke in the preview pane: select the frames, press **Preview as sequence**, scrub or play. No Houdini needed.*
 
-| This PC | 3D preview | Video preview |
-|---|---|---|
-| ![](docs/screenshots/this-pc.png) | ![](docs/screenshots/preview-3d.png) | ![](docs/screenshots/preview-video.png) |
+<sub>Campfire VDB set made with EmberGen by [JangaFX](https://jangafx.com/software/embergen/download/free-vdb-animations/), released as CC0.</sub>
 
-| EXR / PSD preview | Split view | Preferences → Optional |
+| This PC | 3D preview | Video playing in the preview pane |
+|---|---|---|
+| ![](docs/screenshots/this-pc.png) | ![](docs/screenshots/preview-3d.png) | ![](docs/screenshots/preview-video.gif) |
+
+| EXR preview | Split view | Preferences → Optional |
 |---|---|---|
 | ![](docs/screenshots/preview-exr.png) | ![](docs/screenshots/split-view.png) | ![](docs/screenshots/preferences-optional.png) |
 
@@ -115,6 +117,8 @@ If something doesn't work on your distro, that is a bug.
 - **Find large files** (Tools menu). Scans a folder or a whole drive and shows what is taking the
   space. Frame sequences count as one item (`render.1001–1240.exr`), system files are flagged so
   you don't remove them by accident, and whatever you tick goes to the Recycle Bin.
+- **Your choice of look.** Shotrover's own icon set or your desktop's icons, and light, dark or
+  follow-the-desktop colours. Asked on first start, changeable in Preferences → View.
 
 ### 👀 Previews for nearly everything
 
@@ -124,8 +128,10 @@ If something doesn't work on your distro, that is a bug.
 - **3D models:** OBJ, STL, PLY, FBX, glTF, Alembic, USD and `.blend`, with orbit, zoom, wireframe
   and smooth shading. Works without a GPU (five million triangles in under a second) and uses
   OpenGL when available.
-- **Text and code** with syntax highlighting and a quick inline editor, **PDF**, folder contents
-  with sizes, archive listings and media info.
+- **Text and code** with syntax highlighting and a quick inline editor, **PDF** (page by page),
+  folder contents with sizes, archive listings and media info.
+- **Thumbnails in the file list** for all of the above: EXR, HDR, PSD, video, PDF and 3D models
+  show their contents in the icon layouts, not a file-type icon.
 
 ### 🎬 Made for VFX, animation and game work
 
@@ -188,7 +194,7 @@ Package names vary a little between distros; the ones below are what to search f
 | OpenGL preview, live GLSL shaders | PyOpenGL | `python3-pyopengl` / `python3-opengl` |
 | EXR / DPX / TX conversions | OpenImageIO `oiiotool`, ImageMagick | `OpenImageIO-utils` / `openimageio-tools`, `ImageMagick` |
 | Movie thumbnails, extra image formats | `ffmpeg` | `ffmpeg` |
-| PDF preview | `pdftoppm` | `poppler-utils` |
+| PDF preview and thumbnails | `pdftoppm` | `poppler-utils` |
 | Syntax highlighting in the editor | GtkSourceView 4 | `gtksourceview4` |
 | `.7z .rar .cab .iso …` | 7-Zip | `7zip` or `p7zip` |
 | Open in RV | OpenRV on your PATH, or picked in Preferences | [OpenRV on GitHub](https://github.com/AcademySoftwareFoundation/OpenRV) |
@@ -206,7 +212,7 @@ Download `shotrover-<version>-portable.zip` from the
 `./make-portable.sh` (output in `dist/`). Unzip anywhere:
 
 ```
-shotrover-1.1-portable/
+shotrover-1.1.1-portable/
 ├── shotrover          # launcher: ./shotrover [folder]
 ├── shotrover.py       # the application
 ├── install.sh         # optional: install into ~/.local/bin later
@@ -257,7 +263,6 @@ Press **F1** in the app for the full list.
 
 ```
 shotrover [folder …]                 open one tab per folder (default: home)
-shotrover --demo [ShotroverDemo]     fictional machine for screenshots/demos — see docs/DEMO.md
 shotrover --selftest [--bench]       unit/benchmark tests of the non-GUI machinery
 shotrover --preview-bench [--quick] [--keep]
                                      synthesize large files of every preview type, time each decoder
@@ -329,7 +334,7 @@ explained in [docs/TESTING.md](docs/TESTING.md).
 - **Want to contribute?** Start with [CONTRIBUTING.md](CONTRIBUTING.md).
 
 More reading: [architecture](docs/ARCHITECTURE.md) · [testing](docs/TESTING.md) ·
-[demo mode](docs/DEMO.md) · [changelog](CHANGELOG.md)
+[changelog](CHANGELOG.md)
 
 ## Support
 
