@@ -708,6 +708,27 @@ def pkg_install(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> 
     return f"echo 'Install with your package manager (Fedora/RHEL names: {dnf})'; false"
 
 
+def pkg_exists(dnf: str, apt: str = "", pacman: str = "") -> Optional[bool]:
+    """Does this distro's repositories have the package? True / False, or None when that can't be told (no
+    package manager we can ask, it timed out, no network). Only a clear "no such package" answer counts as
+    False, so an offline machine never reports a package as unavailable."""
+    pm = pkg_manager()
+    name = {"dnf": dnf, "apt": apt, "pacman": pacman}.get(pm, "")
+    if not name:
+        return None
+    cmd, missing = {"dnf": (["dnf", "-q", "list", name], "No matching Packages"),
+                    "apt": (["apt-cache", "show", name], "No packages found"),
+                    "pacman": (["pacman", "-Si", name], "was not found")}[pm]
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=12,
+                           env=dict(os.environ, LC_ALL="C"))
+    except Exception:
+        return None
+    if r.returncode == 0:
+        return True
+    return False if missing in (r.stdout + r.stderr) else None
+
+
 def pkg_hint(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
     """Short form for error messages: 'sudo apt install python3-numpy' / 'install python3-numpy'."""
     pm = pkg_manager()
@@ -730,6 +751,10 @@ def optional_deps() -> List[dict]:
     bl = _find_blender()
     flatpak = shutil.which("flatpak")
     pm = pkg_manager()
+    vdb_py = "importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None
+    vdb_gone = None
+    if vdb_py is None and pkg_exists("python3-openvdb", "python3-openvdb", "openvdb") is False:
+        vdb_gone = "Your distribution has no package for it. VDB files still preview with the built-in reader."
     deps = [
         dict(key="blender", name="Blender", gives="Alembic, USD, FBX, glTF, Collada, .blend model previews",
              found=bl[0] if bl else None,
@@ -777,9 +802,12 @@ def optional_deps() -> List[dict]:
         dict(key="maya", name="Maya (mayapy)", gives="FBX, Alembic and USD previews when Blender isn't available",
              found=_find_mayapy(),
              cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
-        dict(key="openvdb", name="OpenVDB (Python)", gives=".vdb volume previews without Houdini",
-             found="importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None,
-             cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb") + " || echo 'python3-openvdb is not packaged for this release; Houdini or Blender also preview VDBs'"),
+        # Only a fallback: .vdb files preview with the built-in reader (then Houdini) before this is tried. Not
+        # every distro packages it (RHEL 9 / EPEL has the library but no Python module), and installing a package
+        # that doesn't exist left the row "missing" for good, so ask the package manager first.
+        dict(key="openvdb", name="OpenVDB (Python)", gives="fallback for .vdb files the built-in reader can't open",
+             found=vdb_py, unavailable=vdb_gone,
+             cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb")),
         dict(key="7z", name="7-Zip (p7zip)", gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
              found=sevenzip(), cmd=pkg_install("p7zip p7zip-plugins", "7zip || sudo apt-get install -y p7zip-full", "7zip", "7zip")),
         dict(key="xdotool", name="xdotool", gives="fm-bench.py benchmark script only",

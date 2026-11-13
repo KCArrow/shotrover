@@ -286,7 +286,88 @@ DEFAULT_CONFIG = {
     "icons": "shotrover",     # shotrover (built-in set) | system (the desktop's icon theme)
     "theme": "system",        # system | light | dark, for this app only
     "setup_done": False,      # the first-start "choose how Shotrover looks" question has been answered
+    "shortcuts": {},          # changed keyboard shortcuts: {action id: [accelerators]}; an action not listed uses its defaults
+    "quicklook_size": [900, 680],
 }
+
+# Keyboard shortcuts that can be changed in Preferences → Shortcuts: (id, name, default accelerators, list only).
+# "List only" actions answer to the file list alone, so the key does nothing while a text field or the preview
+# has the keyboard. Any shortcut without Ctrl / Alt that isn't a function key is treated the same way.
+SHORTCUT_ACTIONS = [
+    ("quick_look", "Quick look (pop-out preview)", ["space"], True),
+    ("back", "Back", ["<Alt>Left", "BackSpace"], False),
+    ("forward", "Forward", ["<Alt>Right"], False),
+    ("up", "Up one level", ["<Alt>Up"], False),
+    ("address", "Address bar", ["<Control>l", "F4", "<Alt>d"], False),
+    ("search", "Search", ["<Control>e", "<Control>f", "F3"], False),
+    ("refresh", "Refresh", ["F5", "<Control>r"], False),
+    ("rename", "Rename", ["F2"], True),
+    ("batch_rename", "Batch rename", ["<Control>F2"], False),
+    ("delete", "Delete (Recycle Bin)", ["Delete"], True),
+    ("delete_permanent", "Delete permanently", ["<Shift>Delete"], True),
+    ("copy", "Copy", ["<Control>c"], False),
+    ("cut", "Cut", ["<Control>x"], False),
+    ("paste", "Paste", ["<Control>v"], False),
+    ("copy_path", "Copy as path", ["<Control><Shift>c"], False),
+    ("select_all", "Select all", ["<Control>a"], False),
+    ("undo", "Undo", ["<Control>z"], False),
+    ("new_folder", "New folder", ["<Control><Shift>n"], False),
+    ("open_with", "Open with…", ["<Control>o"], False),
+    ("properties", "Properties", ["<Alt>Return"], False),
+    ("open_rv", "Open in OpenRV", ["<Control><Shift>r"], False),
+    ("terminal", "Open terminal here", ["<Control>j"], False),
+    ("new_tab", "New tab", ["<Control>t"], False),
+    ("close_tab", "Close tab", ["<Control>w"], False),
+    ("next_tab", "Next tab", ["<Control>Tab", "<Control>Page_Down"], False),
+    ("prev_tab", "Previous tab", ["<Control><Shift>Tab", "<Control>Page_Up"], False),
+    ("new_window", "New window", ["<Control>n"], False),
+    ("split", "Split view", ["<Control><Shift>s"], False),
+    ("preview_pane", "Preview pane", ["<Alt>p"], False),
+    ("details_pane", "Details pane", ["<Alt><Shift>p"], False),
+    ("hidden", "Hidden items", ["<Control>h"], False),
+    ("fullscreen", "Full screen", ["F11"], False),
+    ("help", "Keyboard shortcuts", ["F1"], False),
+    ("quit", "Exit", ["<Control>q"], False),
+]
+SHORTCUT_DEFAULTS = {a[0]: a[2] for a in SHORTCUT_ACTIONS}
+SHORTCUT_LIST_ONLY = {a[0] for a in SHORTCUT_ACTIONS if a[3]}
+_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
+_SC_RESERVED = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Escape, Gdk.KEY_Menu, Gdk.KEY_F10, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab,
+                Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End, Gdk.KEY_Page_Up, Gdk.KEY_Page_Down)
+
+
+def shortcut_accels(cfg: dict, aid: str) -> List[str]:
+    """The accelerators bound to an action: the user's own if they changed it (may be empty), else the defaults."""
+    custom = (cfg.get("shortcuts") or {}).get(aid)
+    return list(custom) if isinstance(custom, list) else list(SHORTCUT_DEFAULTS.get(aid, ()))
+
+
+def shortcut_key(accel: str) -> Optional[Tuple[int, int]]:
+    key, mods = Gtk.accelerator_parse(accel or "")
+    return (Gdk.keyval_to_lower(key), int(mods)) if key else None
+
+
+def shortcut_label(accel: str) -> str:
+    key, mods = Gtk.accelerator_parse(accel or "")
+    return Gtk.accelerator_get_label(key, mods) if key else ""
+
+
+def shortcut_plain(key: int, mods: int) -> bool:
+    """No Ctrl / Alt / Super and not a function key: such a shortcut only works from the file list."""
+    return not (int(mods) & int(_SC_STRONG)) and not (Gdk.KEY_F1 <= key <= Gdk.KEY_F12)
+
+
+def shortcut_refusal(key: int, mods: int) -> str:
+    """Why this key combination can't be a custom shortcut ('' when it can)."""
+    strong = bool(int(mods) & int(_SC_STRONG))
+    ctrl_only = (int(mods) & int(_SC_STRONG)) == int(Gdk.ModifierType.CONTROL_MASK)
+    if not strong and key in _SC_RESERVED:
+        return "that key already moves around or opens items"
+    if ctrl_only and (Gdk.KEY_1 <= key <= Gdk.KEY_9 or key == Gdk.KEY_space):
+        return "Ctrl+1…9 switch tabs and Ctrl+Space ticks an item"
+    if not strong and key != Gdk.KEY_space and chr(Gdk.keyval_to_unicode(key) or 0).isprintable() and Gdk.keyval_to_unicode(key):
+        return "a letter or digit on its own is used to jump to a file by name; add Ctrl or Alt"
+    return ""
 COLUMN_TITLES = {"name": "Name", "modified": "Date modified", "type": "Type", "size": "Size", "created": "Date created",
                  "accessed": "Date accessed", "owner": "Owner", "perms": "Permissions", "location": "Folder path",
                  "deleted": "Date deleted"}

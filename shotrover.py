@@ -286,7 +286,88 @@ DEFAULT_CONFIG = {
     "icons": "shotrover",     # shotrover (built-in set) | system (the desktop's icon theme)
     "theme": "system",        # system | light | dark, for this app only
     "setup_done": False,      # the first-start "choose how Shotrover looks" question has been answered
+    "shortcuts": {},          # changed keyboard shortcuts: {action id: [accelerators]}; an action not listed uses its defaults
+    "quicklook_size": [900, 680],
 }
+
+# Keyboard shortcuts that can be changed in Preferences → Shortcuts: (id, name, default accelerators, list only).
+# "List only" actions answer to the file list alone, so the key does nothing while a text field or the preview
+# has the keyboard. Any shortcut without Ctrl / Alt that isn't a function key is treated the same way.
+SHORTCUT_ACTIONS = [
+    ("quick_look", "Quick look (pop-out preview)", ["space"], True),
+    ("back", "Back", ["<Alt>Left", "BackSpace"], False),
+    ("forward", "Forward", ["<Alt>Right"], False),
+    ("up", "Up one level", ["<Alt>Up"], False),
+    ("address", "Address bar", ["<Control>l", "F4", "<Alt>d"], False),
+    ("search", "Search", ["<Control>e", "<Control>f", "F3"], False),
+    ("refresh", "Refresh", ["F5", "<Control>r"], False),
+    ("rename", "Rename", ["F2"], True),
+    ("batch_rename", "Batch rename", ["<Control>F2"], False),
+    ("delete", "Delete (Recycle Bin)", ["Delete"], True),
+    ("delete_permanent", "Delete permanently", ["<Shift>Delete"], True),
+    ("copy", "Copy", ["<Control>c"], False),
+    ("cut", "Cut", ["<Control>x"], False),
+    ("paste", "Paste", ["<Control>v"], False),
+    ("copy_path", "Copy as path", ["<Control><Shift>c"], False),
+    ("select_all", "Select all", ["<Control>a"], False),
+    ("undo", "Undo", ["<Control>z"], False),
+    ("new_folder", "New folder", ["<Control><Shift>n"], False),
+    ("open_with", "Open with…", ["<Control>o"], False),
+    ("properties", "Properties", ["<Alt>Return"], False),
+    ("open_rv", "Open in OpenRV", ["<Control><Shift>r"], False),
+    ("terminal", "Open terminal here", ["<Control>j"], False),
+    ("new_tab", "New tab", ["<Control>t"], False),
+    ("close_tab", "Close tab", ["<Control>w"], False),
+    ("next_tab", "Next tab", ["<Control>Tab", "<Control>Page_Down"], False),
+    ("prev_tab", "Previous tab", ["<Control><Shift>Tab", "<Control>Page_Up"], False),
+    ("new_window", "New window", ["<Control>n"], False),
+    ("split", "Split view", ["<Control><Shift>s"], False),
+    ("preview_pane", "Preview pane", ["<Alt>p"], False),
+    ("details_pane", "Details pane", ["<Alt><Shift>p"], False),
+    ("hidden", "Hidden items", ["<Control>h"], False),
+    ("fullscreen", "Full screen", ["F11"], False),
+    ("help", "Keyboard shortcuts", ["F1"], False),
+    ("quit", "Exit", ["<Control>q"], False),
+]
+SHORTCUT_DEFAULTS = {a[0]: a[2] for a in SHORTCUT_ACTIONS}
+SHORTCUT_LIST_ONLY = {a[0] for a in SHORTCUT_ACTIONS if a[3]}
+_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
+_SC_RESERVED = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Escape, Gdk.KEY_Menu, Gdk.KEY_F10, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab,
+                Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End, Gdk.KEY_Page_Up, Gdk.KEY_Page_Down)
+
+
+def shortcut_accels(cfg: dict, aid: str) -> List[str]:
+    """The accelerators bound to an action: the user's own if they changed it (may be empty), else the defaults."""
+    custom = (cfg.get("shortcuts") or {}).get(aid)
+    return list(custom) if isinstance(custom, list) else list(SHORTCUT_DEFAULTS.get(aid, ()))
+
+
+def shortcut_key(accel: str) -> Optional[Tuple[int, int]]:
+    key, mods = Gtk.accelerator_parse(accel or "")
+    return (Gdk.keyval_to_lower(key), int(mods)) if key else None
+
+
+def shortcut_label(accel: str) -> str:
+    key, mods = Gtk.accelerator_parse(accel or "")
+    return Gtk.accelerator_get_label(key, mods) if key else ""
+
+
+def shortcut_plain(key: int, mods: int) -> bool:
+    """No Ctrl / Alt / Super and not a function key: such a shortcut only works from the file list."""
+    return not (int(mods) & int(_SC_STRONG)) and not (Gdk.KEY_F1 <= key <= Gdk.KEY_F12)
+
+
+def shortcut_refusal(key: int, mods: int) -> str:
+    """Why this key combination can't be a custom shortcut ('' when it can)."""
+    strong = bool(int(mods) & int(_SC_STRONG))
+    ctrl_only = (int(mods) & int(_SC_STRONG)) == int(Gdk.ModifierType.CONTROL_MASK)
+    if not strong and key in _SC_RESERVED:
+        return "that key already moves around or opens items"
+    if ctrl_only and (Gdk.KEY_1 <= key <= Gdk.KEY_9 or key == Gdk.KEY_space):
+        return "Ctrl+1…9 switch tabs and Ctrl+Space ticks an item"
+    if not strong and key != Gdk.KEY_space and chr(Gdk.keyval_to_unicode(key) or 0).isprintable() and Gdk.keyval_to_unicode(key):
+        return "a letter or digit on its own is used to jump to a file by name; add Ctrl or Alt"
+    return ""
 COLUMN_TITLES = {"name": "Name", "modified": "Date modified", "type": "Type", "size": "Size", "created": "Date created",
                  "accessed": "Date accessed", "owner": "Owner", "perms": "Permissions", "location": "Folder path",
                  "deleted": "Date deleted"}
@@ -5802,6 +5883,7 @@ class OptionsDialog(Gtk.Dialog):
         nb.append_page(self._view(), Gtk.Label(label="View"))
         nb.append_page(self._search(), Gtk.Label(label="Search"))
         nb.append_page(self._dependencies(), Gtk.Label(label="Optional"))
+        nb.append_page(self._shortcuts(), Gtk.Label(label="Shortcuts"))
         self.set_default_size(720, 560)
         self.show_all()
         nb.set_current_page(page)
@@ -6007,6 +6089,12 @@ class OptionsDialog(Gtk.Dialog):
         if not HAVE_GL:
             self.gl_check.set_tooltip_text("PyOpenGL is not installed — tick it in the list below")
         outer.pack_start(self.gl_check, False, False, 0)
+        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
+        note.set_text("Needs the PyOpenGL add-on, which is installed." if HAVE_GL else
+                      "Needs the PyOpenGL add-on, which is not installed: tick PyOpenGL in the list below and "
+                      "install it, then restart Shotrover.")
+        note.get_style_context().add_class("dim-label")
+        outer.pack_start(note, False, False, 0)
         self._heading(outer, "OpenRV")
         self._check(outer, "rv_enabled", "Enable OpenRV (right-click → Open in RV, Ctrl+Shift+R)")
         row = Gtk.Box(spacing=6)
@@ -6067,16 +6155,22 @@ class OptionsDialog(Gtk.Dialog):
         def fill(deps):
             self.dep_status.set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
-                cb = Gtk.CheckButton(active=dep["found"] is None, sensitive=dep["found"] is None)
+                gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
+                cb = Gtk.CheckButton(active=dep["found"] is None and not gone, sensitive=dep["found"] is None and not gone)
                 self.dep_grid.attach(cb, 0, i, 1, 1)
                 name = Gtk.Label(xalign=0)
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
-                name.set_tooltip_text(dep["cmd"])
+                name.set_tooltip_text(gone or dep["cmd"])
                 self.dep_grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
+                if gone:
+                    st.set_text("not available")
+                    st.get_style_context().add_class("dim-label")
+                    st.set_tooltip_text(gone)
+                else:
+                    st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
-                g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
+                g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
                 self.dep_grid.attach(g, 3, i, 1, 1)
                 self.dep_checks.append((cb, dep))
@@ -6112,8 +6206,102 @@ class OptionsDialog(Gtk.Dialog):
         self.diag_view.get_buffer().set_text("Checking…")
         threading.Thread(target=lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
 
+    # ---- Shortcuts page
+    def _shortcuts(self):
+        b = self._vbox()
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_text("Click a shortcut, then press the new keys. Backspace removes it, Esc leaves it as it was. "
+                      "An action with several shortcuts keeps only the one you set.")
+        b.pack_start(hint, False, False, 0)
+        self.sc = {a[0]: shortcut_accels(self.cfg, a[0]) for a in SHORTCUT_ACTIONS}
+        self.sc_store = Gtk.ListStore(str, str, str, str)          # action id, name, first shortcut, the others
+        tv = Gtk.TreeView(model=self.sc_store)
+        col = Gtk.TreeViewColumn("Action", Gtk.CellRendererText(), text=1)
+        col.set_expand(True)
+        tv.append_column(col)
+        r = Gtk.CellRendererAccel(editable=True, accel_mode=Gtk.CellRendererAccelMode.OTHER)
+        r.connect("accel-edited", self._sc_edited)
+        r.connect("accel-cleared", lambda cell, path: self._sc_set(self.sc_store[path][0], []))
+        col = Gtk.TreeViewColumn("Shortcut", r)
+
+        def show(column, cell, model, it, data=None):
+            key, mods = Gtk.accelerator_parse(model[it][2] or "")
+            cell.set_property("accel-key", key)
+            cell.set_property("accel-mods", mods)
+        col.set_cell_data_func(r, show)
+        col.set_min_width(170)
+        tv.append_column(col)
+        tv.append_column(Gtk.TreeViewColumn("Also", Gtk.CellRendererText(), text=3))
+        self.sc_view = tv
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN)
+        sw.add(tv)
+        b.pack_start(sw, True, True, 0)
+        row = Gtk.Box(spacing=6)
+        one = Gtk.Button(label="Reset selected")
+        one.connect("clicked", lambda w: self._sc_reset(False))
+        every = Gtk.Button(label="Reset all shortcuts")
+        every.connect("clicked", lambda w: self._sc_reset(True))
+        row.pack_start(one, False, False, 0)
+        row.pack_start(every, False, False, 0)
+        self.sc_note = Gtk.Label(xalign=0, wrap=True)
+        row.pack_start(self.sc_note, True, True, 6)
+        b.pack_start(row, False, False, 0)
+        self._sc_fill()
+        return b
+
+    def _sc_fill(self):
+        sel = self.sc_view.get_selection().get_selected_rows()[1]
+        self.sc_store.clear()
+        for aid, name, _default, _list_only in SHORTCUT_ACTIONS:
+            accels = self.sc[aid]
+            self.sc_store.append([aid, name, accels[0] if accels else "", ", ".join(shortcut_label(a) for a in accels[1:])])
+        if sel:
+            self.sc_view.get_selection().select_path(sel[0])
+
+    def _sc_set(self, aid: str, accels: List[str], note: str = ""):
+        self.sc[aid] = accels
+        self.sc_note.set_text(note)
+        self._sc_fill()
+
+    def _sc_edited(self, cell, path, key, mods, hardware_keycode):
+        aid, name = self.sc_store[path][0], self.sc_store[path][1]
+        key = Gdk.keyval_to_lower(key)
+        why = shortcut_refusal(key, int(mods))
+        if why:
+            self.sc_note.set_text(f"{Gtk.accelerator_get_label(key, mods)} can't be used: {why}.")
+            return
+        accel = Gtk.accelerator_name(key, mods)
+        want = shortcut_key(accel)
+        lost = []
+        for other, _n, _d, _l in SHORTCUT_ACTIONS:        # one key, one action: take it from whoever had it
+            if other != aid and any(shortcut_key(a) == want for a in self.sc[other]):
+                self.sc[other] = [a for a in self.sc[other] if shortcut_key(a) != want]
+                lost.append(_n)
+        note = f"{shortcut_label(accel)} was {' and '.join(lost)}; it is now {name}." if lost else ""
+        if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*want):
+            note = (note + " " if note else "") + "Works while the file list has the keyboard."
+        self._sc_set(aid, [accel], note)
+
+    def _sc_reset(self, everything: bool):
+        if everything:
+            self.sc = {a[0]: list(a[2]) for a in SHORTCUT_ACTIONS}
+            self.sc_note.set_text("All shortcuts are back to their defaults.")
+            self._sc_fill()
+            return
+        rows = self.sc_view.get_selection().get_selected_rows()[1]
+        if not rows:
+            return
+        aid = self.sc_store[rows[0]][0]
+        want = {shortcut_key(a) for a in SHORTCUT_DEFAULTS[aid]}
+        for other in self.sc:                             # its defaults come back from any action that took them
+            if other != aid:
+                self.sc[other] = [a for a in self.sc[other] if shortcut_key(a) not in want]
+        self._sc_set(aid, list(SHORTCUT_DEFAULTS[aid]))
+
     def _collect(self):
         cfg = self.cfg
+        if hasattr(self, "sc"):
+            cfg["shortcuts"] = {aid: accels for aid, accels in self.sc.items() if accels != SHORTCUT_DEFAULTS[aid]}
         if hasattr(self, "gl_check"):
             cfg["gl_preview"] = self.gl_check.get_active()
         if hasattr(self, "rv_entry"):
@@ -6151,34 +6339,39 @@ class OptionsDialog(Gtk.Dialog):
         self.destroy()
 
 
-SHORTCUTS = [
-    ("Enter", "Open"), ("Backspace / Alt+Left / Mouse Back", "Back"), ("Alt+Right / Mouse Forward", "Forward"),
-    ("Alt+Up", "Up one level"), ("F2", "Rename"), ("Delete", "Delete (Recycle Bin)"), ("Shift+Delete", "Delete permanently"),
-    ("Ctrl+Shift+R", "Open in OpenRV"), ("Ctrl+C / X / V", "Copy / Cut / Paste"), ("Ctrl+Shift+C", "Copy as path"), ("Ctrl+A", "Select all"),
-    ("Ctrl+click / Shift+click", "Multi-select"), ("Ctrl+Z", "Undo"), ("Ctrl+N", "New window"),
-    ("Ctrl+F2 (or F2 with several selected)", "Batch rename"), ("Ctrl+Shift+N", "New folder"), ("Ctrl+T / Ctrl+W", "New tab / Close tab"), ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab"),
-    ("Ctrl+1..9", "Switch to tab"), ("Ctrl+L / F4 / Alt+D", "Address bar"), ("Ctrl+E / Ctrl+F / F3", "Search"),
-    ("F5", "Refresh"), ("F10 / Alt+F", "Menu bar"), ("Shift+F10 / Menu / Right-click", "Context menu"),
-    ("Alt+Enter", "Properties"), ("Ctrl+H", "Toggle hidden items"), ("Ctrl+1..", ""), ("Alt+P", "Preview pane"),
-    ("Alt+Shift+P", "Details pane"), ("Ctrl+Shift+S", "Split view (two folders side by side)"), ("Drag a tab out / right-click tab", "Move tab to its own window"), ("F11", "Full screen"), ("Ctrl+Q", "Quit"), ("Middle-click folder", "Open in new tab"),
-    ("Type letters", "Jump to item"),
+# Keys that are not in Preferences → Shortcuts (they can't be changed), listed in Help after the ones that are
+SHORTCUTS_FIXED = [
+    ("Enter", "Open"), ("Mouse Back / Mouse Forward", "Back / Forward"), ("Ctrl+click / Shift+click", "Multi-select"),
+    ("Ctrl+Space", "Add the item under the cursor to the selection"), ("F2 with several selected", "Batch rename"),
+    ("Ctrl+1..9", "Switch to tab"), ("F10 / Alt+F", "Menu bar"), ("Shift+F10 / Menu / Right-click", "Context menu"),
+    ("Drag a tab out / right-click tab", "Move tab to its own window"), ("Type letters", "Jump to item"),
+    ("Esc", "Clear the selection / leave search"),
+    ("Space / Esc / arrow keys (in quick look)", "Close / close / previous or next item"),
 ]
 
 
 def show_shortcuts(parent):
+    cfg = getattr(parent, "cfg", None) or {}
     d = Gtk.Dialog(title="Keyboard shortcuts", transient_for=parent, modal=True)
     d.add_button("_Close", Gtk.ResponseType.CLOSE)
-    d.set_default_size(520, 520)
+    d.set_default_size(520, 560)
     store = Gtk.ListStore(str, str)
-    for k, v in SHORTCUTS:
-        if v:
-            store.append([k, v])
+    for aid, name, _default, _list_only in SHORTCUT_ACTIONS:
+        keys = " / ".join(shortcut_label(a) for a in shortcut_accels(cfg, aid))
+        if keys:
+            store.append([keys, name])
+    for k, v in SHORTCUTS_FIXED:
+        store.append([k, v])
     tv = Gtk.TreeView(model=store, headers_visible=True)
     for i, t in enumerate(("Key", "Action")):
         tv.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
     sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
     sw.add(tv)
-    d.get_content_area().pack_start(sw, True, True, 0)
+    box = d.get_content_area()
+    box.pack_start(sw, True, True, 0)
+    note = Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0, margin=8)
+    note.get_style_context().add_class("dim-label")
+    box.pack_start(note, False, False, 0)
     d.show_all()
     d.run()
     d.destroy()
@@ -8514,11 +8707,6 @@ class IconGrid(Gtk.Layout):
             return True
         if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not mods and self.cursor >= 0:
             self.emit("item-activated", Gtk.TreePath.new_from_indices([self.cursor]))
-            return True
-        if key == Gdk.KEY_space and not mods and self.cursor >= 0:
-            self.selected = {self.cursor}
-            self.anchor = self.cursor
-            self._emit_sel()
             return True
         if key == Gdk.KEY_a and ctrl:
             self.select_all()
@@ -11544,6 +11732,27 @@ def pkg_install(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> 
     return f"echo 'Install with your package manager (Fedora/RHEL names: {dnf})'; false"
 
 
+def pkg_exists(dnf: str, apt: str = "", pacman: str = "") -> Optional[bool]:
+    """Does this distro's repositories have the package? True / False, or None when that can't be told (no
+    package manager we can ask, it timed out, no network). Only a clear "no such package" answer counts as
+    False, so an offline machine never reports a package as unavailable."""
+    pm = pkg_manager()
+    name = {"dnf": dnf, "apt": apt, "pacman": pacman}.get(pm, "")
+    if not name:
+        return None
+    cmd, missing = {"dnf": (["dnf", "-q", "list", name], "No matching Packages"),
+                    "apt": (["apt-cache", "show", name], "No packages found"),
+                    "pacman": (["pacman", "-Si", name], "was not found")}[pm]
+    try:
+        r = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True, timeout=12,
+                           env=dict(os.environ, LC_ALL="C"))
+    except Exception:
+        return None
+    if r.returncode == 0:
+        return True
+    return False if missing in (r.stdout + r.stderr) else None
+
+
 def pkg_hint(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
     """Short form for error messages: 'sudo apt install python3-numpy' / 'install python3-numpy'."""
     pm = pkg_manager()
@@ -11566,6 +11775,10 @@ def optional_deps() -> List[dict]:
     bl = _find_blender()
     flatpak = shutil.which("flatpak")
     pm = pkg_manager()
+    vdb_py = "importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None
+    vdb_gone = None
+    if vdb_py is None and pkg_exists("python3-openvdb", "python3-openvdb", "openvdb") is False:
+        vdb_gone = "Your distribution has no package for it. VDB files still preview with the built-in reader."
     deps = [
         dict(key="blender", name="Blender", gives="Alembic, USD, FBX, glTF, Collada, .blend model previews",
              found=bl[0] if bl else None,
@@ -11613,9 +11826,12 @@ def optional_deps() -> List[dict]:
         dict(key="maya", name="Maya (mayapy)", gives="FBX, Alembic and USD previews when Blender isn't available",
              found=_find_mayapy(),
              cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
-        dict(key="openvdb", name="OpenVDB (Python)", gives=".vdb volume previews without Houdini",
-             found="importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None,
-             cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb") + " || echo 'python3-openvdb is not packaged for this release; Houdini or Blender also preview VDBs'"),
+        # Only a fallback: .vdb files preview with the built-in reader (then Houdini) before this is tried. Not
+        # every distro packages it (RHEL 9 / EPEL has the library but no Python module), and installing a package
+        # that doesn't exist left the row "missing" for good, so ask the package manager first.
+        dict(key="openvdb", name="OpenVDB (Python)", gives="fallback for .vdb files the built-in reader can't open",
+             found=vdb_py, unavailable=vdb_gone,
+             cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb")),
         dict(key="7z", name="7-Zip (p7zip)", gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
              found=sevenzip(), cmd=pkg_install("p7zip p7zip-plugins", "7zip || sudo apt-get install -y p7zip-full", "7zip", "7zip")),
         dict(key="xdotool", name="xdotool", gives="fm-bench.py benchmark script only",
@@ -18728,6 +18944,13 @@ class FolderView(Gtk.Box):
                 self.icons.configure(size, False, max(size + 44, 116), self.cfg["single_click"], extra_lines=1 if where else 0)
             self.icons.invalidate()
         self.tree.queue_draw()      # visible rows re-run their data funcs; no need to signal every row
+        # Keep the keyboard on the list that is showing. GTK gives the first focus to the details list even
+        # when an icon layout is up, and a hidden list swallows every key (Space, Delete, arrows…) until the
+        # first click.
+        top = self.get_toplevel()
+        held = top.get_focus() if isinstance(top, Gtk.Window) else None
+        if held in (self.tree, self.icons) and held is not self.view:
+            self.view.grab_focus()
         # details rows carry section / group header rows, icon rows don't: switching between the two families
         # must rebuild the rows (from the listing already in memory — no disk access)
         want = self.path == THISPC or lay in ("details", "content")
@@ -19435,6 +19658,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.clipboard: Dict[str, object] = {"mode": "", "paths": []}
         self.undo_stack: List[Tuple[str, object]] = []
         self.editing = False
+        self._ql = None                 # the quick look window while it is open (it borrows the preview pane)
         self.status_timer = 0
         self.set_default_size(*self.cfg["window"])
         self.set_icon_name("system-file-manager")
@@ -19467,7 +19691,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.notebook.connect("create-window", self._on_create_window)
         newtab = Gtk.Button.new_from_icon_name("tab-new-symbolic", Gtk.IconSize.MENU)
         newtab.set_relief(Gtk.ReliefStyle.NONE)
-        newtab.set_tooltip_text("New tab (Ctrl+T)")
+        self.tip(newtab, "New tab", "new_tab")
         newtab.connect("clicked", lambda b: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME))
         newtab.show()
         self.notebook.set_action_widget(newtab, Gtk.PackType.END)
@@ -19526,10 +19750,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self.btn_back = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
         self.btn_fwd = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.BUTTON)
         self.btn_up = Gtk.Button.new_from_icon_name("go-up-symbolic", Gtk.IconSize.BUTTON)
-        for b, cb, tip in ((self.btn_back, self.go_back, "Back (Alt+Left)"), (self.btn_fwd, self.go_forward, "Forward (Alt+Right)"),
-                           (self.btn_up, self.go_up, "Up (Alt+Up)")):
+        for b, cb, tip in ((self.btn_back, self.go_back, ("Back", "back")), (self.btn_fwd, self.go_forward, ("Forward", "forward")),
+                           (self.btn_up, self.go_up, ("Up", "up"))):
             b.set_relief(Gtk.ReliefStyle.NONE)
-            b.set_tooltip_text(tip)
+            self.tip(b, *tip)
             b.connect("clicked", lambda w, c=cb: c())
             tb.pack_start(b, False, False, 0)
         self.btn_back.connect("button-press-event", self._history_popup)
@@ -19720,7 +19944,10 @@ class MainWindow(Gtk.ApplicationWindow):
         if menu_cb:
             box.pack_start(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.MENU), False, False, 0)
         b.add(box)
-        b.set_tooltip_text(tip or label)
+        if isinstance(tip, tuple):
+            self.tip(b, *tip)                     # (text, shortcut action): the tooltip names the current shortcut
+        else:
+            b.set_tooltip_text(tip or label)
         b.set_focus_on_click(False)
         if menu_cb:
             b.connect("clicked", lambda w: self._popup_under(w, build_menu(menu_cb())))
@@ -19741,20 +19968,20 @@ class MainWindow(Gtk.ApplicationWindow):
         sep = lambda: Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=4, margin_end=4)
         bar.pack_start(self._cmd_button("list-add-symbolic", "New", None, "New folder or item", lambda: self._new_item_spec_with_folder()), False, False, 0)
         bar.pack_start(sep(), False, False, 0)
-        for icon, lab, cb, tip in (("edit-cut-symbolic", "", lambda: self.copy_sel("cut"), "Cut (Ctrl+X)"),
-                                   ("edit-copy-symbolic", "", lambda: self.copy_sel("copy"), "Copy (Ctrl+C)"),
-                                   ("edit-paste-symbolic", "", lambda: self.paste(), "Paste (Ctrl+V)"),
-                                   ("document-edit-symbolic", "", lambda: self.tab.start_rename(), "Rename (F2)"),
-                                   ("user-trash-symbolic", "", lambda: self.delete(), "Delete (Del)")):
+        for icon, lab, cb, tip in (("edit-cut-symbolic", "", lambda: self.copy_sel("cut"), ("Cut", "cut")),
+                                   ("edit-copy-symbolic", "", lambda: self.copy_sel("copy"), ("Copy", "copy")),
+                                   ("edit-paste-symbolic", "", lambda: self.paste(), ("Paste", "paste")),
+                                   ("document-edit-symbolic", "", lambda: self.tab.start_rename(), ("Rename", "rename")),
+                                   ("user-trash-symbolic", "", lambda: self.delete(), ("Delete", "delete"))):
             bar.pack_start(self._cmd_button(icon, lab, cb, tip), False, False, 0)
         bar.pack_start(self._cmd_button("emblem-shared-symbolic", "", None, "Share", lambda: self.share_spec()), False, False, 0)
         bar.pack_start(sep(), False, False, 0)
         bar.pack_start(self._cmd_button("view-sort-descending-symbolic", "Sort", None, "Sort by", lambda: self.menu_spec("view")[6]["sub"]), False, False, 0)
         bar.pack_start(self._cmd_button("view-grid-symbolic", "View", None, "Layout", lambda: self.menu_spec("view")[5]["sub"] + ["-"] + self.menu_spec("view")[11:14]), False, False, 0)
-        bar.pack_start(self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, "Show two folders side by side (Ctrl+Shift+S)"), False, False, 0)
+        bar.pack_start(self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, ("Show two folders side by side", "split")), False, False, 0)
         bar.pack_start(self._cmd_button("view-more-symbolic", "", None, "More", lambda: self.menu_spec("home")), False, False, 0)
-        bar.pack_end(self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), "Details pane (Alt+Shift+P)"), False, False, 0)
-        bar.pack_end(self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), "Preview pane (Alt+P)"), False, False, 0)
+        bar.pack_end(self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), ("Details pane", "details_pane")), False, False, 0)
+        bar.pack_end(self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), ("Preview pane", "preview_pane")), False, False, 0)
         return bar
 
     def _new_item_spec_with_folder(self):
@@ -20640,18 +20867,160 @@ class MainWindow(Gtk.ApplicationWindow):
             self.cfg["side_width"] = w
 
     def _remember_side_split(self):
-        if getattr(self, "_split_restored", False) and self.cfg["preview_pane"] and self.cfg["details_pane"]:
+        if getattr(self, "_split_restored", False) and self.cfg["preview_pane"] and self.cfg["details_pane"] and self._ql is None:
             pos = self.side_paned.get_position()
             if pos > 40:
                 self.cfg["side_split"] = pos
 
+    # ---- quick look: the preview pane in its own window (Space by default)
+    def _preview_on(self) -> bool:
+        return bool(self.cfg["preview_pane"] or self._ql is not None)
+
+    def _pv_width(self) -> int:
+        return (self.preview_box if self._ql is not None else self.side).get_allocated_width()
+
+    def quick_look(self):
+        """Open the selected item in a pop-out preview, or close it when it is open. The window holds the
+        preview pane itself (moved out of the side pane and put back on close), so every previewer works in
+        it and it keeps following the selection."""
+        if self._ql is not None:
+            self._ql_close()
+            return
+        t = self.tab
+        if t is None or t.pc_mode:
+            return
+        if not t.selected_entries():
+            # nothing selected: take the item under the mouse pointer, else the one under the keyboard cursor
+            p = self._path_under_pointer(t) or cursor_path(t.view)
+            if p is not None and t.entry_at(p) is not None:
+                self._ql_select(t, p)
+            if not t.selected_entries():
+                self.flash("Select a file to preview")
+                return
+        self._drop_snapshot()                       # no crossfade across the move: the old picture has the pane's size
+        win = Gtk.Window(title="Quick look", transient_for=self, destroy_with_parent=True)
+        win.set_default_size(*[max(320, int(v)) for v in (self.cfg.get("quicklook_size") or [900, 680])[:2]])
+        holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+        holder.get_style_context().add_class("sidepane")
+        win.add(holder)
+        self.side_paned.remove(self.preview_box)
+        holder.pack_start(self.preview_box, True, True, 0)
+        self._ql, self._ql_size = win, None
+        win.connect("key-press-event", self._ql_key)
+        win.connect("delete-event", lambda *a: (self._ql_close(), True)[1])
+        win.connect("size-allocate", self._ql_resized)
+        holder.show()
+        self._ql_moving = True
+        self._apply_panes()
+        win.show()
+        win.present()
+
+    def _path_under_pointer(self, t: FolderView):
+        view = t.view
+        outer, inner = view.get_window(), view.get_bin_window()       # the visible area / the scrolled canvas
+        if outer is None or inner is None or not view.get_mapped():
+            return None
+        seat = view.get_display().get_default_seat()
+        pointer = seat.get_pointer() if seat is not None else None
+        if pointer is None:
+            return None
+        _w, x, y, _mask = outer.get_device_position(pointer)
+        if not (0 <= x < outer.get_width() and 0 <= y < outer.get_height()):
+            return None                             # the pointer is somewhere else (another pane, another window)
+        _w, x, y, _mask = inner.get_device_position(pointer)
+        hit = view.get_path_at_pos(int(x), int(y))
+        if view is t.tree:
+            return hit[0] if hit else None
+        return hit
+
+    def _ql_close(self):
+        win, self._ql = self._ql, None
+        if win is None:
+            return
+        self.cfg["quicklook_size"] = list(win.get_size())
+        self._drop_snapshot()
+        self.preview_box.get_parent().remove(self.preview_box)
+        self.side_paned.pack1(self.preview_box, True, False)
+        win.destroy()
+        self._ql_moving = True
+        self._apply_panes()
+        self._ql_moving = False
+        if self.tab is not None:
+            self.tab.view.grab_focus()
+
+    def _ql_resized(self, win, alloc):
+        """A picture or page is rendered for the size the preview had when the item was picked: once the
+        window has its real size, and after it is resized, render it again (a 3D view redraws itself)."""
+        size = (alloc.width, alloc.height)
+        if size == self._ql_size:
+            return
+        first, self._ql_size = self._ql_size is None, size
+        if getattr(self, "_ql_timer", 0):
+            GLib.source_remove(self._ql_timer)
+
+        def again():
+            self._ql_timer = 0
+            self._ql_moving = False
+            if self._ql is win and self.preview_stack.get_visible_child_name() == "image":
+                self._preview_key = None            # same item, new size: don't keep the small rendering
+                self._update_side()
+            return False
+        self._ql_timer = GLib.timeout_add(40 if first else 250, again)
+
+    def _ql_key(self, win, event):
+        key = Gdk.keyval_to_lower(event.keyval)
+        mods = int(event.state & Gtk.accelerator_get_default_mod_mask())
+        if isinstance(win.get_focus(), (Gtk.Entry, Gtk.TextView)):      # typing in the text preview / its find box
+            if key == Gdk.KEY_Escape:
+                win.set_focus(None)
+                return True
+            return False
+        if key == Gdk.KEY_Escape:
+            self._ql_close()
+            return True
+        if self._seq is not None and not mods and key in (Gdk.KEY_space, Gdk.KEY_Left, Gdk.KEY_Right):
+            return False                            # a cache sequence is loaded: Space plays, ← → step frames
+        if self._list_keys.get((key, mods)) == self._actions["quick_look"]:
+            self._ql_close()
+            return True
+        step = {Gdk.KEY_Up: -1, Gdk.KEY_Left: -1, Gdk.KEY_Down: 1, Gdk.KEY_Right: 1}.get(key)
+        if step and not mods:
+            self._ql_step(step)
+            return True
+        return False
+
+    def _ql_select(self, t: FolderView, path):
+        t.select_none()
+        if t.view is t.tree:
+            t.tree.get_selection().select_path(path)
+            t.tree.set_cursor(path, None, False)
+            t.tree.scroll_to_cell(path, None, False, 0, 0)
+        else:
+            t.icons.select_path(path)
+            t.icons.set_cursor(path, None, False)
+            t.icons.scroll_to_path(path, False, 0, 0)
+
+    def _ql_step(self, delta: int):
+        """Arrow keys in the quick look window: move the selection to the next / previous item."""
+        t = self.tab
+        if t is None or t.pc_mode:
+            return
+        paths = t.selected_paths()
+        n = len(t.store)
+        j = (paths[0].get_indices()[0] if paths else (-1 if delta > 0 else n)) + delta
+        while 0 <= j < n and not isinstance(t.store[j][0], Entry):
+            j += delta                              # skip group headings
+        if 0 <= j < n:
+            self._ql_select(t, Gtk.TreePath.new_from_indices([j]))
+
     def _apply_panes(self):
         self.nav_box.set_visible(self.cfg["nav_pane"])
-        show_side = self.cfg["preview_pane"] or self.cfg["details_pane"]
+        docked = self.cfg["preview_pane"] and self._ql is None      # quick look borrows the preview while it is open
+        show_side = docked or self.cfg["details_pane"]
         self.side.set_visible(show_side)
-        self.preview_box.set_visible(self.cfg["preview_pane"])
+        self.preview_box.set_visible(self._preview_on())
         self.details_box.set_visible(self.cfg["details_pane"])
-        if self.cfg["preview_pane"] and self.cfg["details_pane"]:
+        if docked and self.cfg["details_pane"]:
             def place():
                 h = self.side_paned.get_allocated_height()
                 saved = int(self.cfg.get("side_split") or 0)
@@ -20663,7 +21032,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self._update_side()
 
     def _update_side(self):
-        if not (self.cfg["preview_pane"] or self.cfg["details_pane"]):
+        if not (self._preview_on() or self.cfg["details_pane"]):
             return
         t = self.tab
         if t is None:
@@ -20682,7 +21051,9 @@ class MainWindow(Gtk.ApplicationWindow):
             if ev is not None:
                 ev.set()
                 setattr(self, attr, None)
-        if self.cfg["preview_pane"]:
+        if self._ql is not None:
+            self._ql.set_title(f"{e.name} — Quick look" if e is not None else "Quick look")
+        if self._preview_on():
             # Several caches selected: preview the clicked one and offer "Preview as sequence". The sequence
             # plays only after the button is pressed, and only while that same set stays selected.
             cands = self._cache_selection(sel)
@@ -20841,7 +21212,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 GLib.idle_add(lambda: (gen == self._side_gen and [self._qv_add(k, v) for k, v in rows], False)[1])
             threading.Thread(target=minfo, daemon=True).start()
             return
-        w = max(120, self.side.get_allocated_width() - 24)
+        w = max(120, self._pv_width() - 24)
         h = max(120, self.preview_box.get_allocated_height() - 24)
         if e.path and e.ext.lower() in (".gif", ".webp") and (e.size or 0) <= (256 << 20) and self._load_animation(e, gen):
             return
@@ -21333,7 +21704,7 @@ class MainWindow(Gtk.ApplicationWindow):
         self.pdf_next.set_sensitive(page < st["pages"])
         self._pdf_req = req = getattr(self, "_pdf_req", 0) + 1
         e, gen = st["entry"], self._side_gen
-        w = max(120, self.side.get_allocated_width() - 24)
+        w = max(120, self._pv_width() - 24)
         h = max(120, self.preview_box.get_allocated_height() - 24)
 
         def work():
@@ -22439,7 +22810,11 @@ class MainWindow(Gtk.ApplicationWindow):
         """Render the preview pane as it is right now into an image (kept until the next content lands).
         With `hold` the image is also shown at once at full opacity, covering whatever the pane does while
         the next item loads."""
-        if not self.cfg.get("preview_pane") or not self.preview_stack.get_realized():
+        if not self._preview_on() or not self.preview_stack.get_realized() or getattr(self, "_ql_moving", False):
+            return
+        if self._ql is not None:
+            # No crossfade in the quick look window. Reading pixels back from that window aborts inside cairo
+            # ("cairo_surface_mark_dirty_rectangle: ! _cairo_surface_has_mime_data"), which takes the app down.
             return
         a = self.preview_stack.get_allocation()
         if a.width < 2 or a.height < 2:
@@ -23320,6 +23695,9 @@ class MainWindow(Gtk.ApplicationWindow):
             self.cfg["gl_preview"] = not self.cfg["gl_preview"]
             self.toggle_gl_preview()         # flips it back and swaps the viewer in place
         self._apply_panes()
+        for w in self.app.get_windows():                 # the config is shared: every window gets the new keys
+            if isinstance(w, MainWindow):
+                w.bind_shortcuts()
         apply_theme_mode(self.cfg.get("theme", "system"))
         ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         for t in self._tabs():
@@ -23362,6 +23740,11 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ keys & mouse
     def _on_key(self, win, event):
         focus = self.get_focus()
+        if (focus is None or not focus.get_mapped()) and self.tab is not None and not self.tab.pc_mode and self.tab.view.get_mapped():
+            # The keyboard is on nothing, or on a widget that isn't showing (the other layout's list, a hidden
+            # pane): hand it to the file list, which then gets this very key press.
+            self.tab.view.grab_focus()
+            focus = self.get_focus()
         if isinstance(focus, (Gtk.Entry, Gtk.TextView)) or self.editing:
             if self.propagate_key_event(event):
                 return True
@@ -23377,17 +23760,9 @@ class MainWindow(Gtk.ApplicationWindow):
         key = event.keyval
         mods = event.state & Gtk.accelerator_get_default_mod_mask()
         ctrl, shift, alt = bool(mods & Gdk.ModifierType.CONTROL_MASK), bool(mods & Gdk.ModifierType.SHIFT_MASK), bool(mods & Gdk.ModifierType.MOD1_MASK)
-        if key == Gdk.KEY_BackSpace and not mods:
-            self.go_back()
-            return True
-        if key == Gdk.KEY_Delete:
-            self.delete(permanent=shift)
-            return True
-        if key == Gdk.KEY_F2 and not mods:
-            t.start_rename()
-            return True
-        if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and alt:
-            self.properties()
+        cb = self._list_keys.get((Gdk.keyval_to_lower(key), int(mods)))       # Space, Delete, F2… (Preferences → Shortcuts)
+        if cb is not None:
+            cb()
             return True
         if key == Gdk.KEY_Menu or (key == Gdk.KEY_F10 and shift):
             self.context_menu(t, None)
@@ -23485,30 +23860,70 @@ class MainWindow(Gtk.ApplicationWindow):
             menu.connect("show", lambda m, k=key: self._fill_menu(m, k))
             self.menubar.append(item)
         self.menubar.show_all()
-        # global accelerators (registered once; menu items are rebuilt dynamically)
-        for accel, cb in (("<Control>t", lambda: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME)),
-                          ("<Control>w", lambda: self.close_tab()), ("<Control>n", lambda: self.app.new_window(self.tab.path)),
-                          ("<Control>q", self.close), ("<Control>l", self.edit_address), ("F4", self.edit_address),
-                          ("<Alt>d", self.edit_address), ("<Control>e", lambda: self.searchbox.grab_focus()),
-                          ("<Control>f", lambda: self.searchbox.grab_focus()), ("F3", lambda: self.searchbox.grab_focus()),
-                          ("F5", self.reload_all), ("<Control>r", self.reload_all), ("<Control><Shift>r", self.open_in_rv), ("F1", lambda: show_shortcuts(self)),
-                          ("<Alt>Left", self.go_back), ("<Alt>Right", self.go_forward), ("<Alt>Up", self.go_up),
-                          ("<Control>c", lambda: self.copy_sel("copy")), ("<Control>x", lambda: self.copy_sel("cut")),
-                          ("<Control>v", lambda: self.paste()), ("<Control><Shift>c", self.copy_path),
-                          ("<Control>a", lambda: self.tab.select_all()), ("<Control>z", self.undo),
-                          ("<Control><Shift>n", self.new_folder), ("<Control>h", lambda: self.toggle_cfg("show_hidden")),
-                          ("<Alt>p", lambda: self.toggle_cfg("preview_pane")), ("<Alt><Shift>p", lambda: self.toggle_cfg("details_pane")),
-                          ("<Control>o", self.open_with), ("<Control>Tab", lambda: self.notebook.next_page()),
-                          ("<Control><Shift>Tab", lambda: self.notebook.prev_page()), ("<Control>Page_Down", lambda: self.notebook.next_page()),
-                          ("<Control>Page_Up", lambda: self.notebook.prev_page()), ("F11", self._toggle_fullscreen),
-                          ("<Alt>Return", self.properties), ("<Control>j", lambda: self.open_terminal()),
-                          ("<Control><Shift>s", self.toggle_split), ("<Control>F2", self.batch_rename)):
-            key, mods = Gtk.accelerator_parse(accel)
-            self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
+        # Keyboard shortcuts. The keys come from the config (Preferences → Shortcuts), see SHORTCUT_ACTIONS.
+        self._actions = {
+            "quick_look": self.quick_look,
+            "back": self.go_back, "forward": self.go_forward, "up": self.go_up,
+            "address": self.edit_address, "search": lambda: self.searchbox.grab_focus(), "refresh": self.reload_all,
+            "rename": lambda: self.tab.start_rename(), "batch_rename": self.batch_rename,
+            "delete": lambda: self.delete(), "delete_permanent": lambda: self.delete(True),
+            "copy": lambda: self.copy_sel("copy"), "cut": lambda: self.copy_sel("cut"), "paste": lambda: self.paste(),
+            "copy_path": self.copy_path, "select_all": lambda: self.tab.select_all(), "undo": self.undo,
+            "new_folder": self.new_folder, "open_with": self.open_with, "properties": self.properties,
+            "open_rv": self.open_in_rv, "terminal": lambda: self.open_terminal(),
+            "new_tab": lambda: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME),
+            "close_tab": lambda: self.close_tab(), "next_tab": lambda: self.notebook.next_page(),
+            "prev_tab": lambda: self.notebook.prev_page(), "new_window": lambda: self.app.new_window(self.tab.path),
+            "split": self.toggle_split, "preview_pane": lambda: self.toggle_cfg("preview_pane"),
+            "details_pane": lambda: self.toggle_cfg("details_pane"), "hidden": lambda: self.toggle_cfg("show_hidden"),
+            "fullscreen": self._toggle_fullscreen, "help": lambda: show_shortcuts(self), "quit": self.close,
+        }
+        self._bound: List[Tuple[int, int]] = []
+        self._list_keys: Dict[Tuple[int, int], Callable] = {}
+        self.bind_shortcuts()
         for i in range(1, 10):
             key, mods = Gtk.accelerator_parse(f"<Control>{i}")
             self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, n=i: (self.notebook.set_current_page(n - 1), True)[1])
         self._watch_clipboard()
+
+    def bind_shortcuts(self):
+        """(Re)connect every shortcut from the config. Keys with Ctrl / Alt and function keys go on the window;
+        plain keys (Space, Delete…) and list-only actions are answered by the file list alone (on_view_key),
+        so they never fire while typing or while the preview has the keyboard."""
+        for key, mods in self._bound:
+            self.accel.disconnect_key(key, Gdk.ModifierType(mods))
+        self._bound, self._list_keys = [], {}
+        taken = set()
+        for aid, cb in self._actions.items():
+            for accel in shortcut_accels(self.cfg, aid):
+                km = shortcut_key(accel)
+                if km is None or km in taken:
+                    continue
+                taken.add(km)
+                if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*km):
+                    self._list_keys[km] = cb
+                else:
+                    key, mods = Gtk.accelerator_parse(accel)
+                    self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
+                    self._bound.append((key, int(mods)))
+        for widget, text, aid in getattr(self, "_tips", ()):
+            widget.set_tooltip_text(self._tip_text(text, aid))
+
+    def acc(self, aid: str) -> str:
+        """The first shortcut of an action, for menu labels ('' when it has none)."""
+        accels = shortcut_accels(self.cfg, aid)
+        return accels[0] if accels else ""
+
+    def _tip_text(self, text: str, aid: str) -> str:
+        lab = shortcut_label(self.acc(aid))
+        return f"{text} ({lab})" if lab else text
+
+    def tip(self, widget, text: str, aid: str):
+        """A tooltip that names the action's current shortcut and follows it when the shortcut is changed."""
+        if not hasattr(self, "_tips"):
+            self._tips = []
+        self._tips.append((widget, text, aid))
+        widget.set_tooltip_text(self._tip_text(text, aid))
 
     def _toggle_fullscreen(self):
         st = self.get_window().get_state() if self.get_window() else 0
@@ -23541,36 +23956,37 @@ class MainWindow(Gtk.ApplicationWindow):
         has = bool(sel) and t.path not in (QUICK, THISPC)
         can_paste = real and (bool(self.clipboard["paths"]) or self._external_clipboard_has_files())
         if key == "file":
-            return [("New _tab", lambda: self.new_tab(t.path if real else HOME), "<Control>t"),
-                    ("New _window", lambda: self.app.new_window(t.path if real else HOME), "<Control>n"), "-",
-                    ("Open _terminal here", lambda: self.open_terminal(), "<Control>j"),
+            return [("New _tab", lambda: self.new_tab(t.path if real else HOME), self.acc("new_tab")),
+                    ("New _window", lambda: self.app.new_window(t.path if real else HOME), self.acc("new_window")), "-",
+                    ("Open _terminal here", lambda: self.open_terminal(), self.acc("terminal")),
                     ("Connect to _server…", self.connect_to_server), "-",
                     ("_Preferences…", lambda: self.folder_options(0)),
-                    ("_Help", lambda: show_shortcuts(self), "F1"), "-",
-                    ("_Close tab", lambda: self.close_tab(), "<Control>w"), ("E_xit", self.close, "<Control>q")]
+                    ("_Help", lambda: show_shortcuts(self), self.acc("help")), "-",
+                    ("_Close tab", lambda: self.close_tab(), self.acc("close_tab")), ("E_xit", self.close, self.acc("quit"))]
         if key == "home":
             target = e.path if (e and e.is_dir) else t.path
             pinned = target in cfg["pinned"]
             return [{"label": "_Unpin from Quick access" if pinned else "_Pin to Quick access",
                      "cb": (lambda: self.unpin(target)) if pinned else (lambda: self.pin(target)), "sensitive": real}, "-",
-                    {"label": "_Copy", "cb": lambda: self.copy_sel("copy"), "accel": "<Control>c", "sensitive": has},
-                    {"label": "_Paste", "cb": lambda: self.paste(), "accel": "<Control>v", "sensitive": can_paste},
-                    {"label": "Cu_t", "cb": lambda: self.copy_sel("cut"), "accel": "<Control>x", "sensitive": has},
-                    {"label": "Copy pat_h", "cb": self.copy_path, "accel": "<Control><Shift>c", "sensitive": has},
+                    {"label": "_Copy", "cb": lambda: self.copy_sel("copy"), "accel": self.acc("copy"), "sensitive": has},
+                    {"label": "_Paste", "cb": lambda: self.paste(), "accel": self.acc("paste"), "sensitive": can_paste},
+                    {"label": "Cu_t", "cb": lambda: self.copy_sel("cut"), "accel": self.acc("cut"), "sensitive": has},
+                    {"label": "Copy pat_h", "cb": self.copy_path, "accel": self.acc("copy_path"), "sensitive": has},
                     {"label": "Paste _shortcut", "cb": lambda: self.paste(shortcut=True), "sensitive": can_paste}, "-",
                     {"label": "_Move to…", "cb": lambda: self.move_or_copy_to("move"), "sensitive": has and real},
                     {"label": "Cop_y to…", "cb": lambda: self.move_or_copy_to("copy"), "sensitive": has and real},
-                    {"label": "_Delete", "cb": lambda: self.delete(), "accel": "Delete", "sensitive": has},
-                    {"label": "Delete permanently", "cb": lambda: self.delete(True), "accel": "<Shift>Delete", "sensitive": has},
-                    {"label": "_Rename", "cb": lambda: t.start_rename(), "accel": "F2", "sensitive": has and real}, "-",
-                    {"label": "New _folder", "cb": self.new_folder, "accel": "<Control><Shift>n", "sensitive": real},
+                    {"label": "_Delete", "cb": lambda: self.delete(), "accel": self.acc("delete"), "sensitive": has},
+                    {"label": "Delete permanently", "cb": lambda: self.delete(True), "accel": self.acc("delete_permanent"), "sensitive": has},
+                    {"label": "_Rename", "cb": lambda: t.start_rename(), "accel": self.acc("rename"), "sensitive": has and real}, "-",
+                    {"label": "New _folder", "cb": self.new_folder, "accel": self.acc("new_folder"), "sensitive": real},
                     {"label": "New _item", "sub": self._new_item_spec(), "sensitive": real}, "-",
-                    ("P_roperties", self.properties, "<Alt>Return"),
+                    ("P_roperties", self.properties, self.acc("properties")),
                     {"label": "_Open", "cb": lambda: self.activate_entry(e), "accel": "Return", "sensitive": e is not None},
-                    {"label": "Open _with…", "cb": self.open_with, "accel": "<Control>o", "sensitive": bool(e and not e.is_dir)},
+                    {"label": "Open _with…", "cb": self.open_with, "accel": self.acc("open_with"), "sensitive": bool(e and not e.is_dir)},
+                    {"label": "_Quick look", "cb": self.quick_look, "accel": self.acc("quick_look"), "sensitive": e is not None},
                     {"label": "_Edit", "cb": self.edit_file, "sensitive": bool(e and not e.is_dir)},
                     {"label": "_Run in terminal", "cb": lambda: self.run_script(e, True), "sensitive": looks_runnable(e)}, "-",
-                    ("Select _all", lambda: t.select_all(), "<Control>a"), ("Select _none", lambda: t.select_none()),
+                    ("Select _all", lambda: t.select_all(), self.acc("select_all")), ("Select _none", lambda: t.select_none()),
                     ("_Invert selection", lambda: t.invert_selection())]
         if key == "share":
             return [{"label": "_Share", "sub": self.share_spec()},
@@ -23599,28 +24015,26 @@ class MainWindow(Gtk.ApplicationWindow):
                             ("Date _accessed", "accessed"), ("_Owner", "owner"), ("_Permissions", "perms")):
                 cols.append({"label": name, "cb": lambda k=k: self.toggle_column(k), "check": k in cfg["columns"]})
             return [{"label": "_Navigation pane", "cb": lambda: self.toggle_cfg("nav_pane"), "check": cfg["nav_pane"]},
-                    {"label": "_Preview pane", "cb": lambda: self.toggle_cfg("preview_pane"), "accel": "<Alt>p", "check": cfg["preview_pane"]},
-                    {"label": "_Details pane", "cb": lambda: self.toggle_cfg("details_pane"), "accel": "<Alt><Shift>p", "check": cfg["details_pane"]},
-                    {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": "<Control><Shift>s", "check": bool(self.page and self.page.split)}, "-",
+                    {"label": "_Preview pane", "cb": lambda: self.toggle_cfg("preview_pane"), "accel": self.acc("preview_pane"), "check": cfg["preview_pane"]},
+                    {"label": "_Details pane", "cb": lambda: self.toggle_cfg("details_pane"), "accel": self.acc("details_pane"), "check": cfg["details_pane"]},
+                    {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": self.acc("split"), "check": bool(self.page and self.page.split)}, "-",
                     {"label": "_Layout", "sub": layouts}, {"label": "_Sort by", "sub": sorts}, {"label": "_Group by", "sub": groups},
                     {"label": "Add _columns", "sub": cols},
                     ("Size all columns to _fit", lambda: [c.queue_resize() for c in t.tree.get_columns()] and None), "-",
                     {"label": "Item check _boxes", "cb": lambda: self.toggle_cfg("checkboxes"), "check": cfg["checkboxes"]},
                     {"label": "File name _extensions", "cb": lambda: self.toggle_cfg("hide_extensions"), "check": not cfg["hide_extensions"]},
-                    {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": "<Control>h", "check": cfg["show_hidden"]}, "-",
+                    {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": self.acc("hidden"), "check": cfg["show_hidden"]}, "-",
                     {"label": "Hide selected _items", "cb": self.hide_selected, "sensitive": has and real}]
         if key == "tools":
             multi = len(sel) >= 1 and real
-            return [{"label": "_Batch rename…", "cb": self.batch_rename, "accel": "<Control>F2", "sensitive": multi},
+            return [{"label": "_Batch rename…", "cb": self.batch_rename, "accel": self.acc("batch_rename"), "sensitive": multi},
                     ("Find _large files…", self.find_large_files),
                     {"label": "Copy SHA-256 c_hecksum", "cb": self.copy_checksum, "sensitive": bool(e and not e.is_dir)},
                     {"label": "_Run in terminal", "cb": lambda: self.run_script(e, True), "sensitive": looks_runnable(e)}, "-",
                     ("Empty Recycle _Bin", self.empty_trash), "-",
                     ("_Performance report…", self.performance_report),
-                    {"label": "_Update file index now", "cb": self.index_now, "sensitive": bool(cfg.get("index_enabled"))},
-                    ("_Optional tools and integrations…", lambda: self.folder_options(3)), "-",
-                    ("_Preferences…", lambda: self.folder_options(0))]
-        return [("_View help (keyboard shortcuts)", lambda: show_shortcuts(self), "F1"), "-",
+                    {"label": "_Update file index now", "cb": self.index_now, "sensitive": bool(cfg.get("index_enabled"))}]
+        return [("_View help (keyboard shortcuts)", lambda: show_shortcuts(self), self.acc("help")), "-",
                 ("_Report a problem…", lambda: open_report(self)), "-",
                 ("_About Shotrover", lambda: show_about(self))]
 
@@ -23670,9 +24084,9 @@ class MainWindow(Gtk.ApplicationWindow):
                          ("Remove from This _PC" if as_drive else "Show in This _PC as a drive",
                           (lambda: self.remove_folder_drive(e.path)) if as_drive else (lambda: self.add_folder_drive(e.path)))]
             else:
-                spec += [("Open _with…", self.open_with), ("_Edit", self.edit_file)]
+                spec += [("Open _with…", self.open_with), ("_Quick look", self.quick_look, self.acc("quick_look")), ("_Edit", self.edit_file)]
                 if self.cfg.get("rv_enabled") and any((x.ext or "").lower() in RV_IMAGE_EXTS for x in sel if not x.is_dir):
-                    spec += [("Open in _RV", self.open_in_rv, "<Control><Shift>r")]
+                    spec += [("Open in _RV", self.open_in_rv, self.acc("open_rv"))]
                     if len(sel) == 1 and rv_sequence_for(e.path or ""):
                         spec += [("Open image se_quence in RV", lambda: self.open_in_rv(sequence=True))]
                 if looks_runnable(e):
@@ -24200,20 +24614,25 @@ class MainWindow(Gtk.ApplicationWindow):
         def fill(deps):
             box.get_children()[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
+                gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
                 cb = Gtk.CheckButton()
-                cb.set_active(dep["found"] is None)
-                cb.set_sensitive(dep["found"] is None)
+                cb.set_active(dep["found"] is None and not gone)
+                cb.set_sensitive(dep["found"] is None and not gone)
                 grid.attach(cb, 0, i, 1, 1)
                 name = Gtk.Label(xalign=0)
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
                 grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
+                if gone:
+                    st.set_text("not available")
+                    st.get_style_context().add_class("dim-label")
+                else:
+                    st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
-                g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
+                g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
                 grid.attach(g, 3, i, 1, 1)
-                name.set_tooltip_text(dep["cmd"])
+                name.set_tooltip_text(gone or dep["cmd"])
                 checks.append((cb, dep))
             grid.show_all()
             run_btn.set_sensitive(True)

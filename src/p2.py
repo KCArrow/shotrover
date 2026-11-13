@@ -645,6 +645,7 @@ class OptionsDialog(Gtk.Dialog):
         nb.append_page(self._view(), Gtk.Label(label="View"))
         nb.append_page(self._search(), Gtk.Label(label="Search"))
         nb.append_page(self._dependencies(), Gtk.Label(label="Optional"))
+        nb.append_page(self._shortcuts(), Gtk.Label(label="Shortcuts"))
         self.set_default_size(720, 560)
         self.show_all()
         nb.set_current_page(page)
@@ -850,6 +851,12 @@ class OptionsDialog(Gtk.Dialog):
         if not HAVE_GL:
             self.gl_check.set_tooltip_text("PyOpenGL is not installed — tick it in the list below")
         outer.pack_start(self.gl_check, False, False, 0)
+        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
+        note.set_text("Needs the PyOpenGL add-on, which is installed." if HAVE_GL else
+                      "Needs the PyOpenGL add-on, which is not installed: tick PyOpenGL in the list below and "
+                      "install it, then restart Shotrover.")
+        note.get_style_context().add_class("dim-label")
+        outer.pack_start(note, False, False, 0)
         self._heading(outer, "OpenRV")
         self._check(outer, "rv_enabled", "Enable OpenRV (right-click → Open in RV, Ctrl+Shift+R)")
         row = Gtk.Box(spacing=6)
@@ -910,16 +917,22 @@ class OptionsDialog(Gtk.Dialog):
         def fill(deps):
             self.dep_status.set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
-                cb = Gtk.CheckButton(active=dep["found"] is None, sensitive=dep["found"] is None)
+                gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
+                cb = Gtk.CheckButton(active=dep["found"] is None and not gone, sensitive=dep["found"] is None and not gone)
                 self.dep_grid.attach(cb, 0, i, 1, 1)
                 name = Gtk.Label(xalign=0)
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
-                name.set_tooltip_text(dep["cmd"])
+                name.set_tooltip_text(gone or dep["cmd"])
                 self.dep_grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
+                if gone:
+                    st.set_text("not available")
+                    st.get_style_context().add_class("dim-label")
+                    st.set_tooltip_text(gone)
+                else:
+                    st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
-                g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
+                g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
                 self.dep_grid.attach(g, 3, i, 1, 1)
                 self.dep_checks.append((cb, dep))
@@ -955,8 +968,102 @@ class OptionsDialog(Gtk.Dialog):
         self.diag_view.get_buffer().set_text("Checking…")
         threading.Thread(target=lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
 
+    # ---- Shortcuts page
+    def _shortcuts(self):
+        b = self._vbox()
+        hint = Gtk.Label(xalign=0, wrap=True)
+        hint.set_text("Click a shortcut, then press the new keys. Backspace removes it, Esc leaves it as it was. "
+                      "An action with several shortcuts keeps only the one you set.")
+        b.pack_start(hint, False, False, 0)
+        self.sc = {a[0]: shortcut_accels(self.cfg, a[0]) for a in SHORTCUT_ACTIONS}
+        self.sc_store = Gtk.ListStore(str, str, str, str)          # action id, name, first shortcut, the others
+        tv = Gtk.TreeView(model=self.sc_store)
+        col = Gtk.TreeViewColumn("Action", Gtk.CellRendererText(), text=1)
+        col.set_expand(True)
+        tv.append_column(col)
+        r = Gtk.CellRendererAccel(editable=True, accel_mode=Gtk.CellRendererAccelMode.OTHER)
+        r.connect("accel-edited", self._sc_edited)
+        r.connect("accel-cleared", lambda cell, path: self._sc_set(self.sc_store[path][0], []))
+        col = Gtk.TreeViewColumn("Shortcut", r)
+
+        def show(column, cell, model, it, data=None):
+            key, mods = Gtk.accelerator_parse(model[it][2] or "")
+            cell.set_property("accel-key", key)
+            cell.set_property("accel-mods", mods)
+        col.set_cell_data_func(r, show)
+        col.set_min_width(170)
+        tv.append_column(col)
+        tv.append_column(Gtk.TreeViewColumn("Also", Gtk.CellRendererText(), text=3))
+        self.sc_view = tv
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN)
+        sw.add(tv)
+        b.pack_start(sw, True, True, 0)
+        row = Gtk.Box(spacing=6)
+        one = Gtk.Button(label="Reset selected")
+        one.connect("clicked", lambda w: self._sc_reset(False))
+        every = Gtk.Button(label="Reset all shortcuts")
+        every.connect("clicked", lambda w: self._sc_reset(True))
+        row.pack_start(one, False, False, 0)
+        row.pack_start(every, False, False, 0)
+        self.sc_note = Gtk.Label(xalign=0, wrap=True)
+        row.pack_start(self.sc_note, True, True, 6)
+        b.pack_start(row, False, False, 0)
+        self._sc_fill()
+        return b
+
+    def _sc_fill(self):
+        sel = self.sc_view.get_selection().get_selected_rows()[1]
+        self.sc_store.clear()
+        for aid, name, _default, _list_only in SHORTCUT_ACTIONS:
+            accels = self.sc[aid]
+            self.sc_store.append([aid, name, accels[0] if accels else "", ", ".join(shortcut_label(a) for a in accels[1:])])
+        if sel:
+            self.sc_view.get_selection().select_path(sel[0])
+
+    def _sc_set(self, aid: str, accels: List[str], note: str = ""):
+        self.sc[aid] = accels
+        self.sc_note.set_text(note)
+        self._sc_fill()
+
+    def _sc_edited(self, cell, path, key, mods, hardware_keycode):
+        aid, name = self.sc_store[path][0], self.sc_store[path][1]
+        key = Gdk.keyval_to_lower(key)
+        why = shortcut_refusal(key, int(mods))
+        if why:
+            self.sc_note.set_text(f"{Gtk.accelerator_get_label(key, mods)} can't be used: {why}.")
+            return
+        accel = Gtk.accelerator_name(key, mods)
+        want = shortcut_key(accel)
+        lost = []
+        for other, _n, _d, _l in SHORTCUT_ACTIONS:        # one key, one action: take it from whoever had it
+            if other != aid and any(shortcut_key(a) == want for a in self.sc[other]):
+                self.sc[other] = [a for a in self.sc[other] if shortcut_key(a) != want]
+                lost.append(_n)
+        note = f"{shortcut_label(accel)} was {' and '.join(lost)}; it is now {name}." if lost else ""
+        if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*want):
+            note = (note + " " if note else "") + "Works while the file list has the keyboard."
+        self._sc_set(aid, [accel], note)
+
+    def _sc_reset(self, everything: bool):
+        if everything:
+            self.sc = {a[0]: list(a[2]) for a in SHORTCUT_ACTIONS}
+            self.sc_note.set_text("All shortcuts are back to their defaults.")
+            self._sc_fill()
+            return
+        rows = self.sc_view.get_selection().get_selected_rows()[1]
+        if not rows:
+            return
+        aid = self.sc_store[rows[0]][0]
+        want = {shortcut_key(a) for a in SHORTCUT_DEFAULTS[aid]}
+        for other in self.sc:                             # its defaults come back from any action that took them
+            if other != aid:
+                self.sc[other] = [a for a in self.sc[other] if shortcut_key(a) not in want]
+        self._sc_set(aid, list(SHORTCUT_DEFAULTS[aid]))
+
     def _collect(self):
         cfg = self.cfg
+        if hasattr(self, "sc"):
+            cfg["shortcuts"] = {aid: accels for aid, accels in self.sc.items() if accels != SHORTCUT_DEFAULTS[aid]}
         if hasattr(self, "gl_check"):
             cfg["gl_preview"] = self.gl_check.get_active()
         if hasattr(self, "rv_entry"):
@@ -994,34 +1101,39 @@ class OptionsDialog(Gtk.Dialog):
         self.destroy()
 
 
-SHORTCUTS = [
-    ("Enter", "Open"), ("Backspace / Alt+Left / Mouse Back", "Back"), ("Alt+Right / Mouse Forward", "Forward"),
-    ("Alt+Up", "Up one level"), ("F2", "Rename"), ("Delete", "Delete (Recycle Bin)"), ("Shift+Delete", "Delete permanently"),
-    ("Ctrl+Shift+R", "Open in OpenRV"), ("Ctrl+C / X / V", "Copy / Cut / Paste"), ("Ctrl+Shift+C", "Copy as path"), ("Ctrl+A", "Select all"),
-    ("Ctrl+click / Shift+click", "Multi-select"), ("Ctrl+Z", "Undo"), ("Ctrl+N", "New window"),
-    ("Ctrl+F2 (or F2 with several selected)", "Batch rename"), ("Ctrl+Shift+N", "New folder"), ("Ctrl+T / Ctrl+W", "New tab / Close tab"), ("Ctrl+Tab / Ctrl+Shift+Tab", "Next / previous tab"),
-    ("Ctrl+1..9", "Switch to tab"), ("Ctrl+L / F4 / Alt+D", "Address bar"), ("Ctrl+E / Ctrl+F / F3", "Search"),
-    ("F5", "Refresh"), ("F10 / Alt+F", "Menu bar"), ("Shift+F10 / Menu / Right-click", "Context menu"),
-    ("Alt+Enter", "Properties"), ("Ctrl+H", "Toggle hidden items"), ("Ctrl+1..", ""), ("Alt+P", "Preview pane"),
-    ("Alt+Shift+P", "Details pane"), ("Ctrl+Shift+S", "Split view (two folders side by side)"), ("Drag a tab out / right-click tab", "Move tab to its own window"), ("F11", "Full screen"), ("Ctrl+Q", "Quit"), ("Middle-click folder", "Open in new tab"),
-    ("Type letters", "Jump to item"),
+# Keys that are not in Preferences → Shortcuts (they can't be changed), listed in Help after the ones that are
+SHORTCUTS_FIXED = [
+    ("Enter", "Open"), ("Mouse Back / Mouse Forward", "Back / Forward"), ("Ctrl+click / Shift+click", "Multi-select"),
+    ("Ctrl+Space", "Add the item under the cursor to the selection"), ("F2 with several selected", "Batch rename"),
+    ("Ctrl+1..9", "Switch to tab"), ("F10 / Alt+F", "Menu bar"), ("Shift+F10 / Menu / Right-click", "Context menu"),
+    ("Drag a tab out / right-click tab", "Move tab to its own window"), ("Type letters", "Jump to item"),
+    ("Esc", "Clear the selection / leave search"),
+    ("Space / Esc / arrow keys (in quick look)", "Close / close / previous or next item"),
 ]
 
 
 def show_shortcuts(parent):
+    cfg = getattr(parent, "cfg", None) or {}
     d = Gtk.Dialog(title="Keyboard shortcuts", transient_for=parent, modal=True)
     d.add_button("_Close", Gtk.ResponseType.CLOSE)
-    d.set_default_size(520, 520)
+    d.set_default_size(520, 560)
     store = Gtk.ListStore(str, str)
-    for k, v in SHORTCUTS:
-        if v:
-            store.append([k, v])
+    for aid, name, _default, _list_only in SHORTCUT_ACTIONS:
+        keys = " / ".join(shortcut_label(a) for a in shortcut_accels(cfg, aid))
+        if keys:
+            store.append([keys, name])
+    for k, v in SHORTCUTS_FIXED:
+        store.append([k, v])
     tv = Gtk.TreeView(model=store, headers_visible=True)
     for i, t in enumerate(("Key", "Action")):
         tv.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
     sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
     sw.add(tv)
-    d.get_content_area().pack_start(sw, True, True, 0)
+    box = d.get_content_area()
+    box.pack_start(sw, True, True, 0)
+    note = Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0, margin=8)
+    note.get_style_context().add_class("dim-label")
+    box.pack_start(note, False, False, 0)
     d.show_all()
     d.run()
     d.destroy()

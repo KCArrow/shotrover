@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+- Quick look: press Space on a file to open its preview in a window of its own, with every previewer the preview pane has (images, 3D, text, PDF, video, scene breakdowns). The arrow keys move to the next or previous file; Space or Esc closes it. It works with the preview pane hidden, and is also in the Home and right-click menus.
+- With nothing selected, Space opens quick look for the item under the mouse pointer.
+- Fixed: after starting in an icon layout the keyboard did nothing until the first click (Space, Delete, the arrow keys and type-to-jump were all lost), because the keyboard was on the hidden details list.
+- Keyboard shortcuts can be changed in Preferences → Shortcuts: click a shortcut and press the new keys. A key that another action already uses moves to the new action; single letters and the keys that move around the file list can't be assigned. Menus, tooltips and the F1 list show the shortcuts as you have set them.
+- Preferences → Optional says under the hardware-accelerated 3D preview option that it needs the PyOpenGL add-on, and whether that is installed.
+- Preferences → Optional: OpenVDB (Python) shows "not available" instead of a permanent red "missing" on distros that have no package for it (RHEL 9 and its relatives), where installing it could never work. It is only a fallback; VDB files preview with the built-in reader. Where the package does exist, a failed install is now reported at the end of the install script instead of being hidden.
+- Preferences is in the File menu only: the Tools menu no longer has its own Preferences entry or "Optional tools and integrations" (that is the Optional tab in Preferences).
+- Space no longer selects the item under the cursor in the icon layouts (it opens quick look); Ctrl+Space still adds it to the selection.
+
 ## 1.1.1 — 2026-11-12
 
 - Licence: freelancers working on their own account can now use Shotrover for paid work free of charge, on their own computers. Companies and studios still need a studio licence (see COMMERCIAL-LICENSE.md).

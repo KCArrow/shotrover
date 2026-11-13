@@ -9,30 +9,70 @@
             menu.connect("show", lambda m, k=key: self._fill_menu(m, k))
             self.menubar.append(item)
         self.menubar.show_all()
-        # global accelerators (registered once; menu items are rebuilt dynamically)
-        for accel, cb in (("<Control>t", lambda: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME)),
-                          ("<Control>w", lambda: self.close_tab()), ("<Control>n", lambda: self.app.new_window(self.tab.path)),
-                          ("<Control>q", self.close), ("<Control>l", self.edit_address), ("F4", self.edit_address),
-                          ("<Alt>d", self.edit_address), ("<Control>e", lambda: self.searchbox.grab_focus()),
-                          ("<Control>f", lambda: self.searchbox.grab_focus()), ("F3", lambda: self.searchbox.grab_focus()),
-                          ("F5", self.reload_all), ("<Control>r", self.reload_all), ("<Control><Shift>r", self.open_in_rv), ("F1", lambda: show_shortcuts(self)),
-                          ("<Alt>Left", self.go_back), ("<Alt>Right", self.go_forward), ("<Alt>Up", self.go_up),
-                          ("<Control>c", lambda: self.copy_sel("copy")), ("<Control>x", lambda: self.copy_sel("cut")),
-                          ("<Control>v", lambda: self.paste()), ("<Control><Shift>c", self.copy_path),
-                          ("<Control>a", lambda: self.tab.select_all()), ("<Control>z", self.undo),
-                          ("<Control><Shift>n", self.new_folder), ("<Control>h", lambda: self.toggle_cfg("show_hidden")),
-                          ("<Alt>p", lambda: self.toggle_cfg("preview_pane")), ("<Alt><Shift>p", lambda: self.toggle_cfg("details_pane")),
-                          ("<Control>o", self.open_with), ("<Control>Tab", lambda: self.notebook.next_page()),
-                          ("<Control><Shift>Tab", lambda: self.notebook.prev_page()), ("<Control>Page_Down", lambda: self.notebook.next_page()),
-                          ("<Control>Page_Up", lambda: self.notebook.prev_page()), ("F11", self._toggle_fullscreen),
-                          ("<Alt>Return", self.properties), ("<Control>j", lambda: self.open_terminal()),
-                          ("<Control><Shift>s", self.toggle_split), ("<Control>F2", self.batch_rename)):
-            key, mods = Gtk.accelerator_parse(accel)
-            self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
+        # Keyboard shortcuts. The keys come from the config (Preferences → Shortcuts), see SHORTCUT_ACTIONS.
+        self._actions = {
+            "quick_look": self.quick_look,
+            "back": self.go_back, "forward": self.go_forward, "up": self.go_up,
+            "address": self.edit_address, "search": lambda: self.searchbox.grab_focus(), "refresh": self.reload_all,
+            "rename": lambda: self.tab.start_rename(), "batch_rename": self.batch_rename,
+            "delete": lambda: self.delete(), "delete_permanent": lambda: self.delete(True),
+            "copy": lambda: self.copy_sel("copy"), "cut": lambda: self.copy_sel("cut"), "paste": lambda: self.paste(),
+            "copy_path": self.copy_path, "select_all": lambda: self.tab.select_all(), "undo": self.undo,
+            "new_folder": self.new_folder, "open_with": self.open_with, "properties": self.properties,
+            "open_rv": self.open_in_rv, "terminal": lambda: self.open_terminal(),
+            "new_tab": lambda: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME),
+            "close_tab": lambda: self.close_tab(), "next_tab": lambda: self.notebook.next_page(),
+            "prev_tab": lambda: self.notebook.prev_page(), "new_window": lambda: self.app.new_window(self.tab.path),
+            "split": self.toggle_split, "preview_pane": lambda: self.toggle_cfg("preview_pane"),
+            "details_pane": lambda: self.toggle_cfg("details_pane"), "hidden": lambda: self.toggle_cfg("show_hidden"),
+            "fullscreen": self._toggle_fullscreen, "help": lambda: show_shortcuts(self), "quit": self.close,
+        }
+        self._bound: List[Tuple[int, int]] = []
+        self._list_keys: Dict[Tuple[int, int], Callable] = {}
+        self.bind_shortcuts()
         for i in range(1, 10):
             key, mods = Gtk.accelerator_parse(f"<Control>{i}")
             self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, n=i: (self.notebook.set_current_page(n - 1), True)[1])
         self._watch_clipboard()
+
+    def bind_shortcuts(self):
+        """(Re)connect every shortcut from the config. Keys with Ctrl / Alt and function keys go on the window;
+        plain keys (Space, Delete…) and list-only actions are answered by the file list alone (on_view_key),
+        so they never fire while typing or while the preview has the keyboard."""
+        for key, mods in self._bound:
+            self.accel.disconnect_key(key, Gdk.ModifierType(mods))
+        self._bound, self._list_keys = [], {}
+        taken = set()
+        for aid, cb in self._actions.items():
+            for accel in shortcut_accels(self.cfg, aid):
+                km = shortcut_key(accel)
+                if km is None or km in taken:
+                    continue
+                taken.add(km)
+                if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*km):
+                    self._list_keys[km] = cb
+                else:
+                    key, mods = Gtk.accelerator_parse(accel)
+                    self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
+                    self._bound.append((key, int(mods)))
+        for widget, text, aid in getattr(self, "_tips", ()):
+            widget.set_tooltip_text(self._tip_text(text, aid))
+
+    def acc(self, aid: str) -> str:
+        """The first shortcut of an action, for menu labels ('' when it has none)."""
+        accels = shortcut_accels(self.cfg, aid)
+        return accels[0] if accels else ""
+
+    def _tip_text(self, text: str, aid: str) -> str:
+        lab = shortcut_label(self.acc(aid))
+        return f"{text} ({lab})" if lab else text
+
+    def tip(self, widget, text: str, aid: str):
+        """A tooltip that names the action's current shortcut and follows it when the shortcut is changed."""
+        if not hasattr(self, "_tips"):
+            self._tips = []
+        self._tips.append((widget, text, aid))
+        widget.set_tooltip_text(self._tip_text(text, aid))
 
     def _toggle_fullscreen(self):
         st = self.get_window().get_state() if self.get_window() else 0
@@ -65,36 +105,37 @@
         has = bool(sel) and t.path not in (QUICK, THISPC)
         can_paste = real and (bool(self.clipboard["paths"]) or self._external_clipboard_has_files())
         if key == "file":
-            return [("New _tab", lambda: self.new_tab(t.path if real else HOME), "<Control>t"),
-                    ("New _window", lambda: self.app.new_window(t.path if real else HOME), "<Control>n"), "-",
-                    ("Open _terminal here", lambda: self.open_terminal(), "<Control>j"),
+            return [("New _tab", lambda: self.new_tab(t.path if real else HOME), self.acc("new_tab")),
+                    ("New _window", lambda: self.app.new_window(t.path if real else HOME), self.acc("new_window")), "-",
+                    ("Open _terminal here", lambda: self.open_terminal(), self.acc("terminal")),
                     ("Connect to _server…", self.connect_to_server), "-",
                     ("_Preferences…", lambda: self.folder_options(0)),
-                    ("_Help", lambda: show_shortcuts(self), "F1"), "-",
-                    ("_Close tab", lambda: self.close_tab(), "<Control>w"), ("E_xit", self.close, "<Control>q")]
+                    ("_Help", lambda: show_shortcuts(self), self.acc("help")), "-",
+                    ("_Close tab", lambda: self.close_tab(), self.acc("close_tab")), ("E_xit", self.close, self.acc("quit"))]
         if key == "home":
             target = e.path if (e and e.is_dir) else t.path
             pinned = target in cfg["pinned"]
             return [{"label": "_Unpin from Quick access" if pinned else "_Pin to Quick access",
                      "cb": (lambda: self.unpin(target)) if pinned else (lambda: self.pin(target)), "sensitive": real}, "-",
-                    {"label": "_Copy", "cb": lambda: self.copy_sel("copy"), "accel": "<Control>c", "sensitive": has},
-                    {"label": "_Paste", "cb": lambda: self.paste(), "accel": "<Control>v", "sensitive": can_paste},
-                    {"label": "Cu_t", "cb": lambda: self.copy_sel("cut"), "accel": "<Control>x", "sensitive": has},
-                    {"label": "Copy pat_h", "cb": self.copy_path, "accel": "<Control><Shift>c", "sensitive": has},
+                    {"label": "_Copy", "cb": lambda: self.copy_sel("copy"), "accel": self.acc("copy"), "sensitive": has},
+                    {"label": "_Paste", "cb": lambda: self.paste(), "accel": self.acc("paste"), "sensitive": can_paste},
+                    {"label": "Cu_t", "cb": lambda: self.copy_sel("cut"), "accel": self.acc("cut"), "sensitive": has},
+                    {"label": "Copy pat_h", "cb": self.copy_path, "accel": self.acc("copy_path"), "sensitive": has},
                     {"label": "Paste _shortcut", "cb": lambda: self.paste(shortcut=True), "sensitive": can_paste}, "-",
                     {"label": "_Move to…", "cb": lambda: self.move_or_copy_to("move"), "sensitive": has and real},
                     {"label": "Cop_y to…", "cb": lambda: self.move_or_copy_to("copy"), "sensitive": has and real},
-                    {"label": "_Delete", "cb": lambda: self.delete(), "accel": "Delete", "sensitive": has},
-                    {"label": "Delete permanently", "cb": lambda: self.delete(True), "accel": "<Shift>Delete", "sensitive": has},
-                    {"label": "_Rename", "cb": lambda: t.start_rename(), "accel": "F2", "sensitive": has and real}, "-",
-                    {"label": "New _folder", "cb": self.new_folder, "accel": "<Control><Shift>n", "sensitive": real},
+                    {"label": "_Delete", "cb": lambda: self.delete(), "accel": self.acc("delete"), "sensitive": has},
+                    {"label": "Delete permanently", "cb": lambda: self.delete(True), "accel": self.acc("delete_permanent"), "sensitive": has},
+                    {"label": "_Rename", "cb": lambda: t.start_rename(), "accel": self.acc("rename"), "sensitive": has and real}, "-",
+                    {"label": "New _folder", "cb": self.new_folder, "accel": self.acc("new_folder"), "sensitive": real},
                     {"label": "New _item", "sub": self._new_item_spec(), "sensitive": real}, "-",
-                    ("P_roperties", self.properties, "<Alt>Return"),
+                    ("P_roperties", self.properties, self.acc("properties")),
                     {"label": "_Open", "cb": lambda: self.activate_entry(e), "accel": "Return", "sensitive": e is not None},
-                    {"label": "Open _with…", "cb": self.open_with, "accel": "<Control>o", "sensitive": bool(e and not e.is_dir)},
+                    {"label": "Open _with…", "cb": self.open_with, "accel": self.acc("open_with"), "sensitive": bool(e and not e.is_dir)},
+                    {"label": "_Quick look", "cb": self.quick_look, "accel": self.acc("quick_look"), "sensitive": e is not None},
                     {"label": "_Edit", "cb": self.edit_file, "sensitive": bool(e and not e.is_dir)},
                     {"label": "_Run in terminal", "cb": lambda: self.run_script(e, True), "sensitive": looks_runnable(e)}, "-",
-                    ("Select _all", lambda: t.select_all(), "<Control>a"), ("Select _none", lambda: t.select_none()),
+                    ("Select _all", lambda: t.select_all(), self.acc("select_all")), ("Select _none", lambda: t.select_none()),
                     ("_Invert selection", lambda: t.invert_selection())]
         if key == "share":
             return [{"label": "_Share", "sub": self.share_spec()},
@@ -123,28 +164,26 @@
                             ("Date _accessed", "accessed"), ("_Owner", "owner"), ("_Permissions", "perms")):
                 cols.append({"label": name, "cb": lambda k=k: self.toggle_column(k), "check": k in cfg["columns"]})
             return [{"label": "_Navigation pane", "cb": lambda: self.toggle_cfg("nav_pane"), "check": cfg["nav_pane"]},
-                    {"label": "_Preview pane", "cb": lambda: self.toggle_cfg("preview_pane"), "accel": "<Alt>p", "check": cfg["preview_pane"]},
-                    {"label": "_Details pane", "cb": lambda: self.toggle_cfg("details_pane"), "accel": "<Alt><Shift>p", "check": cfg["details_pane"]},
-                    {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": "<Control><Shift>s", "check": bool(self.page and self.page.split)}, "-",
+                    {"label": "_Preview pane", "cb": lambda: self.toggle_cfg("preview_pane"), "accel": self.acc("preview_pane"), "check": cfg["preview_pane"]},
+                    {"label": "_Details pane", "cb": lambda: self.toggle_cfg("details_pane"), "accel": self.acc("details_pane"), "check": cfg["details_pane"]},
+                    {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": self.acc("split"), "check": bool(self.page and self.page.split)}, "-",
                     {"label": "_Layout", "sub": layouts}, {"label": "_Sort by", "sub": sorts}, {"label": "_Group by", "sub": groups},
                     {"label": "Add _columns", "sub": cols},
                     ("Size all columns to _fit", lambda: [c.queue_resize() for c in t.tree.get_columns()] and None), "-",
                     {"label": "Item check _boxes", "cb": lambda: self.toggle_cfg("checkboxes"), "check": cfg["checkboxes"]},
                     {"label": "File name _extensions", "cb": lambda: self.toggle_cfg("hide_extensions"), "check": not cfg["hide_extensions"]},
-                    {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": "<Control>h", "check": cfg["show_hidden"]}, "-",
+                    {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": self.acc("hidden"), "check": cfg["show_hidden"]}, "-",
                     {"label": "Hide selected _items", "cb": self.hide_selected, "sensitive": has and real}]
         if key == "tools":
             multi = len(sel) >= 1 and real
-            return [{"label": "_Batch rename…", "cb": self.batch_rename, "accel": "<Control>F2", "sensitive": multi},
+            return [{"label": "_Batch rename…", "cb": self.batch_rename, "accel": self.acc("batch_rename"), "sensitive": multi},
                     ("Find _large files…", self.find_large_files),
                     {"label": "Copy SHA-256 c_hecksum", "cb": self.copy_checksum, "sensitive": bool(e and not e.is_dir)},
                     {"label": "_Run in terminal", "cb": lambda: self.run_script(e, True), "sensitive": looks_runnable(e)}, "-",
                     ("Empty Recycle _Bin", self.empty_trash), "-",
                     ("_Performance report…", self.performance_report),
-                    {"label": "_Update file index now", "cb": self.index_now, "sensitive": bool(cfg.get("index_enabled"))},
-                    ("_Optional tools and integrations…", lambda: self.folder_options(3)), "-",
-                    ("_Preferences…", lambda: self.folder_options(0))]
-        return [("_View help (keyboard shortcuts)", lambda: show_shortcuts(self), "F1"), "-",
+                    {"label": "_Update file index now", "cb": self.index_now, "sensitive": bool(cfg.get("index_enabled"))}]
+        return [("_View help (keyboard shortcuts)", lambda: show_shortcuts(self), self.acc("help")), "-",
                 ("_Report a problem…", lambda: open_report(self)), "-",
                 ("_About Shotrover", lambda: show_about(self))]
 
@@ -194,9 +233,9 @@
                          ("Remove from This _PC" if as_drive else "Show in This _PC as a drive",
                           (lambda: self.remove_folder_drive(e.path)) if as_drive else (lambda: self.add_folder_drive(e.path)))]
             else:
-                spec += [("Open _with…", self.open_with), ("_Edit", self.edit_file)]
+                spec += [("Open _with…", self.open_with), ("_Quick look", self.quick_look, self.acc("quick_look")), ("_Edit", self.edit_file)]
                 if self.cfg.get("rv_enabled") and any((x.ext or "").lower() in RV_IMAGE_EXTS for x in sel if not x.is_dir):
-                    spec += [("Open in _RV", self.open_in_rv, "<Control><Shift>r")]
+                    spec += [("Open in _RV", self.open_in_rv, self.acc("open_rv"))]
                     if len(sel) == 1 and rv_sequence_for(e.path or ""):
                         spec += [("Open image se_quence in RV", lambda: self.open_in_rv(sequence=True))]
                 if looks_runnable(e):
@@ -724,20 +763,25 @@
         def fill(deps):
             box.get_children()[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
+                gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
                 cb = Gtk.CheckButton()
-                cb.set_active(dep["found"] is None)
-                cb.set_sensitive(dep["found"] is None)
+                cb.set_active(dep["found"] is None and not gone)
+                cb.set_sensitive(dep["found"] is None and not gone)
                 grid.attach(cb, 0, i, 1, 1)
                 name = Gtk.Label(xalign=0)
                 name.set_markup(f"<b>{GLib.markup_escape_text(dep['name'])}</b>")
                 grid.attach(name, 1, i, 1, 1)
                 st = Gtk.Label(xalign=0)
-                st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
+                if gone:
+                    st.set_text("not available")
+                    st.get_style_context().add_class("dim-label")
+                else:
+                    st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
-                g = Gtk.Label(label=dep["gives"], xalign=0, wrap=True, hexpand=True)
+                g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
                 g.get_style_context().add_class("dim-label")
                 grid.attach(g, 3, i, 1, 1)
-                name.set_tooltip_text(dep["cmd"])
+                name.set_tooltip_text(gone or dep["cmd"])
                 checks.append((cb, dep))
             grid.show_all()
             run_btn.set_sensitive(True)

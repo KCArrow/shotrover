@@ -117,6 +117,9 @@ If something doesn't work on your distro, that is a bug.
 - **Find large files** (Tools menu). Scans a folder or a whole drive and shows what is taking the
   space. Frame sequences count as one item (`render.1001–1240.exr`), system files are flagged so
   you don't remove them by accident, and whatever you tick goes to the Recycle Bin.
+- **Quick look.** Press Space on a file to open its preview in a window of its own; the arrow keys
+  move to the next file, Space or Esc closes it. Works with the preview pane hidden.
+- **Your own shortcuts.** Change any keyboard shortcut in Preferences → Shortcuts.
 - **Your choice of look.** Shotrover's own icon set or your desktop's icons, and light, dark or
   follow-the-desktop colours. Asked on first start, changeable in Preferences → View.
 
@@ -232,10 +235,12 @@ GTK 3 (step 1 of [Get started](#get-started)).
 <details>
 <summary><b>Keyboard shortcuts</b></summary>
 
-Press **F1** in the app for the full list.
+These are the defaults; change them in Preferences → Shortcuts. Press **F1** in the app for the
+full list as you have it set.
 
 | Keys | Action |
 |---|---|
+| Space | quick look (pop-out preview) |
 | Enter / Backspace / Alt+← → ↑ | open / back / forward / up |
 | Ctrl+L, F4, Alt+D | edit path |
 | Ctrl+E, Ctrl+F, F3 | search |

@@ -762,11 +762,6 @@ class IconGrid(Gtk.Layout):
         if key in (Gdk.KEY_Return, Gdk.KEY_KP_Enter) and not mods and self.cursor >= 0:
             self.emit("item-activated", Gtk.TreePath.new_from_indices([self.cursor]))
             return True
-        if key == Gdk.KEY_space and not mods and self.cursor >= 0:
-            self.selected = {self.cursor}
-            self.anchor = self.cursor
-            self._emit_sel()
-            return True
         if key == Gdk.KEY_a and ctrl:
             self.select_all()
             return True

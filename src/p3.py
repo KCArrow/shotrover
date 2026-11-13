@@ -730,6 +730,13 @@ class FolderView(Gtk.Box):
                 self.icons.configure(size, False, max(size + 44, 116), self.cfg["single_click"], extra_lines=1 if where else 0)
             self.icons.invalidate()
         self.tree.queue_draw()      # visible rows re-run their data funcs; no need to signal every row
+        # Keep the keyboard on the list that is showing. GTK gives the first focus to the details list even
+        # when an icon layout is up, and a hidden list swallows every key (Space, Delete, arrows…) until the
+        # first click.
+        top = self.get_toplevel()
+        held = top.get_focus() if isinstance(top, Gtk.Window) else None
+        if held in (self.tree, self.icons) and held is not self.view:
+            self.view.grab_focus()
         # details rows carry section / group header rows, icon rows don't: switching between the two families
         # must rebuild the rows (from the listing already in memory — no disk access)
         want = self.path == THISPC or lay in ("details", "content")
