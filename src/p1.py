@@ -4,6 +4,9 @@
 # Required Notice: Copyright Kalib Arrowsmith (https://github.com/KCArrow/shotrover)
 # Free for individuals, freelancers and noncommercial organizations; companies and studios need a commercial
 # licence — see COMMERCIAL-LICENSE.md in the repository.
+#
+# shotrover.py is a generated file: build.sh joins the source parts in src/ into this one file, so the
+# download is a single script with nothing to install. To change Shotrover, edit src/ and run ./build.sh.
 """
 Shotrover — a fast, Windows-Explorer-style file manager for Linux desktops.
 
