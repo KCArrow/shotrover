@@ -215,7 +215,7 @@ Download `shotrover-<version>-portable.zip` from the
 `./make-portable.sh` (output in `dist/`). Unzip anywhere:
 
 ```
-shotrover-1.1.1-portable/
+shotrover-1.1.2-portable/
 ├── shotrover          # launcher: ./shotrover [folder]
 ├── shotrover.py       # the application
 ├── install.sh         # optional: install into ~/.local/bin later

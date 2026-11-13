@@ -75,7 +75,7 @@ def bench(label: str):
 APP_ID = "io.github.KCArrow.Shotrover"
 APP_NAME = "Shotrover"
 APP_FULL_NAME = "Shotrover"
-VERSION = "1.1.1"
+VERSION = "1.1.2"
 # the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
 # file and the portable build show it in the title bar, task switcher and About box without installing
 APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">

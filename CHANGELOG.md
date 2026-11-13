@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 1.1.2 — 2026-11-12
 
 - Quick look: press Space on a file to open its preview in a window of its own, with every previewer the preview pane has (images, 3D, text, PDF, video, scene breakdowns). The arrow keys move to the next or previous file; Space or Esc closes it. It works with the preview pane hidden, and is also in the Home and right-click menus.
 - With nothing selected, Space opens quick look for the item under the mouse pointer.
