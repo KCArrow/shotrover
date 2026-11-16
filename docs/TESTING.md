@@ -31,7 +31,7 @@ python3 shotrover.py --preview-bench [--quick] [--keep]
 Synthesises large files of every preview type (PNG, PSD, EXR, HDR, IFF, OBJ, STL, text, zip,
 PDF) in a scratch folder, runs each through the exact decoder/model path the preview pane uses,
 and prints load + render time per type. `--quick` uses smaller files, `--keep` leaves the scratch
-folder for inspection. Use it after touching anything under `p1b.py` / `p3c.py`.
+folder for inspection. Use it after touching anything under `decoders.py` / `preview_3d_video.py`.
 
 ## GUI stress test
 

@@ -8,3 +8,4 @@ __pycache__/
 /tests/screen.txt
 .venv/
 /docs/internal/
+/AGENTS.md

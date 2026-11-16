@@ -23,14 +23,14 @@ git clone https://github.com/KCArrow/shotrover.git && cd shotrover
 - The GTK main thread never touches the disk or the network. Anything that can block goes to a
   thread or the `run_heavy` pool and reports back with `GLib.idle_add` + a generation check.
 - No pip dependencies for the core. New capabilities are optional, detected at runtime, listed in
-  `optional_deps()` (p3d) so they show up in Preferences → Optional with an install hint, and the
+  `optional_deps()` (importers.py) so they show up in Preferences → Optional with an install hint, and the
   app must degrade gracefully (a message in the preview pane, never an exception dialog).
 - Every GStreamer call goes through `VideoPreview._ops`. Every new preview type gets its row in
   `run_preview_bench` and a unit test in `run_selftest`.
 - UI strings are terse: labels, not explanations. The baseline is Python 3.9 syntax and GTK 3.24, so it runs on
   long-term-support distros as well as rolling ones.
 - Nothing distro-specific in the code: find tools on PATH or in their usual locations, and give install
-  hints through `pkg_install()` / `pkg_hint()` (p3d), which pick dnf, apt, pacman or zypper names.
+  hints through `pkg_install()` / `pkg_hint()` (importers.py), which pick dnf, apt, pacman or zypper names.
 - Keep `--selftest` fast (< 10 s without `--bench`).
 
 ## Licensing of contributions
@@ -45,7 +45,7 @@ please open an issue describing the change instead of a PR.
 ## Releasing
 
 ```bash
-# bump VERSION in src/p1.py, update CHANGELOG.md
+# bump VERSION in src/core.py, update CHANGELOG.md
 ./build.sh && ./make-portable.sh         # dist/shotrover-<ver>-portable.zip
 git tag v<ver> && git push --tags        # the release workflow attaches the zip
 ```

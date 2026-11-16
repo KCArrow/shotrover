@@ -729,6 +729,38 @@ def pkg_exists(dnf: str, apt: str = "", pacman: str = "") -> Optional[bool]:
     return False if missing in (r.stdout + r.stderr) else None
 
 
+def pkgs_unavailable(names: List[Tuple[str, str, str]]) -> set:
+    """Which of these packages, each given as (dnf, apt, pacman) names, this distro's repositories do not
+    have: the set of indexes into `names`. Like pkg_exists, only a clear answer counts, so no network or an
+    unknown package manager gives an empty set. dnf is asked once for all of them (it takes most of a
+    second per call); on the RHEL family nothing is asked before EPEL is enabled, because most add-ons live
+    there and the install script enables it first."""
+    pm = pkg_manager()
+    col = {"dnf": 0, "apt": 1, "pacman": 2}.get(pm)
+    if col is None:
+        return set()
+    want = {i: n[col] for i, n in enumerate(names) if n[col]}
+    if not want:
+        return set()
+    if pm != "dnf":
+        return {i for i, n in want.items() if pkg_exists(*[n if c == col else "" for c in range(3)]) is False}
+    if os_release().get("ID") != "fedora":
+        try:
+            if subprocess.run(["rpm", "-q", "epel-release"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8).returncode != 0:
+                return set()
+        except Exception:
+            return set()
+    try:
+        r = subprocess.run(["dnf", "-q", "list"] + sorted(set(want.values())), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=20, env=dict(os.environ, LC_ALL="C"))
+    except Exception:
+        return set()
+    if r.returncode != 0 and "No matching Packages" not in (r.stdout + r.stderr):
+        return set()
+    have = {ln.split()[0].rsplit(".", 1)[0] for ln in r.stdout.splitlines() if ln and not ln[0].isspace() and "." in ln.split()[0]}
+    return {i for i, n in want.items() if n not in have}
+
+
 def pkg_hint(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
     """Short form for error messages: 'sudo apt install python3-numpy' / 'install python3-numpy'."""
     pm = pkg_manager()
@@ -752,40 +784,44 @@ def optional_deps() -> List[dict]:
     flatpak = shutil.which("flatpak")
     pm = pkg_manager()
     vdb_py = "importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None
-    vdb_gone = None
-    if vdb_py is None and pkg_exists("python3-openvdb", "python3-openvdb", "openvdb") is False:
-        vdb_gone = "Your distribution has no package for it. VDB files still preview with the built-in reader."
     deps = [
         dict(key="blender", name="Blender", gives="Alembic, USD, FBX, glTF, Collada, .blend model previews",
              found=bl[0] if bl else None,
              cmd=("flatpak install -y flathub org.blender.Blender" if flatpak else
                   pkg_install("flatpak", "flatpak", "flatpak", "flatpak") + " && flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
                   "flatpak install -y flathub org.blender.Blender")),
-        dict(key="assimp", name="assimp", gives="FBX, DAE, glTF, 3DS, X3D model previews",
+        dict(key="assimp", name="assimp", pkgs=('assimp', 'assimp-utils', 'assimp'), gives="FBX, DAE, glTF, 3DS, X3D model previews",
              found=shutil.which("assimp"), cmd=pkg_install("assimp", "assimp-utils", "assimp", "assimp")),
-        dict(key="oiiotool", name="OpenImageIO tools", gives="EXR (all codecs), DPX, TIFF, 16-bit IFF, .tx previews",
+        dict(key="oiiotool", name="OpenImageIO tools", pkgs=('OpenImageIO-utils', 'openimageio-tools', 'openimageio'), gives="EXR (all codecs), DPX, TIFF, 16-bit IFF, .tx previews",
              found=shutil.which("oiiotool"), cmd=pkg_install("OpenImageIO-utils", "openimageio-tools", "openimageio", "OpenImageIO")),
-        dict(key="magick", name="ImageMagick", gives="DDS, XCF, TGA, SVG and other image formats",
+        dict(key="magick", name="ImageMagick", pkgs=('ImageMagick', 'imagemagick', 'imagemagick'), gives="DDS, XCF, TGA, SVG and other image formats",
              found=shutil.which("magick") or shutil.which("convert"), cmd=pkg_install("ImageMagick", "imagemagick", "imagemagick", "ImageMagick")),
-        dict(key="ffmpeg", name="ffmpeg", gives="video frame thumbnails and media info",
+        dict(key="ffmpeg", name="ffmpeg", pkgs=('ffmpeg-free', 'ffmpeg', 'ffmpeg'), gives="video frame thumbnails and media info",
              found=shutil.which("ffmpeg"), cmd=pkg_install("ffmpeg-free", "ffmpeg", "ffmpeg", "ffmpeg")),
-        dict(key="pdftoppm", name="poppler-utils", gives="PDF page previews and thumbnails",
+        dict(key="pdftoppm", name="poppler-utils", pkgs=('poppler-utils', 'poppler-utils', 'poppler'), gives="PDF page previews and thumbnails",
              found=shutil.which("pdftoppm"), cmd=pkg_install("poppler-utils", "poppler-utils", "poppler", "poppler-tools")),
-        dict(key="gtksourceview", name="GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
-             found="loaded" if GtkSource is not None else None, cmd=pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4")),
-        dict(key="pyopengl", name="PyOpenGL (Python)", gives="hardware-accelerated 3D preview",
+        # The GTK 4 interface needs GtkSourceView 5 and the GTK 3 one version 4: installing the other one changes
+        # nothing, and not every distro has 5 (RHEL 9 and EPEL do not).
+        dict(key="gtksourceview", name="GtkSourceView 5" if GTK4 else "GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
+             found="loaded" if GtkSource is not None else None,
+             pkgs=("gtksourceview5", "gir1.2-gtksource-5", "gtksourceview5") if GTK4 else ("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4"),
+             gone_note="Text still previews, without colouring; the GTK 3 interface can use GtkSourceView 4." if GTK4 else "",
+             cmd=(pkg_install("gtksourceview5", "gir1.2-gtksource-5", "gtksourceview5", "typelib-1_0-GtkSource-5") if GTK4 else
+                  pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4"))),
+        dict(key="pyopengl", name="PyOpenGL (Python)", pkgs=('', 'python3-opengl', 'python-opengl'), gives="hardware-accelerated 3D preview",
              found="OpenGL importable" if HAVE_GL else None, cmd=("python3 -m pip install --user PyOpenGL" if pm in ("dnf", "") else pkg_install("", "python3-opengl", "python-opengl", "python3-opengl"))),
-        dict(key="h5py", name="h5py (Python)", gives="HDF5 (legacy) Alembic previews",
+        dict(key="h5py", name="h5py (Python)", pkgs=('', 'python3-h5py', 'python-h5py'), gives="HDF5 (legacy) Alembic previews",
              found="h5py importable" if _has_py_module("h5py") else None, cmd=("python3 -m pip install --user h5py" if pm in ("dnf", "") else pkg_install("", "python3-h5py", "python-h5py", "python3-h5py"))),
         dict(key="usd", name="usd-core (Python)", gives="USD previews",
              found="pxr importable" if _has_py_module("pxr") else None, cmd="python3 -m pip install --user usd-core"),
-        dict(key="gst", name="GStreamer (Python bindings)", gives="video / audio playback engine" + (f" — import failed: {GST_ERROR}" if GST_ERROR else ""),
+        dict(key="gst", name="GStreamer (Python bindings)", pkgs=('gstreamer1-plugins-base', 'gstreamer1.0-plugins-base', 'gst-plugins-base'), gives="video / audio playback engine" + (f" — import failed: {GST_ERROR}" if GST_ERROR else ""),
              found=(Gst.version_string() if HAVE_GST else None),
              cmd=pkg_install("gstreamer1 gstreamer1-plugins-base python3-gobject",
                              "gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base python3-gi",
                              "gstreamer gst-plugins-base python-gobject",
                              "gstreamer gstreamer-plugins-base typelib-1_0-Gst-1_0 python3-gobject")),
         dict(key="gstgtk", name="GStreamer GTK sink", gives="video player in the preview pane",
+             pkgs=("gstreamer1-plugins-good-gtk", "gstreamer1.0-gtk3", "gst-plugin-gtk"),
              found="gtksink" if gst_sink_available(refresh=True) else None, cmd=pkg_install("gstreamer1-plugins-good gstreamer1-plugins-good-gtk", "gstreamer1.0-plugins-good gstreamer1.0-gtk3",
                              "gst-plugins-good gst-plugin-gtk", "gstreamer-plugins-good gstreamer-plugins-good-gtk")),
         dict(key="gstcodecs", name="GStreamer codecs" + (" (RPM Fusion)" if pm == "dnf" else ""),
@@ -803,16 +839,21 @@ def optional_deps() -> List[dict]:
              found=_find_mayapy(),
              cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
         # Only a fallback: .vdb files preview with the built-in reader (then Houdini) before this is tried. Not
-        # every distro packages it (RHEL 9 / EPEL has the library but no Python module), and installing a package
-        # that doesn't exist left the row "missing" for good, so ask the package manager first.
+        # every distro packages it (RHEL 9 / EPEL has the library but no Python module).
         dict(key="openvdb", name="OpenVDB (Python)", gives="fallback for .vdb files the built-in reader can't open",
-             found=vdb_py, unavailable=vdb_gone,
+             found=vdb_py, pkgs=("python3-openvdb", "python3-openvdb", "openvdb"), gone_note="VDB files still preview with the built-in reader.",
              cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb")),
-        dict(key="7z", name="7-Zip (p7zip)", gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
+        dict(key="7z", name="7-Zip (p7zip)", pkgs=('p7zip', '', '7zip'), gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
              found=sevenzip(), cmd=pkg_install("p7zip p7zip-plugins", "7zip || sudo apt-get install -y p7zip-full", "7zip", "7zip")),
-        dict(key="xdotool", name="xdotool", gives="fm-bench.py benchmark script only",
+        dict(key="xdotool", name="xdotool", pkgs=('xdotool', 'xdotool', 'xdotool'), gives="fm-bench.py benchmark script only",
              found=shutil.which("xdotool"), cmd=pkg_install("xdotool", "xdotool", "xdotool", "xdotool")),
     ]
+    # Installing a package the distro does not have leaves its row "missing" for good, so every missing add-on
+    # that comes from the package manager (pkgs: its main package as dnf, apt, pacman names) is looked up
+    # first. Those the repositories lack read "not available" and cannot be ticked.
+    ask = [d for d in deps if d["found"] is None and d.get("pkgs") and not d.get("unavailable")]
+    for i in pkgs_unavailable([d["pkgs"] for d in ask]):
+        ask[i]["unavailable"] = ("Your distribution has no package for it. " + ask[i].get("gone_note", "")).strip()
     return deps
 
 

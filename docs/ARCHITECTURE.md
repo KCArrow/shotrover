@@ -3,29 +3,30 @@
 Shotrover is one Python module. For editing it is split into parts under `src/`, which `build.sh`
 concatenates **in this exact order** into `shotrover.py`. The parts are not packages: they share one
 namespace, so a part may use anything defined in an earlier part, and a class defined later
-(e.g. `MainWindow` in p4) may reference helpers from any earlier part at call time.
+(e.g. `MainWindow` in `mainwindow.py`) may reference helpers from any earlier part at call time.
 
 | Part | Lines | What lives there |
 |---|---|---|
-| `p1.py`  | ~1500 | imports, `VERSION`, `DEFAULT_CONFIG`, config load/save, formatting, `Entry` and directory listing (`list_folder`, shallow first paint, parallel stats on network mounts), sorting/grouping, drives and removable media (sysfs classification, UDisks2 eject/format, physical-disk grouping), `FileOp` background file operations, archive operations (`ArchiveOp`, 7-Zip), OpenRV detection |
-| `p1b.py` | ~900  | image decoders written in pure Python/numpy (EXR, Radiance HDR, Maya IFF, PSD/PSB), tone-mapping, external converter fallbacks, information previews (archive listing, media info), `PathCache` (non-blocking exists/isdir), CPU parking, the `run_heavy` process pool, `generate_preview` |
-| `p1c.py` | ~950  | diagnostics: `StallWatchdog` (main-loop stall detection, freeze dumps), navigation log, `run_selftest`, synthetic file generators and `run_preview_bench`, `StressDriver` (GUI stress and nav benchmarks) |
-| `p1d.py` | ~350  | encrypted file index: `IndexKey` (keyring or key file), `FileIndex` (crawl, lookup, search, encrypt-then-MAC storage) |
-| `p1e.py` | ~400  | crash detection and error reports: `CrashReporter` (exception hooks, faulthandler + per-process session markers for hard crashes, report files, sanitising, pre-filled GitHub issues), `CRASH` |
-| `p2.py`  | ~850  | dialogs: message/ask helpers, `ProgressDialog`, Properties, `OptionsDialog` (Preferences: General / View / Search / Optional), shortcuts, about |
-| `p2b.py` | ~250  | Batch rename dialog and `apply_renames` |
-| `p2d.py` | ~610  | Find large files: `scan_large_files` (iterative scandir walk, frame-sequence grouping, one filesystem), `find_duplicates`, `cleanup_kind`, `LargeFilesWindow` |
-| `p2e.py` | ~310  | Built-in icon set (`_SR_ICONS` SVGs, `sr_icon_kind`, `sr_icon_pixbuf`), colour scheme (`theme_variant`, `apply_theme_mode`), first-start `WelcomeDialog` |
-| `p2c.py` | ~90   | `ReportDialog` (review / edit / send a report), `open_report` |
-| `p3b.py` | ~850  | custom widgets: `FitImage`, row hover, soft grid lines, virtualised `IconGrid`, This PC tile view (`PCView`, `DriveBar`) |
-| `p3c.py` | ~1400 | 3D preview: `load_model` + `_finish_model_numpy` (triangulation, decimation, normals), software rasteriser (`_rasterize`, `software_render`) and its `RenderWorker` process, `ModelView` (cairo) and `GLModelView` (Gtk.GLArea), GStreamer `VideoPreview` |
-| `p3e.py` | ~2050 | scene breakdowns: `UEPackage` (Unreal package summary / names / imports / exports), Unity YAML + `.meta` GUID index, Maya ASCII statements + IFF (`FOR4`/`FOR8`) chunks, `BlendFile` (blocks + SDNA, gzip/zstd), `scene_breakdown`, `breakdown_text` |
-| `p3f.py` | ~1500 | shader / material / IES previews: `render_material_ball` (numpy GGX), readers for MaterialX, OSL/OSO, GLSL/HLSL, Unity `.mat`/`.shader`/`.shadergraph`, `IESProfile` + `ies_preview`, `shader_preview`, `material_ball_for`; live GLSL: `GLSLRunner` (no GTK) and `GLSLView` (Gtk.GLArea) |
-| `p3g.py` | ~550 | scene object & texture previews: Blender meshes (MVert/MPoly/MLoop, 3.5+ attribute layers, 5.x `AttributeStorage`) with object matrices, Maya ASCII meshes (`.vt/.ed/.fc`) and history primitives (`polyCube`, `polySphere`…, through deformers and `polyUnite`), `scene_object_model`, `scene_tile_path` |
-| `p3d.py` | ~1300 | built-in VDB reader, Houdini / Maya bridges, 3D importers for FBX / USD / Alembic (HDF5 via h5py), Blender and assimp bridges, `optional_deps`, `install_script`, `preview_tool_report`, GL status |
-| `p3.py`  | ~1050 | `IconCache` (icons + thumbnails), `NavNode`, `FolderView` (one folder tab: listing, search, selection, drag-and-drop, views), `Page` (one or two `FolderView`s for split view) |
-| `p4.py`  | ~3000 | `MainWindow`: menus/command bar, navigation pane, tabs, address bar, side pane (preview + details), preview routing and crossfades, cache-sequence player, drive watching, status bar and spinner, window state |
-| `p5.py`  | ~1400 | `MainWindow` continued: context menus, actions (zip, extract, RV, checksum, run script, batch rename…), index scheduling, `ExplorerApp` (Gtk.Application), `probe_gl`, `main()` and all command-line flags |
+| `core.py`  | ~1500 | imports, `VERSION`, `DEFAULT_CONFIG`, config load/save, formatting, `Entry` and directory listing (`list_folder`, shallow first paint, parallel stats on network mounts), sorting/grouping, drives and removable media (sysfs classification, UDisks2 eject/format, physical-disk grouping), `FileOp` background file operations, archive operations (`ArchiveOp`, 7-Zip), OpenRV detection |
+| `decoders.py` | ~900  | image decoders written in pure Python/numpy (EXR, Radiance HDR, Maya IFF, PSD/PSB), tone-mapping, external converter fallbacks, information previews (archive listing, media info), `PathCache` (non-blocking exists/isdir), CPU parking, the `run_heavy` process pool, `generate_preview` |
+| `diagnostics.py` | ~950  | diagnostics: `StallWatchdog` (main-loop stall detection, freeze dumps), navigation log, `run_selftest`, synthetic file generators and `run_preview_bench`, `StressDriver` (GUI stress and nav benchmarks) |
+| `fileindex.py` | ~350  | encrypted file index: `IndexKey` (keyring or key file), `FileIndex` (crawl, lookup, search, encrypt-then-MAC storage), which lives in a helper process (`_index_serve`); `IndexClient` is what the application calls (`INDEX`) |
+| `crashreport.py` | ~400  | crash detection and error reports: `CrashReporter` (exception hooks, faulthandler + per-process session markers for hard crashes, report files, sanitising, pre-filled GitHub issues), `CRASH` |
+| `toolkit.py` | ~780  | toolkit compatibility layer for the move to GTK 4: layout (`put`, `set_child`, `pane_first`…), drawing (`on_draw`, `ScrollCanvas`), input (`on_event`, `Shortcuts`), menus, dialogs, icons and clipboard, each with a GTK 3 and a GTK 4 body. Interface code calls these in place of the GTK 3 calls GTK 4 removed. GTK 3 is the default; `SHOTROVER_GTK=4` selects the unfinished GTK 4 path |
+| `dialogs.py`  | ~850  | dialogs: message/ask helpers, `ProgressDialog`, Properties, `OptionsDialog` (Preferences: General / View / Search / Optional), shortcuts, about |
+| `batchrename.py` | ~250  | Batch rename dialog and `apply_renames` |
+| `largefiles.py` | ~610  | Find large files: `scan_large_files` (iterative scandir walk, frame-sequence grouping, one filesystem), `find_duplicates`, `cleanup_kind`, `LargeFilesWindow` |
+| `icons_theme.py` | ~310  | Built-in icon set (`_SR_ICONS` SVGs, `sr_icon_kind`, `sr_icon_pixbuf`), colour scheme (`theme_variant`, `apply_theme_mode`), first-start `WelcomeDialog` |
+| `reportdialog.py` | ~90   | `ReportDialog` (review / edit / send a report), `open_report` |
+| `widgets.py` | ~850  | custom widgets: `FitImage`, row hover, soft grid lines, virtualised `IconGrid`, This PC tile view (`PCView`, `DriveBar`) |
+| `preview_3d_video.py` | ~1400 | 3D preview: `load_model` + `_finish_model_numpy` (triangulation, decimation, normals), software rasteriser (`_rasterize`, `software_render`) and its `RenderWorker` process, `ModelView` (cairo) and `GLModelView` (OpenGL, rendered offscreen through `GLOffscreen` and painted with cairo), GStreamer `VideoPreview` |
+| `scenes.py` | ~2050 | scene breakdowns: `UEPackage` (Unreal package summary / names / imports / exports), Unity YAML + `.meta` GUID index, Maya ASCII statements + IFF (`FOR4`/`FOR8`) chunks, `BlendFile` (blocks + SDNA, gzip/zstd), `scene_breakdown`, `breakdown_text` |
+| `shaders.py` | ~1500 | shader / material / IES previews: `render_material_ball` (numpy GGX), readers for MaterialX, OSL/OSO, GLSL/HLSL, Unity `.mat`/`.shader`/`.shadergraph`, `IESProfile` + `ies_preview`, `shader_preview`, `material_ball_for`; live GLSL: `GLSLRunner` (no GTK) and `GLSLView` (rendered offscreen through `GLOffscreen`) |
+| `sceneobjects.py` | ~550 | scene object & texture previews: Blender meshes (MVert/MPoly/MLoop, 3.5+ attribute layers, 5.x `AttributeStorage`) with object matrices, Maya ASCII meshes (`.vt/.ed/.fc`) and history primitives (`polyCube`, `polySphere`…, through deformers and `polyUnite`), `scene_object_model`, `scene_tile_path` |
+| `importers.py` | ~1300 | built-in VDB reader, Houdini / Maya bridges, 3D importers for FBX / USD / Alembic (HDF5 via h5py), Blender and assimp bridges, `optional_deps`, `install_script`, `preview_tool_report`, GL status |
+| `folderview.py`  | ~1050 | `IconCache` (icons + thumbnails), `NavNode`, `FolderView` (one folder tab: listing, search, selection, drag-and-drop, views), `Page` (one or two `FolderView`s for split view) |
+| `mainwindow.py`  | ~3000 | `MainWindow`: menus/command bar, navigation pane, tabs, address bar, side pane (preview + details), preview routing and crossfades, cache-sequence player, drive watching, status bar and spinner, window state |
+| `mainwindow_actions.py`  | ~1400 | `MainWindow` continued: context menus, actions (zip, extract, RV, checksum, run script, batch rename…), index scheduling, `ExplorerApp` (Gtk.Application), `probe_gl`, `main()` and all command-line flags |
 
 Keep this order when adding a part; `build.sh` holds the list.
 
@@ -47,7 +48,7 @@ reports back with `GLib.idle_add`, carrying a *generation counter* so stale resu
 | video | GStreamer, every call on `VideoPreview._ops` thread | never query/seek the pipeline from the GTK thread (that was a 4 s freeze) |
 | path existence (`PathCache`) | thread with cached answers | nav pane never stats a dead mount on the GTK thread |
 | drive changes | `Gio.VolumeMonitor` signals | no polling |
-| index crawl | one low-priority thread | debounced saves |
+| index load, crawl, save | the index helper process (`_index_serve`), reached through `IndexClient` | debounced saves; the application only exchanges small messages with it |
 
 CPU parking (`Preferences → Optional → Performance`): `os.sched_setaffinity` pins the UI thread to
 the first N cores and every worker thread/process to the rest; `sys.setswitchinterval(0.002)` keeps
@@ -89,6 +90,11 @@ texture + depth, each voxel splatted as its exact pixel footprint (box filter) i
 with additive blending, depth-tested against the opaque scene — then one full-screen pass applies the
 same `1 − exp(−k·Σdensity)` smoke curve. Exposure is measured once per model (read back from the
 first frame) so orbiting and sequence playback don't pump. `GLScene` has no GTK dependency.
+Neither GL view is a `Gtk.GLArea`: a GLArea makes GDK create a GL paint context for the whole toplevel, after which
+every frame of the window is composited through GL for the rest of its life (resizing went from about 6 ms to
+about 25 ms a frame). `GLOffscreen` owns a context on a hidden window (`gl_host_window`), renders into a
+framebuffer, reads the frame back and hands it to cairo; a frame is rendered again only when the camera, the
+model or the size changes.
 Two or more selected caches show a *Preview as sequence* button; pressing it starts the sequence
 player (`MainWindow._load_model_sequence`) for that selection: frames
 decode in `seq_pool()` worker processes, all with the first frame's `norm` (box, density scale,
@@ -98,7 +104,7 @@ triangles" overrides), decimates by vertex clustering. Software rendering runs i
 (z-buffer, Gouraud, sub-pixel splat lane). `GLModelView` negotiates a context across GL/GLES
 versions (`gl_try_contexts`) and renders white-shaded.
 
-## Scene breakdowns (`p3e.py`)
+## Scene breakdowns (`scenes.py`)
 
 `scene_breakdown(path)` runs in the `run_heavy` worker and returns `{kind, info, tree, notes}`; tree nodes are
 `[label, detail, children, path, exists]`, shown by the side pane's `breakdown` page (a filtered `TreeStore`).
@@ -138,7 +144,7 @@ matrices for every object in the sample files.
 Blender 5 writes per-ID "stable" addresses that can repeat across data-blocks, so `BlendFile.read_data(ptr,
 owner)` resolves a pointer to the copy written after the owning ID.
 
-## Shader, material and IES previews (`p3f.py`)
+## Shader, material and IES previews (`shaders.py`)
 
 `shader_preview(path)` returns the breakdown shape plus `code` (`(text, language)`) and `glsl` (`{source,
 style}`) and is shown on the same `breakdown` page: a picture on top (ball / light pattern / `GLSLView`), the tree
@@ -151,7 +157,7 @@ uniforms and a `main()` that calls `mainImage`; glslsandbox sources get `gl_Frag
 `#line` directive (0 for GLSL < 3.30, 1 otherwise) keeps compile errors on the user's line numbers. The view
 animates through a tick callback only while mapped and while the window is active.
 
-## Encrypted index (`p1d.py`)
+## Encrypted index (`fileindex.py`)
 
 - Storage: `~/.cache/shotrover/index.enc` = AES-256-CBC via `openssl enc -pbkdf2` (key over an fd,
   never argv) + HMAC-SHA256, encrypt-then-MAC. Key in the keyring through `secret-tool`, else a
@@ -162,7 +168,7 @@ animates through a tick callback only while mapped and while the window is activ
   every visit; `update_dir` refreshes the index from what was read. Search merges index hits and
   live results with deduplication. The index can be wiped from Preferences at any time.
 
-## Diagnostics (`p1c.py`)
+## Diagnostics (`diagnostics.py`)
 
 `StallWatchdog` heartbeats the main loop from a thread; a gap > 120 ms is logged with the UI
 thread's Python stack, > 4 s dumps every thread (`faulthandler`) to `~/.cache/shotrover/freeze-*.txt`.
@@ -170,13 +176,13 @@ thread's Python stack, > 4 s dumps every thread (`faulthandler`) to `~/.cache/sh
 the main loop in cProfile. `StressDriver` drives the real window (navigate, select, preview,
 rename, zip, undo) and reports stalls per step; `--nav-bench` visits every subfolder of a path.
 
-## Crash and error reports (`p1e.py`, `p2c.py`)
+## Crash and error reports (`crashreport.py`, `reportdialog.py`)
 
 | Trouble | How it is caught | What the user sees |
 |---|---|---|
 | unhandled Python exception (GTK callback, worker thread) | `sys.excepthook`, `threading.excepthook` | error bar in the active window, once per distinct failure site |
 | hard crash (segfault, abort, fatal signal) | `faulthandler` writes every thread's stack to `reports/fault-<pid>.txt`; `reports/session-<pid>.json` exists while the process runs and is removed on a clean quit | at the next start, a bar: "Shotrover crashed…" |
-| freeze > 4 s | `StallWatchdog.dump_freeze` (p1c) | bar when the interface recovers; if the user killed it, at the next start |
+| freeze > 4 s | `StallWatchdog.dump_freeze` (diagnostics.py) | bar when the interface recovers; if the user killed it, at the next start |
 | process killed (OOM, SIGKILL, power loss) | stale session marker without a fault trace | recorded as `ended`, not prompted (nothing to diagnose) |
 
 SIGTERM, SIGHUP and SIGINT quit the application cleanly (`GLib.unix_signal_add`) so a logout isn't
@@ -188,9 +194,9 @@ traceback / stacks, watchdog stalls this session and the last 40 `bench()` event
 `CrashReporter.sanitize` replaces `$HOME` with `~` and the user name with `<user>`. Reporting is
 always user-initiated: *Report on GitHub…* opens a new issue in the browser with title and body
 pre-filled (truncated at 6000 characters to fit the URL; *Copy* has the full text). The issue URL
-is `REPORT_ISSUES_URL` at the top of `p1e.py`.
+is `REPORT_ISSUES_URL` at the top of `crashreport.py`.
 
 ## Configuration
 
-`~/.config/shotrover/config.json`, keys in `DEFAULT_CONFIG` (p1). Saved on every change; sizes
+`~/.config/shotrover/config.json`, keys in `DEFAULT_CONFIG` (core.py). Saved on every change; sizes
 (`nav_width`, `preview_width`, `side_width`, `side_split`, `window`) saved on close.

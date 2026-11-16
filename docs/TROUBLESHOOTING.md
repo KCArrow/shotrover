@@ -17,6 +17,14 @@ diagnostics report you can copy. **Tools → Performance report…** shows stall
   PATH; log out/in or `export PATH="$HOME/.local/bin:$PATH"`.
 - Wrong Python picked up → run `python3 shotrover.py` explicitly; Python 3.9+ is required.
 
+**"Use GTK 4" is ticked and something is wrong at startup** (Preferences → Optional). The GTK 4 interface
+is experimental. If it crashes or fails while starting, Shotrover opens on GTK 3 by itself, tells you, and
+unticks the setting. If it starts but misbehaves, start once on GTK 3 and untick it:
+
+```bash
+SHOTROVER_GTK=3 shotrover
+```
+
 ## Video / audio preview
 
 - *GStreamer: missing* → install the GStreamer GI bindings and plugins:

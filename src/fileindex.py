@@ -145,12 +145,33 @@ class FileIndex:
                 raise ValueError("index authentication failed (wrong key or tampered file) — it will be rebuilt")
             import zlib
             raw = zlib.decompress(_openssl(["-d"], body, k))
-            obj = json.loads(raw.decode("utf-8"))
+            # The index is read and written one folder at a time. Parsing it as a single JSON document (the
+            # first format) is one C call that keeps the interpreter lock for its whole length: with 100,000
+            # folders the window did not react for a second and a half, shortly after every start and again
+            # after each save. A loop of small steps lets the interface thread in between them.
+            nl = raw.find(b"\n")
+            if nl < 0:                               # first format: one document. Read it once more, rewrite it
+                obj = json.loads(raw.decode("utf-8"))
+                data = {d: (m, [tuple(x) for x in ents]) for d, (m, ents) in obj["dirs"].items()}
+                finished, old_format = obj.get("finished", 0.0), True
+            else:
+                finished, old_format = json.loads(raw[:nl]).get("finished", 0.0), False
+                data, pos, end = {}, nl + 1, len(raw)
+                while pos < end:
+                    nl = raw.find(b"\n", pos)
+                    if nl < 0:
+                        nl = end
+                    if nl > pos:
+                        d, m, ents = json.loads(raw[pos:nl])
+                        data[d] = (m, [tuple(x) for x in ents])
+                    pos = nl + 1
             with self.lock:
-                self.data = {d: (m, [tuple(x) for x in ents]) for d, (m, ents) in obj["dirs"].items()}
+                self.data = data
                 self._flat = None
-            self.progress["finished"] = obj.get("finished", 0.0)
+            self.progress["finished"] = finished
             self.loaded = True
+            if old_format:
+                self.save()
             return True
         except Exception as ex:
             self.last_error = str(ex)
@@ -164,8 +185,15 @@ class FileIndex:
         try:
             import zlib
             with self.lock:
-                obj = {"version": 1, "finished": self.progress["finished"], "dirs": {d: [m, ents] for d, (m, ents) in self.data.items()}}
-            raw = zlib.compress(json.dumps(obj, separators=(",", ":")).encode("utf-8"), 6)
+                items = list(self.data.items())
+            # one line per folder, compressed a few hundred folders at a time: see load() for why
+            co = zlib.compressobj(6)
+            parts = [co.compress((json.dumps({"version": 2, "finished": self.progress["finished"]}) + "\n").encode("utf-8"))]
+            for i in range(0, len(items), 400):
+                chunk = "".join(json.dumps([d, m, ents], separators=(",", ":")) + "\n" for d, (m, ents) in items[i:i + 400])
+                parts.append(co.compress(chunk.encode("utf-8")))
+            parts.append(co.flush())
+            raw = b"".join(parts)
             body = _openssl([], raw, k)
             blob = self.MAGIC + _mac(k, body) + body
             os.makedirs(os.path.dirname(INDEX_FILE), exist_ok=True)
@@ -203,8 +231,11 @@ class FileIndex:
             mt = os.stat(path).st_mtime
         except OSError:
             return
+        self.put_dir(path, mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries])
+
+    def put_dir(self, path: str, mtime: float, rows: list):
         with self.lock:
-            self.data[path.rstrip("/") or "/"] = (mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries])
+            self.data[path.rstrip("/") or "/"] = (mtime, rows)
             self._flat = None
             self.dirty = True
         self._schedule_save()
@@ -325,20 +356,222 @@ class FileIndex:
                         self.save()
                         last_save = time.time()
                         if self.on_status:
-                            GLib.idle_add(lambda: (self.on_status(), False)[1])
+                            self.on_status()
             self.progress["finished"] = time.time()
             self.progress["current"] = ""
             self.save()
             self.crawling = False
             if self.on_status:
-                GLib.idle_add(lambda: (self.on_status(), False)[1])
+                self.on_status()             # called on this thread: the caller takes it where it wants it
         threading.Thread(target=work, daemon=True, name="shotrover-indexer").start()
 
     def stop(self):
         self.cancel.set()
 
 
-INDEX = FileIndex()
+def _index_serve(conn, other, parent: int, key: Optional[bytes]):
+    """The index helper process: it owns the FileIndex and answers IndexClient until the pipe closes or the
+    application is gone. Loading, crawling and saving run in threads of this process, where they can keep
+    its interpreter lock as long as they like."""
+    try:
+        other.close()                        # the application's end; open here it would hide its closing
+    except Exception:
+        pass
+    pin_worker()
+    idx = FileIndex()
+    idx._k = key
+    slock = threading.Lock()
+
+    def send(msg):
+        with slock:
+            try:
+                conn.send(msg)
+            except (OSError, ValueError):
+                os._exit(0)
+
+    def state(notify: bool = False):
+        send(("s", {"loaded": idx.loaded, "crawling": idx.crawling, "progress": dict(idx.progress),
+                    "last_error": idx.last_error}, notify))
+
+    def load(rid):
+        ok = idx.load()
+        state()
+        send(("r", rid, ok))
+    idx.on_status = lambda: state(True)
+    was = False
+    while True:
+        try:
+            if not conn.poll(0.5):
+                if os.getppid() != parent:
+                    os._exit(0)
+                if idx.crawling or was:
+                    state()
+                was = idx.crawling
+                continue
+            rid, op, args = conn.recv()
+        except (EOFError, OSError):
+            os._exit(0)
+        res = None
+        try:
+            if op == "load":
+                threading.Thread(target=load, args=(rid,), daemon=True).start()
+                continue
+            if op == "lookup":
+                res = idx.lookup(*args)
+            elif op == "search":
+                res = idx.search(*args)
+            elif op == "put":
+                idx.put_dir(*args)
+            elif op == "stats":
+                res = idx.stats()
+            elif op == "crawl":
+                idx.crawl(*args)
+                state()
+            elif op == "stop":
+                idx.stop()
+            elif op == "wipe":
+                idx.wipe()
+                state()
+        except Exception as ex:
+            idx.last_error = f"{op}: {ex}"
+        if rid:
+            send(("r", rid, res))
+
+
+class IndexClient:
+    """The file index as the application sees it. The index itself (FileIndex) lives in a helper process.
+
+    Reading a big index is a long Python loop, and so is walking the disk to refresh it. In a thread of
+    this process each of them took the interpreter lock back faster than the GTK thread could get hold of
+    it: the window stuttered badly for the first seconds after every start, and for as long as a crawl
+    ran. Here only small messages cross a pipe. `loaded`, `crawling` and `progress` are kept up to date by
+    the helper; a question it does not answer in time counts as "not in the index"."""
+
+    def __init__(self, key: Optional[bytes] = None):
+        self.loaded = False
+        self.crawling = False
+        self.progress = {"dirs": 0, "files": 0, "current": "", "started": 0.0, "finished": 0.0}
+        self.last_error = ""
+        self.on_status: Optional[Callable] = None
+        self._key = key                      # tests only: otherwise the helper fetches the key itself
+        self._proc = None
+        self._conn = None
+        self._lock = threading.Lock()
+        self._wait: Dict[int, list] = {}     # request number → [Event, answer]
+        self._n = 0
+
+    def _start(self) -> bool:
+        with self._lock:
+            if self._proc is not None and self._proc.is_alive():
+                return True
+            try:
+                import multiprocessing
+                ctx = multiprocessing.get_context("fork")
+                mine, theirs = ctx.Pipe()
+                proc = ctx.Process(target=_index_serve, args=(theirs, mine, os.getpid(), self._key), daemon=True, name="shotrover-index")
+                proc.start()
+                theirs.close()
+            except Exception as ex:
+                self.last_error = f"index helper: {ex}"
+                return False
+            self._proc, self._conn = proc, mine
+            threading.Thread(target=self._read, args=(mine,), daemon=True, name="shotrover-index-reader").start()
+            return True
+
+    def _read(self, conn):
+        """Everything the helper sends: answers, and news about its state."""
+        while True:
+            try:
+                msg = conn.recv()
+            except (EOFError, OSError, ValueError):
+                break
+            if msg[0] == "r":
+                w = self._wait.pop(msg[1], None)
+                if w is not None:
+                    w[1] = msg[2]
+                    w[0].set()
+            elif msg[0] == "s":
+                st = msg[1]
+                self.progress.update(st["progress"])
+                self.last_error = st["last_error"]
+                self.loaded, self.crawling = st["loaded"], st["crawling"]
+                cb = self.on_status
+                if msg[2] and cb is not None:
+                    GLib.idle_add(lambda cb=cb: (cb(), False)[1])
+        if conn is self._conn:               # the helper is gone: the next load() starts another
+            self.loaded = self.crawling = False
+        for w in list(self._wait.values()):
+            w[0].set()
+
+    def _call(self, op: str, *args, timeout: Optional[float] = None, reply: bool = True):
+        conn = self._conn
+        if conn is None:
+            return None
+        w = None
+        with self._lock:
+            rid = 0
+            if reply:
+                self._n += 1
+                rid = self._n
+                w = self._wait[rid] = [threading.Event(), None]
+            try:
+                conn.send((rid, op, args))
+            except (OSError, ValueError):
+                self._wait.pop(rid, None)
+                return None
+        if w is None:
+            return None
+        w[0].wait(timeout)
+        self._wait.pop(rid, None)
+        return w[1]
+
+    def load(self) -> bool:
+        """Blocks until the helper has read the index: call it from a worker thread."""
+        if not self._start():
+            return False
+        return bool(self._call("load"))
+
+    def lookup(self, path: str) -> Optional[list]:
+        return self._call("lookup", path, timeout=0.1)
+
+    def search(self, pattern: str, root: Optional[str] = None, limit: int = 5000) -> list:
+        return self._call("search", pattern, root, limit, timeout=3.0) or []
+
+    def update_dir(self, path: str, entries: List["Entry"]):
+        try:
+            mt = os.stat(path).st_mtime
+        except OSError:
+            return
+        self._call("put", path, mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries], reply=False)
+
+    def stats(self) -> dict:
+        return self._call("stats", timeout=1.0) or {"dirs": 0, "files": 0, "size": 0, "finished": self.progress["finished"], "key": "—",
+                                                    "crawling": self.crawling, "error": self.last_error}
+
+    def crawl(self, roots: List[str], include_network: bool, include_hidden: bool, full: bool = False):
+        if self.crawling or self._conn is None:
+            return
+        self.crawling = True
+        self._call("crawl", roots, include_network, include_hidden, full, reply=False)
+
+    def stop(self):
+        self._call("stop", reply=False)
+
+    def wipe(self):
+        self._call("wipe", timeout=30.0)
+
+    def close(self):
+        """Quit: end the helper at once (a crawl in it is simply dropped; the last save is on disk)."""
+        proc, self._proc, self._conn = self._proc, None, None
+        self.loaded = self.crawling = False
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+INDEX = IndexClient()
 
 
 def index_entries_for(path: str, rows: list) -> List["Entry"]:

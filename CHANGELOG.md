@@ -1,5 +1,53 @@
 # Changelog
 
+## 1.2.0 — 2026-11-15
+
+- Fixed: with the file index switched on, the window stuttered badly for the first seconds after every start
+  (while the index was read) and for as long as the index was being refreshed. The index now lives in a helper
+  process of its own, so reading it and walking the disk no longer hold up the interface.
+- GTK 4 interface: the Details and Content layouts are now built on GTK 4's own list (`Gtk.ColumnView`) instead
+  of the old tree view, which redrew every visible cell from scratch on every frame. Resizing the window in
+  those layouts costs roughly half as much per frame or less. Column widths now survive a folder change. The
+  GTK 3 interface is unchanged.
+- Resizing the window in the Details layout is a little cheaper: filling in the visible rows no longer sets
+  colours and backgrounds that have not changed.
+- Fixed (GTK 4 interface): dragging the divider between the preview and the details, or resizing the window,
+  was slow while a video was shown, a 4K clip most of all, because the whole frame was rescaled at every step.
+  A copy scaled to the pane is now kept, which also makes playback of large clips cheaper to draw.
+- The accelerated 3D preview no longer renders the scene at every step of a pane or window resize when a
+  render is slow: the last picture is stretched and the scene is rendered once the size settles.
+- Fixed: selecting a large folder, a network share most of all, could freeze the window for seconds while its
+  size and contents were being counted. The count now runs in a helper process, and background jobs started
+  by a selection reuse existing threads instead of starting new ones.
+- Fixed: the window could stop reacting for a second or two when the navigation pane refreshed its Quick access
+  and Recent lists while previews or thumbnails were loading. It started one thread per listed path, a couple
+  of hundred at once; a few long-lived workers now do the same checks.
+- Fixed: with the file index switched on, the window stopped reacting for a second or more shortly after it
+  opened, and again about 20 seconds after visiting a folder, while a large index was read or written. The
+  index file is now read and written one folder at a time. An existing index is converted the first time it
+  is loaded; Shotrover 1.1.2 and earlier cannot read the new file and would rebuild it.
+- The error report bar has a "Dismiss all" button when more than one report is waiting, so they need not be
+  reviewed one by one.
+- Preferences → Optional: every missing add-on is now looked up in your distribution's repositories, and one
+  that has no package there reads "not available" instead of staying "missing" after a failed install.
+  Before, only OpenVDB was checked.
+- Experimental: Preferences → Optional → "Use GTK 4" runs the interface on GTK 4 instead of GTK 3, for smoother
+  window resizing. It applies after a restart and is off by default. If the GTK 4 interface crashes or fails
+  while starting, Shotrover opens on GTK 3 instead, says so, and switches the setting off. `SHOTROVER_GTK=3`
+  (or `=4`) on the command line overrides the setting for one run.
+- About shows the GTK version in use.
+- Fixed: Cut then Paste copied the files and left the originals behind. It now moves them, shows progress, and
+  can be undone.
+- Fixed: in Quick access and search results, a long name or location in an icon layout could run into the
+  row below.
+- Fixed: selecting several files from code (after a batch rename, for instance) kept only the first in the
+  details layout.
+- Fixed: after the first hardware-accelerated 3D preview (or live shader preview), resizing the window became about four times slower and stayed that way until the window was closed. The 3D and shader views are now drawn offscreen and shown as a picture, so the rest of the window is unaffected.
+- Resizing the window is smoother, most of all in the icon layouts: file names are no longer re-wrapped and icons no longer re-converted on every frame, and the list layouts draw their column lines in far fewer steps.
+- Fixed: the preview pane showed coloured garbage for a moment when a window opened. It took the picture it fades from before the window had been painted.
+- The preview pane opens on "Select a file to preview" straight away, instead of switching to it a moment after the window appears.
+- `shotrover.py` says at the top that it is generated from the parts in `src/` by `build.sh`.
+
 ## 1.1.2 — 2026-11-12
 
 - Quick look: press Space on a file to open its preview in a window of its own, with every previewer the preview pane has (images, 3D, text, PDF, video, scene breakdowns). The arrow keys move to the next or previous file; Space or Esc closes it. It works with the preview pane hidden, and is also in the Home and right-click menus.

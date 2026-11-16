@@ -830,13 +830,13 @@ class ModelNav:
         self.thin = False
         self.drag = None            # (x, y, mode) mode: orbit | pan | zoom
         self.set_can_focus(True)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
-                        Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.KEY_PRESS_MASK)
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", lambda w, e: (setattr(self, "drag", None), self.queue_draw()) and False)
-        self.connect("motion-notify-event", self._motion)
-        self.connect("scroll-event", self._scroll)
-        self.connect("key-press-event", self._key)
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
+                        EVMASK.POINTER_MOTION_MASK | EVMASK.SCROLL_MASK | EVMASK.KEY_PRESS_MASK)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", lambda w, e: (setattr(self, "drag", None), self.queue_draw()) and False)
+        on_event(self, "motion-notify-event", self._motion)
+        on_event(self, "scroll-event", self._scroll)
+        on_event(self, "key-press-event", self._key)
 
     def _reset_view(self):
         self.yaw, self.pitch, self.zoom = 0.6, 0.35, 1.0
@@ -845,13 +845,13 @@ class ModelNav:
     def _press(self, w, event):
         """Maya-style navigation: LMB (or Alt+LMB) orbit, MMB (or Alt+MMB) pan, Alt+RMB zoom-drag."""
         self.grab_focus()
-        if event.type == Gdk.EventType._2BUTTON_PRESS and event.button == 1:
+        if event.type == EV_PRESS2 and event.button == 1:
             self._reset_view()
             self.queue_draw()
             return True
-        if event.type != Gdk.EventType.BUTTON_PRESS:
+        if event.type != EV_PRESS:
             return True
-        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        alt = bool(event.state & ALT_MASK)
         if event.button == 2:
             mode = "pan"
         elif event.button == 3 and alt:
@@ -918,7 +918,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
         self._want = None
         self.on_first_frame = None       # one-shot: the window fades the pane in when the first frame lands
         self._V = self._F = self._N = self._VN = None
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
         # (the render process is shared and lives for the whole session; nothing to tear down per view)
 
     def set_model(self, model: Optional[dict], keep_view: bool = False):
@@ -951,7 +951,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
         Until the new frame lands the previous one stays on screen, so orbiting is never blocked."""
         a = self.get_allocation()
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.04)
         cr.rectangle(0, 0, a.width, a.height)
         cr.fill()
@@ -983,7 +983,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
 
     def _params(self, w: int, h: int):
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         return (w, h, round(self.yaw, 4), round(self.pitch, 4), round(self.zoom, 4),
                 round(self.pan[0]), round(self.pan[1]), self.smooth, self.wire,
                 self._bg_rgb(fg), (fg.red, fg.green, fg.blue))
@@ -1544,28 +1544,153 @@ class GLScene:
         return 2.5 / max(ref, 1e-6)
 
 
-class GLModelView(ModelNav, Gtk.GLArea):
+_GL_HOST = None
+
+
+def gl_host_window():
+    """A toplevel GdkWindow that is never shown and exists only to own the 3D preview's GL contexts.
+
+    A Gtk.GLArea makes GDK create a GL paint context for the toplevel it sits in, and from then on EVERY frame
+    of that window is composited through GL: resizing the main window went from about 6 ms to about 25 ms a
+    frame after the first 3D preview, and stayed there even after the GLArea was destroyed. Contexts made on
+    this window leave the real windows on the plain (cairo) paint path."""
+    global _GL_HOST
+    if _GL_HOST is None and GTK4:
+        _GL_HOST = Gdk.Surface.new_toplevel(Gdk.Display.get_default())
+    if _GL_HOST is None:
+        attr = Gdk.WindowAttr()
+        attr.window_type = Gdk.WindowType.TOPLEVEL
+        attr.wclass = Gdk.WindowWindowClass.INPUT_OUTPUT
+        attr.width = attr.height = 16
+        _GL_HOST = Gdk.Window.new(None, attr, 0)
+    return _GL_HOST
+
+
+class GLOffscreen:
+    """A GL context on the hidden host window, a colour + depth framebuffer the size of a widget, and
+    read-back of the finished frame as a cairo surface. Used by GLModelView and GLSLView."""
+
+    def __init__(self):
+        self.log: list = []
+        self.ctx, self.flavour = gl_try_contexts(gl_host_window(), self.log)     # best flavour the driver gives
+        if self.ctx is None:
+            raise RuntimeError(" | ".join(self.log) + "   (run: python3 shotrover.py --probe-gl)")
+        self.fbo = self.tex = self.rb = None
+        self.size = (0, 0)
+        self.buf = None                       # pixel memory of the last surface handed out
+        self.ctx.make_current()
+
+    def make_current(self):
+        self.ctx.make_current()
+
+    def info(self) -> str:
+        ver = self.ctx.get_version()
+        text = f"GL {ver[0]}.{ver[1]}" + (" ES" if self.ctx.get_use_es() else "")
+        try:
+            text += " — " + _GL.glGetString(_GL.GL_RENDERER).decode(errors="replace")
+        except Exception:
+            pass
+        return text + f" [{self.flavour}]"
+
+    def _free_target(self):
+        try:
+            if self.fbo:
+                _GL.glDeleteFramebuffers(1, [self.fbo])
+            if self.tex:
+                _GL.glDeleteTextures(1, [self.tex])
+            if self.rb:
+                _GL.glDeleteRenderbuffers(1, [self.rb])
+        except Exception:
+            pass
+        self.fbo = self.tex = self.rb = None
+        self.size = (0, 0)
+
+    def free(self):
+        try:
+            self.ctx.make_current()
+            self._free_target()
+            Gdk.GLContext.clear_current()
+        except Exception:
+            pass
+        self.buf = None
+
+    def target(self, W: int, H: int) -> int:
+        """The framebuffer to finish a W×H frame in."""
+        if self.fbo and self.size == (W, H):
+            return self.fbo
+        self._free_target()
+        self.tex = _GL.glGenTextures(1)
+        _GL.glBindTexture(_GL.GL_TEXTURE_2D, self.tex)
+        _GL.glTexParameteri(_GL.GL_TEXTURE_2D, _GL.GL_TEXTURE_MIN_FILTER, _GL.GL_NEAREST)
+        _GL.glTexParameteri(_GL.GL_TEXTURE_2D, _GL.GL_TEXTURE_MAG_FILTER, _GL.GL_NEAREST)
+        _GL.glTexImage2D(_GL.GL_TEXTURE_2D, 0, _GL.GL_RGBA8, W, H, 0, _GL.GL_RGBA, _GL.GL_UNSIGNED_BYTE, None)
+        _GL.glBindTexture(_GL.GL_TEXTURE_2D, 0)
+        self.rb = _GL.glGenRenderbuffers(1)
+        _GL.glBindRenderbuffer(_GL.GL_RENDERBUFFER, self.rb)
+        _GL.glRenderbufferStorage(_GL.GL_RENDERBUFFER, _GL.GL_DEPTH_COMPONENT24, W, H)
+        self.fbo = _GL.glGenFramebuffers(1)
+        _GL.glBindFramebuffer(_GL.GL_FRAMEBUFFER, self.fbo)
+        _GL.glFramebufferTexture2D(_GL.GL_FRAMEBUFFER, _GL.GL_COLOR_ATTACHMENT0, _GL.GL_TEXTURE_2D, self.tex, 0)
+        _GL.glFramebufferRenderbuffer(_GL.GL_FRAMEBUFFER, _GL.GL_DEPTH_ATTACHMENT, _GL.GL_RENDERBUFFER, self.rb)
+        if _GL.glCheckFramebufferStatus(_GL.GL_FRAMEBUFFER) != _GL.GL_FRAMEBUFFER_COMPLETE:
+            raise RuntimeError("offscreen render target not supported")
+        self.size = (W, H)
+        return self.fbo
+
+    def read(self, lw: int, lh: int):
+        """The frame in the target as a cairo surface lw×lh logical pixels in size. cairo's RGB24 is B, G, R, x
+        in memory with its first row at the top; GL hands rows bottom-up."""
+        import cairo
+        W, H = self.size
+        _GL.glBindFramebuffer(_GL.GL_FRAMEBUFFER, self.fbo)
+        _GL.glReadBuffer(_GL.GL_COLOR_ATTACHMENT0)
+        _GL.glPixelStorei(_GL.GL_PACK_ALIGNMENT, 4)
+        es = self.ctx.get_use_es()                    # GLES only promises RGBA read-back
+        raw = _GL.glReadPixels(0, 0, W, H, _GL.GL_RGBA if es else _GL.GL_BGRA, _GL.GL_UNSIGNED_BYTE)
+        px = np.frombuffer(raw, dtype=np.uint8) if isinstance(raw, (bytes, bytearray)) else np.asarray(raw, dtype=np.uint8)
+        px = px.reshape(H, W, 4)[::-1]
+        if es:
+            px = px[:, :, [2, 1, 0, 3]]
+        # Always a fresh copy: cairo needs writable memory and read-back bytes are read-only. ascontiguousarray
+        # is not enough: for a frame one row high the flipped view already counts as contiguous, so nothing was
+        # copied and cairo refused it ("underlying buffer is not writable") on the widget's first 1-pixel draw.
+        self.buf = np.array(px, dtype=np.uint8, order="C", copy=True)
+        surf = cairo.ImageSurface.create_for_data(memoryview(self.buf), cairo.FORMAT_RGB24, W, H, W * 4)
+        surf.set_device_scale(W / float(lw), H / float(lh))
+        return surf
+
+
+class GLModelView(ModelNav, Gtk.DrawingArea):
     """Hardware-accelerated previewer: geometry is uploaded to the GPU once and every frame is a few draw
     calls, so a 5M-triangle mesh or a million-voxel volume orbits at the display's refresh rate. Same camera
     maths as the software path (yaw → pitch → distance 2.6, pan in pixels), same shading, same keys.
-    Drawing lives in GLScene."""
+    Drawing lives in GLScene.
+
+    The scene is rendered into an offscreen framebuffer with a context of its own (see gl_host_window), read
+    back and painted with cairo like any picture; it is rendered again only when the camera, the model or
+    the size changes. While only the size is changing (a pane divider or the window being dragged) and a
+    render costs more than a few milliseconds, the last picture is stretched instead and the scene is
+    rendered once the size has settled: a heavy cache no longer makes every step of the drag slow."""
 
     def __init__(self):
         super().__init__()
         self._nav_init()
-        self.set_has_depth_buffer(True)
-        self.set_auto_render(True)
-        self.gl_flavour = ""
-        self.connect("create-context", self._create_context)
+        self.gl: Optional[GLOffscreen] = None
         self.scene: Optional[GLScene] = None
         self._dirty = False
+        self._stale = True                    # the picture no longer matches the camera / model
+        self._frame = None                    # cairo surface of the last rendered frame
+        self._frame_lsize = (1, 1)            # its size in logical pixels
+        self._cost = 0.0                      # seconds the last render took, read-back included
+        self._settle = None                   # timer: render at the new size once it stops changing
+        self._settled = False
         self.gl_info = ""
         self.gl_error: Optional[str] = None
         self.on_error = None                  # callable(msg) set by the window: shown in the UI, triggers fallback
         self.on_cache_failed = None           # callable(model, msg): particles/volumes failed, use software for them
         self.connect("realize", self._on_realize)
         self.connect("unrealize", self._on_unrealize)
-        self.connect("render", self._on_render)
+        on_draw(self, self._on_draw)
 
     def _fail(self, where: str, ex) -> None:
         """Record the first OpenGL failure (later ones are noise), log it, and tell the window."""
@@ -1578,44 +1703,37 @@ class GLModelView(ModelNav, Gtk.GLArea):
         if self.on_error:
             GLib.idle_add(lambda: (self.on_error(msg), False)[1])
 
-    def _create_context(self, area):
-        """GLArea asks us for a context: negotiate the best flavour the driver/compositor will give us."""
-        log: list = []
-        ctx, label = gl_try_contexts(self.get_window(), log)
-        if ctx is None:
-            self._fail("context", " | ".join(log) + "   (run: python3 shotrover.py --probe-gl)")
-            return None
-        self.gl_flavour = label
-        return ctx
-
     # ---- lifecycle
     def _on_realize(self, w):
         try:
-            self.make_current()
-            err = self.get_error()
-            if err is not None:
-                if not self.gl_error:
-                    self._fail("context", err.message if hasattr(err, "message") else err)
-                return
-            ctx = self.get_context()
-            ver = ctx.get_version() if ctx else (0, 0)
-            self.gl_info = f"GL {ver[0]}.{ver[1]}" + (" ES" if ctx and ctx.get_use_es() else "")
             try:
-                self.gl_info += " — " + _GL.glGetString(_GL.GL_RENDERER).decode(errors="replace")
-            except Exception:
-                pass
-            self.gl_info += f" [{self.gl_flavour}]"
-            self.scene = GLScene(_gl_header(ctx))
+                self.gl = GLOffscreen()
+            except Exception as ex:
+                self._fail("context", ex)
+                return
+            self.gl_info = self.gl.info()
+            self.scene = GLScene(_gl_header(self.gl.ctx))
             self._dirty = self.model is not None
+            self._stale = True
             GL_STATUS[:] = [f"OpenGL OK: {self.gl_info}"]
         except Exception as ex:
             self._fail("init", ex)
 
     def _on_unrealize(self, w):
-        self.make_current()
-        if self.scene:
-            self.scene.free()
+        if self.gl is not None:
+            try:
+                self.gl.make_current()
+                if self.scene:
+                    self.scene.free()
+            except Exception:
+                pass
+            self.gl.free()
         self.scene = None
+        self.gl = None
+        self._frame = None
+        if self._settle is not None:
+            GLib.source_remove(self._settle)
+            self._settle = None
 
     def set_model(self, model: Optional[dict], keep_view: bool = False):
         """keep_view: next frame of a sequence — same camera, same smoke exposure (no brightness pumping)."""
@@ -1623,10 +1741,11 @@ class GLModelView(ModelNav, Gtk.GLArea):
         if not keep_view:
             self._reset_view()
         self._dirty = "keep" if keep_view else True
-        self.queue_render()
+        self.queue_draw()
 
-    def queue_draw(self):             # ModelNav calls queue_draw(); GLArea wants queue_render()
-        self.queue_render()
+    def queue_draw(self):             # every change of camera or model comes through here (ModelNav, set_model)
+        self._stale = True
+        Gtk.DrawingArea.queue_draw(self)
 
     def _cache_failed(self, ex):
         """Particles / volumes need features this driver lacks: hand this model to the software renderer
@@ -1640,38 +1759,78 @@ class GLModelView(ModelNav, Gtk.GLArea):
             GLib.idle_add(lambda: (self.on_cache_failed(m, msg), False)[1])
 
     # ---- render
-    def _on_render(self, area, ctx):
-        try:
-            self._render()
-        except Exception as ex:
-            if self.model is not None and any(k in self.model for k in ("points", "vpts")):
-                self._cache_failed(ex)
-            else:
-                self._fail("render", ex)
-        return True
-
-    def _render(self):
+    def _colours(self):
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         try:
             ok, bgc = sc.lookup_color("theme_bg_color")
             r, g, b = (bgc.red, bgc.green, bgc.blue) if ok else ((0.13,) * 3 if fg.red > 0.5 else (0.98,) * 3)
         except Exception:
             r, g, b = (0.13,) * 3
-        bg = (r * 0.96 + fg.red * 0.04, g * 0.96 + fg.green * 0.04, b * 0.96 + fg.blue * 0.04)
-        target = int(np.asarray(_GL.glGetIntegerv(_GL.GL_DRAW_FRAMEBUFFER_BINDING)).reshape(-1)[0])
-        if self.gl_error or not self.scene:
-            _GL.glClearColor(bg[0], bg[1], bg[2], 1.0)
-            _GL.glClear(_GL.GL_COLOR_BUFFER_BIT | _GL.GL_DEPTH_BUFFER_BIT)
-            return
+        return (r * 0.96 + fg.red * 0.04, g * 0.96 + fg.green * 0.04, b * 0.96 + fg.blue * 0.04), fg
+
+    def _on_draw(self, w, cr):
+        bg, fg = self._colours()
+        lw, lh = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
+        scale = self.get_scale_factor()
+        W, H = lw * scale, lh * scale
+        if not self.gl_error and self.scene and self.gl is not None and (
+                self._stale or self._frame is None or self.gl.size != (W, H)):
+            if not self._stale and self._frame is not None and self._cost > 0.004 and not self._settled:
+                self._draw_stretched(cr, lw, lh, bg)          # only the size changed and rendering is slow
+                return True
+            self._settled = False
+            try:
+                t0 = time.perf_counter()
+                self._render(W, H, lw, lh, bg, fg)
+                self._cost = time.perf_counter() - t0
+                self._stale = False
+            except Exception as ex:
+                self._frame = None
+                if self.model is not None and any(k in self.model for k in ("points", "vpts")):
+                    self._cache_failed(ex)
+                else:
+                    self._fail("render", ex)
+        if self._frame is None or self.gl_error:
+            cr.set_source_rgb(*bg)
+            cr.paint()
+            return True
+        cr.set_source_surface(self._frame, 0, 0)
+        cr.paint()
+        return True
+
+    def _draw_stretched(self, cr, lw: int, lh: int, bg):
+        """The last frame, scaled as the camera would scale the scene (by the shorter side, about the centre),
+        and a render at the real size once no new size has come for a moment."""
+        fw, fh = self._frame_lsize
+        k = min(lw, lh) / float(max(1, min(fw, fh)))
+        cr.set_source_rgb(*bg)
+        cr.paint()
+        cr.translate(lw / 2.0, lh / 2.0)
+        cr.scale(k, k)
+        cr.set_source_surface(self._frame, -fw / 2.0, -fh / 2.0)
+        cr.paint()
+        if self._settle is not None:
+            GLib.source_remove(self._settle)
+
+        def settle():
+            self._settle = None
+            self._settled = True
+            Gtk.DrawingArea.queue_draw(self)          # not self.queue_draw(): the camera has not changed
+            return False
+        self._settle = GLib.timeout_add(120, settle)
+
+    def _render(self, W: int, H: int, lw: int, lh: int, bg, fg):
+        self._frame_lsize = (lw, lh)
+        self.gl.make_current()
+        fbo = self.gl.target(W, H)
         if self._dirty:
             keep = self._dirty == "keep"
             self._dirty = False
             self.scene.upload(self.model, keep_exposure=keep)
-        scale = self.get_scale_factor()
-        w, h = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
-        self.scene.render(w * scale, h * scale, w, h, (self.yaw, self.pitch, self.zoom, self.pan), bg,
-                          (fg.red, fg.green, fg.blue), self.smooth, self.wire, target)
+        self.scene.render(W, H, lw, lh, (self.yaw, self.pitch, self.zoom, self.pan), bg,
+                          (fg.red, fg.green, fg.blue), self.smooth, self.wire, fbo)
+        self._frame = self.gl.read(lw, lh)
 
 
 # --------------------------------------------------------------------------- video / audio playback (GStreamer)
@@ -1690,6 +1849,8 @@ except Exception as _ex:                 # typelib missing (gstreamer1 / python3
 def gst_sink_available(refresh: bool = False) -> bool:
     """gtksink is packaged separately on most distros (gstreamer1-plugins-good-gtk, gstreamer1.0-gtk3, gst-plugin-gtk); without it we can't embed video in the pane.
     refresh=True re-scans the plugin registry so a package installed while Shotrover runs is picked up."""
+    if GTK4:                # frames come through an appsink and are painted by VideoArea: see video_sink()
+        return Gst is not None and Gst.ElementFactory.find("appsink") is not None
     if not HAVE_GST:
         return False
     if refresh:
@@ -1734,6 +1895,133 @@ def gst_h264_status() -> Tuple[Optional[str], str]:
     return None, f"libav plugin loaded {len(feats)} elements but no H.264 decoder among them"
 
 
+class VideoArea(Gtk.DrawingArea):
+    """GTK 4 only: shows the frames an appsink hands over, scaled to fit, on black. (gtksink, which GTK 3
+    uses, is a GTK 3 widget: creating it in a GTK 4 process loads GTK 3 as well and hangs.)
+
+    cairo's good downscaling reads every pixel of the frame: 30 to 50 ms for a 4K clip, which made every step
+    of a pane or window resize that slow. So a draw never does it. A new frame is painted with the cheap
+    filter (cost follows the widget's size, not the frame's); once neither a frame nor a new size has come
+    for a moment, a well-scaled copy the size of the widget is made once, and draws stretch that."""
+
+    def __init__(self):
+        super().__init__()
+        self._frame = None                    # (cairo surface, its pixel buffer, width, height)
+        self._fit = None                      # (well-scaled copy of _frame, its width, its height)
+        self._refine = None                   # timer that makes _fit
+        on_draw(self, self._draw)
+        self.connect("unrealize", lambda w: self._cancel_refine())
+
+    def push(self, data: bytes, width: int, height: int):
+        """A decoded frame (BGRx, 4 bytes a pixel) from the streaming thread; shown on the GTK thread."""
+        def show():
+            import cairo
+            buf = bytearray(data)
+            try:
+                surf = cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_RGB24, width, height, width * 4)
+            except Exception:
+                return False
+            self._frame = (surf, buf, width, height)
+            self._fit = None
+            self.queue_draw()
+            return False
+        GLib.idle_add(show)
+
+    def _cancel_refine(self):
+        if self._refine is not None:
+            GLib.source_remove(self._refine)
+            self._refine = None
+
+    def _want_refine(self):
+        self._cancel_refine()
+        self._refine = GLib.timeout_add(150, self._make_fit)
+
+    def _fit_size(self):
+        """Size in device pixels of the picture inside the widget."""
+        _surf, _buf, fw, fh = self._frame
+        scale = self.get_scale_factor()
+        aw, ah = max(1, self.get_width()) * scale, max(1, self.get_height()) * scale
+        k = min(aw / float(fw), ah / float(fh))
+        return max(1, int(round(fw * k))), max(1, int(round(fh * k)))
+
+    def _make_fit(self):
+        self._refine = None
+        if self._frame is None or not self.get_mapped():
+            return False
+        import cairo
+        surf, _buf, fw, fh = self._frame
+        tw, th = self._fit_size()
+        if tw >= fw:                          # shown at full size or enlarged: nothing to gain
+            return False
+        try:
+            fit = cairo.ImageSurface(cairo.FORMAT_RGB24, tw, th)
+            cr = cairo.Context(fit)
+            cr.scale(tw / float(fw), th / float(fh))
+            cr.set_source_surface(surf, 0, 0)
+            cr.paint()
+        except Exception:
+            return False
+        self._fit = (fit, tw, th)
+        self.queue_draw()
+        return False
+
+    def _draw(self, w, cr):
+        import cairo
+        aw, ah = max(1, self.get_width()), max(1, self.get_height())
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        if self._frame is None:
+            return False
+        surf, _buf, fw, fh = self._frame
+        k = min(aw / float(fw), ah / float(fh))
+        cr.translate((aw - fw * k) / 2.0, (ah - fh * k) / 2.0)
+        if self._fit is not None:
+            surf, sw, sh = self._fit
+            if (sw, sh) != self._fit_size():
+                self._want_refine()           # stretched for now, redone when the size settles
+            cr.scale(fw * k / float(sw), fh * k / float(sh))
+        else:
+            cr.scale(k, k)
+            self._want_refine()
+        cr.set_source_surface(surf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+        cr.paint()
+        return False
+
+
+def video_sink():
+    """(GStreamer video sink element, the widget that shows its picture)."""
+    if not GTK4:
+        sink = Gst.ElementFactory.make("gtksink", None)
+        return sink, sink.get_property("widget")
+    area = VideoArea()
+    sink = Gst.ElementFactory.make("appsink", None)
+    sink.set_property("caps", Gst.Caps.from_string("video/x-raw,format=BGRx"))
+    sink.set_property("emit-signals", True)
+    sink.set_property("max-buffers", 2)
+    sink.set_property("drop", True)
+
+    def frame(appsink, signal_name):
+        sample = appsink.emit(signal_name)
+        if sample is None:
+            return Gst.FlowReturn.OK
+        st = sample.get_caps().get_structure(0)
+        width, height = st.get_value("width"), st.get_value("height")
+        buf = sample.get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if ok:
+            try:
+                data = bytes(info.data)
+            finally:
+                buf.unmap(info)
+            if len(data) >= width * height * 4:
+                area.push(data, width, height)
+        return Gst.FlowReturn.OK
+    sink.connect("new-sample", lambda a: frame(a, "pull-sample"))
+    sink.connect("new-preroll", lambda a: frame(a, "pull-preroll"))      # the first frame, shown while paused
+    return sink, area
+
+
 class VideoPreview(Gtk.Box):
     """In-pane player for the preview area: playbin → gtksink widget, with play/pause, a seek bar, time
     readout and mute. Opens paused on the first frame (no autoplay noise), Space toggles playback.
@@ -1743,24 +2031,24 @@ class VideoPreview(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.player = Gst.ElementFactory.make("playbin", "shotrover-player")
-        sink = Gst.ElementFactory.make("gtksink", None)
+        sink, self.sink_widget = video_sink()
         self.player.set_property("video-sink", sink)
-        self.sink_widget = sink.get_property("widget")
         self.sink_widget.set_size_request(-1, 160)
         # The sink widget keeps showing the LAST frame it ever drew — through a stop, and even on an audio-only
         # file where it never draws a new one. So it lives in a stack behind a blank and an audio card, and is
         # only shown once the new file has prerolled a video frame.
         self.screen = Gtk.Stack()
-        self.screen.set_homogeneous(False)
+        self.screen.set_hhomogeneous(False)
+        self.screen.set_vhomogeneous(False)
         blank = Gtk.DrawingArea()
-        blank.connect("draw", lambda w, cr: (cr.set_source_rgb(0, 0, 0), cr.paint(), False)[2])
+        on_draw(blank, lambda w, cr: (cr.set_source_rgb(0, 0, 0), cr.paint(), False)[2])
         self.screen.add_named(blank, "blank")
         self.screen.add_named(self.sink_widget, "video")
         audio = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.CENTER)
-        audio.pack_start(Gtk.Image.new_from_icon_name("audio-x-generic-symbolic", Gtk.IconSize.DIALOG), False, False, 0)
+        put(audio, icon_image("audio-x-generic-symbolic", "dialog"), False, False, 0)
         self.audio_label = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.audio_label.get_style_context().add_class("dim-label")
-        audio.pack_start(self.audio_label, False, False, 0)
+        css_class(self.audio_label, "dim-label")
+        put(audio, self.audio_label, False, False, 0)
         self.screen.add_named(audio, "audio")
         self.screen.set_visible_child_name("blank")
         # The sink widget's NATURAL size is the video's pixel size (1920×1080 for HD). Let that propagate and
@@ -1769,34 +2057,34 @@ class VideoPreview(Gtk.Box):
         # pane gives it and the sink scales the picture inside.
         holder = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         holder.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.EXTERNAL)
-        holder.add(self.screen)
-        self.pack_start(holder, True, True, 0)
+        set_child(holder, self.screen)
+        put(self, holder, True, True, 0)
         bar = Gtk.Box(spacing=4)
-        self.play_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
-        self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.play_btn = icon_button("media-playback-start-symbolic", "button")
+        flat_button(self.play_btn)
         self.play_btn.connect("clicked", lambda b: self.toggle())
-        bar.pack_start(self.play_btn, False, False, 0)
+        put(bar, self.play_btn, False, False, 0)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1000, 1)
         self.scale.set_draw_value(False)
         self.scale.set_hexpand(True)
         self._seeking = False
-        self.scale.connect("button-press-event", lambda w, e: setattr(self, "_seeking", True) and False)
-        self.scale.connect("button-release-event", self._seek_release)
+        on_event(self.scale, "button-press-event", lambda w, e: setattr(self, "_seeking", True) and False)
+        on_event(self.scale, "button-release-event", self._seek_release)
         self.scale.connect("change-value", self._seek_change)
-        bar.pack_start(self.scale, True, True, 0)
+        put(bar, self.scale, True, True, 0)
         self.time_lab = Gtk.Label(label="0:00 / 0:00")
-        self.time_lab.get_style_context().add_class("dim-label")
-        bar.pack_start(self.time_lab, False, False, 4)
+        css_class(self.time_lab, "dim-label")
+        put(bar, self.time_lab, False, False, 4)
         self.mute_btn = Gtk.ToggleButton()
-        self.mute_btn.set_image(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.BUTTON))
-        self.mute_btn.set_relief(Gtk.ReliefStyle.NONE)
+        button_image(self.mute_btn, icon_image("audio-volume-high-symbolic", "button"))
+        flat_button(self.mute_btn)
         self.mute_btn.set_tooltip_text("Mute")
         self.mute_btn.connect("toggled", self._mute)
-        bar.pack_start(self.mute_btn, False, False, 0)
-        self.pack_start(clip_width(bar), False, False, 0)
+        put(bar, self.mute_btn, False, False, 0)
+        put(self, clip_width(bar), False, False, 0)
         self.err_lab = Gtk.Label(xalign=0, wrap=True)
-        self.err_lab.get_style_context().add_class("dim-label")
-        self.pack_start(self.err_lab, False, False, 0)
+        css_class(self.err_lab, "dim-label")
+        put(self, self.err_lab, False, False, 0)
         bus = self.player.get_bus()
         bus.add_signal_watch()
         bus.connect("message::error", self._on_error)
@@ -1813,7 +2101,7 @@ class VideoPreview(Gtk.Box):
         self._ops: "queue.Queue" = queue.Queue()
         threading.Thread(target=self._op_loop, daemon=True, name="shotrover-video-state").start()
         self.set_can_focus(True)
-        self.connect("key-press-event", self._key)
+        on_event(self, "key-press-event", self._key)
 
     def _op_loop(self):
         while True:
@@ -1860,12 +2148,12 @@ class VideoPreview(Gtk.Box):
         self._set_icon(self.playing)
 
     def _set_icon(self, playing: bool):
-        self.play_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic", Gtk.IconSize.BUTTON))
+        button_image(self.play_btn, icon_image("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic", "button"))
 
     def _mute(self, b):
         player, on = self.player, b.get_active()
         self._ops.put(lambda: player.set_property("mute", on))
-        b.set_image(Gtk.Image.new_from_icon_name("audio-volume-muted-symbolic" if b.get_active() else "audio-volume-high-symbolic", Gtk.IconSize.BUTTON))
+        button_image(b, icon_image("audio-volume-muted-symbolic" if b.get_active() else "audio-volume-high-symbolic", "button"))
 
     def _key(self, w, event):
         if event.keyval == Gdk.KEY_space:

@@ -6,7 +6,7 @@
 #   crash  — the process died (segfault in a C library, abort, killed). faulthandler writes the stacks of
 #            every thread to a per-process file on fatal signals; a per-process session marker that is only
 #            removed on a clean exit tells the next start that the previous run ended abnormally.
-#   freeze — the stall watchdog's >4 s lock-up dump (p1c), picked up the same way.
+#   freeze — the stall watchdog's >4 s lock-up dump (diagnostics.py), picked up the same way.
 # Nothing is ever sent automatically: the user reviews (and can edit) the report, then opens it as a
 # pre-filled GitHub issue (or copies it). Home folder and user name are replaced with "~" / "<user>" before anything is shown.
 

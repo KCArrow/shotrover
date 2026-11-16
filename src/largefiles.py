@@ -332,47 +332,47 @@ class LargeFilesWindow(Gtk.Window):
         self.win = win
         self.cfg = win.cfg
         self.set_default_size(*self.cfg.get("cleanup_size", (980, 640)))
-        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        center_on_parent(self)
         self.items: List[CleanupItem] = []
         self.cancel: Optional[threading.Event] = None
         self.scanning = False
         self._alive = True
-        self.connect("delete-event", self._closing)
+        on_event(self, "delete-event", self._closing)
         self.connect("destroy", lambda w: setattr(self, "_alive", False))
-        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        self.add(v)
+        v = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 12)
+        set_child(self, v)
         # where + what
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="Look in"), False, False, 0)
+        put(row, Gtk.Label(label="Look in"), False, False, 0)
         self.folder = Gtk.Entry(text=folder, hexpand=True)
         self.folder.connect("activate", lambda e: self.start())
-        row.pack_start(self.folder, True, True, 0)
+        put(row, self.folder, True, True, 0)
         b = Gtk.Button(label="Browse…")
         b.connect("clicked", self._browse)
-        row.pack_start(b, False, False, 0)
+        put(row, b, False, False, 0)
         self.scan_btn = Gtk.Button(label="Scan")
-        self.scan_btn.get_style_context().add_class("suggested-action")
+        css_class(self.scan_btn, "suggested-action")
         self.scan_btn.connect("clicked", lambda b: self.stop() if self.scanning else self.start())
-        row.pack_start(self.scan_btn, False, False, 0)
-        v.pack_start(row, False, False, 0)
+        put(row, self.scan_btn, False, False, 0)
+        put(v, row, False, False, 0)
         opts = Gtk.Box(spacing=10)
-        opts.pack_start(Gtk.Label(label="At least"), False, False, 0)
+        put(opts, Gtk.Label(label="At least"), False, False, 0)
         self.min_combo = Gtk.ComboBoxText()
         for label, _ in self.SIZES:
             self.min_combo.append_text(label)
         self.min_combo.set_active(int(self.cfg.get("cleanup_min", 2)))
-        opts.pack_start(self.min_combo, False, False, 0)
+        put(opts, self.min_combo, False, False, 0)
         self.seq_check = Gtk.CheckButton(label="Count frame sequences as one item", active=bool(self.cfg.get("cleanup_seq", True)))
         self.seq_check.set_tooltip_text("render.1001.exr … render.1240.exr shows as one row with the total size; "
                                         "a folder of medium-sized frames is usually where the space went")
-        opts.pack_start(self.seq_check, False, False, 0)
+        put(opts, self.seq_check, False, False, 0)
         self.fs_check = Gtk.CheckButton(label="Stay on this drive", active=bool(self.cfg.get("cleanup_onefs", True)))
         self.fs_check.set_tooltip_text("Don't follow into other drives or network shares mounted inside this folder")
-        opts.pack_start(self.fs_check, False, False, 0)
+        put(opts, self.fs_check, False, False, 0)
         self.dup_check = Gtk.CheckButton(label="Look for duplicates", active=bool(self.cfg.get("cleanup_dups", False)))
         self.dup_check.set_tooltip_text("Reads files of equal size to find identical copies (slower on big files)")
-        opts.pack_start(self.dup_check, False, False, 0)
-        v.pack_start(opts, False, False, 0)
+        put(opts, self.dup_check, False, False, 0)
+        put(v, opts, False, False, 0)
         # filter the results
         frow = Gtk.Box(spacing=6)
         self.kind_combo = Gtk.ComboBoxText()
@@ -380,21 +380,21 @@ class LargeFilesWindow(Gtk.Window):
             self.kind_combo.append_text(k)
         self.kind_combo.set_active(0)
         self.kind_combo.connect("changed", lambda c: self._refilter())
-        frow.pack_start(self.kind_combo, False, False, 0)
+        put(frow, self.kind_combo, False, False, 0)
         self.age_combo = Gtk.ComboBoxText()
         for label, _ in self.AGES:
             self.age_combo.append_text(label)
         self.age_combo.set_active(0)
         self.age_combo.connect("changed", lambda c: self._refilter())
-        frow.pack_start(self.age_combo, False, False, 0)
+        put(frow, self.age_combo, False, False, 0)
         self.hide_sys = Gtk.CheckButton(label="Hide system files", active=bool(self.cfg.get("cleanup_hide_system", False)))
         self.hide_sys.set_tooltip_text("Files that belong to the operating system, installed programs or another account")
         self.hide_sys.connect("toggled", lambda c: (self.cfg.__setitem__("cleanup_hide_system", c.get_active()), self._refilter()))
-        frow.pack_start(self.hide_sys, False, False, 0)
+        put(frow, self.hide_sys, False, False, 0)
         self.name_filter = Gtk.SearchEntry(placeholder_text="Filter names and folders")
         self.name_filter.connect("search-changed", lambda e: self._refilter())
-        frow.pack_start(self.name_filter, True, True, 0)
-        v.pack_start(frow, False, False, 0)
+        put(frow, self.name_filter, True, True, 0)
+        put(v, frow, False, False, 0)
         # results: check, name, size text, size, type, modified text, mtime, folder, index, tooltip, visible,
         # notes, colour (system files are drawn in the warning colour)
         self.store = Gtk.ListStore(bool, str, str, GObject.TYPE_INT64, str, str, float, str, int, str, bool, str, str)
@@ -406,8 +406,8 @@ class LargeFilesWindow(Gtk.Window):
         tv.set_tooltip_column(9)
         tv.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
         tv.connect("row-activated", lambda t, p, c: self._reveal_rows([p]))
-        tv.connect("button-press-event", self._button)
-        tv.connect("key-press-event", self._key)
+        on_event(tv, "button-press-event", self._button)
+        on_event(tv, "key-press-event", self._key)
         tog = Gtk.CellRendererToggle()
         tog.connect("toggled", self._toggled)
         c = Gtk.TreeViewColumn("", tog, active=0)
@@ -432,35 +432,35 @@ class LargeFilesWindow(Gtk.Window):
             tv.append_column(cc)
         self.view = tv
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         self.stack = Gtk.Stack()
         self.empty = Gtk.Label(label="Pick a folder (or a whole drive) and press Scan.\nThe biggest files and frame sequences "
                                      "are listed here; nothing is removed until you tick items and choose Move to Recycle Bin.",
                                justify=Gtk.Justification.CENTER, wrap=True)
-        self.empty.get_style_context().add_class("dim-label")
+        css_class(self.empty, "dim-label")
         self.stack.add_named(self.empty, "empty")
         self.stack.add_named(sw, "list")
-        v.pack_start(self.stack, True, True, 0)
+        put(v, self.stack, True, True, 0)
         # status + actions
         self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.status.get_style_context().add_class("dim-label")
-        v.pack_start(self.status, False, False, 0)
+        css_class(self.status, "dim-label")
+        put(v, self.status, False, False, 0)
         act = Gtk.Box(spacing=6)
         self.spinner = Gtk.Spinner()
-        act.pack_start(self.spinner, False, False, 0)
+        put(act, self.spinner, False, False, 0)
         self.sel_label = Gtk.Label(xalign=0)
-        act.pack_start(self.sel_label, True, True, 0)
+        put(act, self.sel_label, True, True, 0)
         self.reveal_btn = Gtk.Button(label="Show in folder")
         self.reveal_btn.connect("clicked", lambda b: self._reveal_rows(self.view.get_selection().get_selected_rows()[1]))
-        act.pack_end(self.reveal_btn, False, False, 0)
+        put_end(act, self.reveal_btn, False, False, 0)
         self.trash_btn = Gtk.Button(label="Move to Recycle Bin")
-        self.trash_btn.get_style_context().add_class("destructive-action")
+        css_class(self.trash_btn, "destructive-action")
         self.trash_btn.set_sensitive(False)
         self.trash_btn.connect("clicked", lambda b: self._trash_checked())
-        act.pack_end(self.trash_btn, False, False, 0)
-        v.pack_start(act, False, False, 0)
+        put_end(act, self.trash_btn, False, False, 0)
+        put(v, act, False, False, 0)
         self._update_selection()
-        self.show_all()
+        show_all(self)
 
     # ---- scanning
     def _browse(self, btn):
@@ -537,7 +537,7 @@ class LargeFilesWindow(Gtk.Window):
                 self.empty.set_text(f"Nothing of {self.min_combo.get_active_text()} or more in {root}.")
                 self.stack.set_visible_child_name("empty")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def stop(self):
         if self.cancel is not None:
@@ -546,7 +546,7 @@ class LargeFilesWindow(Gtk.Window):
     def _closing(self, *a):
         self.stop()
         try:
-            self.cfg["cleanup_size"] = tuple(self.get_size())
+            self.cfg["cleanup_size"] = tuple(window_size(self))
             save_config(self.cfg)
         except Exception:
             pass
@@ -658,28 +658,17 @@ class LargeFilesWindow(Gtk.Window):
             sel.select_path(hit[0])
         rows = sel.get_selected_rows()[1]
         its = self._rows_items(rows)
-        menu = Gtk.Menu()
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-
         def set_checks(on):
             for p in rows:
                 it = self.sorted.get_iter(p)
                 child = self.filtered.convert_iter_to_child_iter(self.sorted.convert_iter_to_child_iter(it))
                 self.store.set_value(child, 0, on)
             self._update_selection()
-        for label, fn in (("Tick", lambda *_: set_checks(True)), ("Untick", lambda *_: set_checks(False)), (None, None),
-                          ("Show in folder", lambda *_: self._reveal_rows(rows)),
-                          ("Open", lambda *_: self._open(its[0])),
-                          ("Copy path", lambda *_: cb.set_text("\n".join(os.path.join(x.folder, x.name) for x in its), -1))):
-            if label is None:
-                menu.append(Gtk.SeparatorMenuItem())
-                continue
-            mi = Gtk.MenuItem(label=label)
-            mi.connect("activate", fn)
-            menu.append(mi)
-        menu.show_all()
-        menu.attach_to_widget(tv, None)
-        menu.popup_at_pointer(event)
+        menu = build_menu([("Tick", lambda: set_checks(True)), ("Untick", lambda: set_checks(False)), "-",
+                           ("Show in folder", lambda: self._reveal_rows(rows)),
+                           ("Open", lambda: self._open(its[0])),
+                           ("Copy path", lambda: set_clipboard_text("\n".join(os.path.join(x.folder, x.name) for x in its)))])
+        popup_menu(menu, tv, event)
         return True
 
     def _open(self, it: CleanupItem):
@@ -712,15 +701,15 @@ class LargeFilesWindow(Gtk.Window):
         lines = [f"• {it.name} — {it.reason}" for it in sysitems[:8]]
         if len(sysitems) > 8:
             lines.append(f"• … and {len(sysitems) - 8} more")
-        d.format_secondary_text("Removing these can break installed programs or the system itself, and files you don't own "
+        dialog_secondary(d, "Removing these can break installed programs or the system itself, and files you don't own "
                                 "can't be moved without administrator rights anyway.\n\n" + "\n".join(lines))
         d.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         d.add_button("Remove them _too", 2)
         skip = d.add_button("_Skip system files", 1)
-        d.get_widget_for_response(2).get_style_context().add_class("destructive-action")
+        css_class(d.get_widget_for_response(2), "destructive-action")
         d.set_default_response(1)
         skip.grab_focus()
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         return {1: "skip", 2: "all"}.get(r, "cancel")
 

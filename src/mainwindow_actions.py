@@ -3,12 +3,15 @@
     # ------------------------------------------------------------------ menus
     def _build_menubar(self):
         for i, (key, title) in enumerate(self.MENU_KEYS.items()):
+            if GTK4:
+                menu_bar_add4(self.menubar, "_" + title, lambda k=key: self.menu_spec(k))
+                continue
             item = Gtk.MenuItem.new_with_mnemonic("_" + title)
             menu = Gtk.Menu()
             item.set_submenu(menu)
             menu.connect("show", lambda m, k=key: self._fill_menu(m, k))
             self.menubar.append(item)
-        self.menubar.show_all()
+        show_all(self.menubar)
         # Keyboard shortcuts. The keys come from the config (Preferences → Shortcuts), see SHORTCUT_ACTIONS.
         self._actions = {
             "quick_look": self.quick_look,
@@ -27,20 +30,19 @@
             "details_pane": lambda: self.toggle_cfg("details_pane"), "hidden": lambda: self.toggle_cfg("show_hidden"),
             "fullscreen": self._toggle_fullscreen, "help": lambda: show_shortcuts(self), "quit": self.close,
         }
-        self._bound: List[Tuple[int, int]] = []
+        self._bound: list = []                   # handles from Shortcuts.bind
         self._list_keys: Dict[Tuple[int, int], Callable] = {}
         self.bind_shortcuts()
         for i in range(1, 10):
-            key, mods = Gtk.accelerator_parse(f"<Control>{i}")
-            self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, n=i: (self.notebook.set_current_page(n - 1), True)[1])
+            self.accel.bind(f"<Control>{i}", lambda n=i: self.notebook.set_current_page(n - 1))
         self._watch_clipboard()
 
     def bind_shortcuts(self):
         """(Re)connect every shortcut from the config. Keys with Ctrl / Alt and function keys go on the window;
         plain keys (Space, Delete…) and list-only actions are answered by the file list alone (on_view_key),
         so they never fire while typing or while the preview has the keyboard."""
-        for key, mods in self._bound:
-            self.accel.disconnect_key(key, Gdk.ModifierType(mods))
+        for handle in self._bound:
+            self.accel.unbind(handle)
         self._bound, self._list_keys = [], {}
         taken = set()
         for aid, cb in self._actions.items():
@@ -52,9 +54,7 @@
                 if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*km):
                     self._list_keys[km] = cb
                 else:
-                    key, mods = Gtk.accelerator_parse(accel)
-                    self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
-                    self._bound.append((key, int(mods)))
+                    self._bound.append(self.accel.bind(accel, cb))
         for widget, text, aid in getattr(self, "_tips", ()):
             widget.set_tooltip_text(self._tip_text(text, aid))
 
@@ -82,8 +82,8 @@
             self.fullscreen()
 
     def _fill_menu(self, menu: Gtk.Menu, key: str):
-        for c in menu.get_children():
-            menu.remove(c)
+        for c in child_widgets(menu):
+            take_out(menu, c)
         for s in self.menu_spec(key):
             if s == "-":
                 menu.append(Gtk.SeparatorMenuItem())
@@ -92,7 +92,7 @@
                 s = {"label": s[0], "cb": s[1] if len(s) > 1 else None, "accel": s[2] if len(s) > 2 else ""}
             sub = build_menu(s["sub"]) if "sub" in s else None
             menu.append(_menu_item(s["label"], s.get("cb"), s.get("accel", ""), s.get("check"), s.get("radio"), s.get("sensitive", True), sub))
-        menu.show_all()
+        show_all(menu)
 
     def menu_spec(self, key: str):
         cfg = self.cfg
@@ -169,7 +169,7 @@
                     {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": self.acc("split"), "check": bool(self.page and self.page.split)}, "-",
                     {"label": "_Layout", "sub": layouts}, {"label": "_Sort by", "sub": sorts}, {"label": "_Group by", "sub": groups},
                     {"label": "Add _columns", "sub": cols},
-                    ("Size all columns to _fit", lambda: [c.queue_resize() for c in t.tree.get_columns()] and None), "-",
+                    ("Size all columns to _fit", lambda: (t.tree.fit_columns() if GTK4 else [c.queue_resize() for c in t.tree.get_columns()]) and None), "-",
                     {"label": "Item check _boxes", "cb": lambda: self.toggle_cfg("checkboxes"), "check": cfg["checkboxes"]},
                     {"label": "File name _extensions", "cb": lambda: self.toggle_cfg("hide_extensions"), "check": not cfg["hide_extensions"]},
                     {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": self.acc("hidden"), "check": cfg["show_hidden"]}, "-",
@@ -267,11 +267,7 @@
                      ("Open in _terminal", lambda: self.open_terminal()), {"label": "Ne_w", "sub": self._new_item_spec(), "sensitive": real}, "-",
                      ("P_roperties", lambda: self.show_properties([entry_for_path(t.path)]) if real else self.properties())]
         menu = build_menu(spec)
-        menu.attach_to_widget(t.view, None)
-        if event is not None:
-            menu.popup_at_pointer(event)
-        else:
-            menu.popup_at_widget(t.view, Gdk.Gravity.CENTER, Gdk.Gravity.NORTH_WEST, None)
+        popup_menu(menu, t.view, event, "pointer" if event is not None else "center")
 
     # ------------------------------------------------------------------ clipboard
     def copy_sel(self, mode: str):
@@ -293,7 +289,7 @@
     def _export_clipboard(self, mode: str, paths: List[str]):
         """Offer the files to every other application (see FileClipboard); plain paths as a last resort."""
         if not file_clipboard().set_files(mode, paths):
-            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text("\n".join(paths), -1)
+            set_clipboard_text("\n".join(paths))
 
     def _external_clipboard_has_files(self) -> bool:
         """Whether another app put files on the clipboard. Answered from a cache that is refreshed
@@ -303,8 +299,20 @@
         return bool(getattr(self, "_clip_files", False))
 
     def _watch_clipboard(self):
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         self._clip_files = False
+        if GTK4:
+            clip = Gdk.Display.get_default().get_clipboard()
+
+            def changed(*a):
+                try:
+                    fm = clip.get_formats()
+                    self._clip_files = (not clip.is_local()) and any(fm.contain_mime_type(t) for t in
+                                                                     ("x-special/gnome-copied-files", "text/uri-list"))
+                except Exception:
+                    self._clip_files = False
+            clip.connect("changed", changed)
+            return changed()
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         wanted = {"x-special/gnome-copied-files", "text/uri-list"}
 
         def got(clip, *args):
@@ -327,10 +335,12 @@
         """Ask the clipboard owner for files, asynchronously, then call done(mode, paths) on the GTK thread.
         The wait_for_* variants run a nested main loop; a click or menu during that loop re-entered the same
         code until GTK crashed (seen in a crash report), so nothing here ever waits."""
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-
         def from_uris(uris):
             return [p for p in (Gio.File.new_for_uri(u).get_path() for u in (uris or []) if u.strip()) if p]
+
+        if GTK4:
+            return read_cut_files4(Gdk.Display.get_default().get_clipboard(), done)
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
 
         def got_uris(clip, uris, *a):
             done("copy", from_uris(uris))
@@ -389,14 +399,16 @@
                 except OSError as ex:
                     message(self, "Create shortcut", str(ex), Gtk.MessageType.ERROR)
             return
-        if self.transfer(paths, dest, mode or "copy") and mode == "cut":
+        # The clipboard says "cut"; the file operation is called "move". Passing "cut" on used to run a plain
+        # copy: the originals stayed, nothing was counted for the progress bar and Undo did not know about it.
+        if self.transfer(paths, dest, "move" if mode == "cut" else "copy") and mode == "cut":
             self.clipboard = {"mode": "", "paths": []}
             self._update_status()
 
     def ask_drop_action(self) -> Optional[bool]:
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION, text="Drop files")
         d.add_buttons("_Move here", 1, "_Copy here", 2, "_Cancel", Gtk.ResponseType.CANCEL)
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         return {1: True, 2: False}.get(r)
 
@@ -646,11 +658,11 @@
         tv = Gtk.TextView(editable=False, monospace=True)
         tv.get_buffer().set_text("Checking… (mayapy can take a few seconds to start)")
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        d.get_content_area().pack_start(sw, True, True, 0)
-        d.show_all()
-        threading.Thread(target=lambda: GLib.idle_add(lambda: tv.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
-        d.run()
+        set_child(sw, tv)
+        put(d.get_content_area(), sw, True, True, 0)
+        show_all(d)
+        bg(lambda: GLib.idle_add(lambda: tv.get_buffer().set_text(preview_tool_report()) or False))
+        run_dialog(d)
         d.destroy()
 
     def open_in_rv(self, sequence: bool = False):
@@ -681,7 +693,7 @@
 
     def index_now(self, full: bool = False):
         if not INDEX.loaded:
-            threading.Thread(target=lambda: (INDEX.load(), GLib.idle_add(lambda: (self.index_now(full), False)[1])), daemon=True).start()
+            bg(lambda: (INDEX.load(), INDEX.loaded and GLib.idle_add(lambda: (self.index_now(full), False)[1])))
             return
         INDEX.on_status = lambda: self.flash(self.index_status_line())
         INDEX.crawl(self.cfg.get("index_roots", [HOME]), self.cfg.get("index_network", False), self.cfg.get("index_hidden", False), full)
@@ -703,13 +715,13 @@
         d.set_default_size(900, 600)
         tv = Gtk.TextView(editable=False, monospace=True)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        d.get_content_area().pack_start(sw, True, True, 0)
+        set_child(sw, tv)
+        put(d.get_content_area(), sw, True, True, 0)
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_markup("<small>Stalls are moments the interface thread was blocked for more than 120 ms; the stack shows what it was doing. "
                         "Run <tt>python3 shotrover.py --profile</tt> for a full cProfile of everything on the interface thread, "
                         "and <tt>python3 shotrover.py --selftest</tt> for timed unit/benchmark tests.</small>")
-        d.get_content_area().pack_start(hint, False, False, 6)
+        put(d.get_content_area(), hint, False, False, 6)
 
         def refresh():
             if not d.get_visible():
@@ -721,9 +733,9 @@
             return True
         refresh()
         GLib.timeout_add(2000, refresh)
-        d.show_all()
+        show_all(d)
         while True:
-            r = d.run()
+            r = run_dialog(d)
             if r == 1:
                 out = os.path.join(GLib.get_user_cache_dir(), "shotrover", f"performance-{_dt.datetime.now():%Y%m%d-%H%M%S}.txt")
                 os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -741,27 +753,27 @@
         d.add_button("_Close", Gtk.ResponseType.CLOSE)
         copy_btn = d.add_button("_Copy commands", 1)
         run_btn = d.add_button("_Install selected in terminal", Gtk.ResponseType.OK)
-        run_btn.get_style_context().add_class("suggested-action")
+        css_class(run_btn, "suggested-action")
         d.set_default_size(680, 460)
         box = d.get_content_area()
         box.set_spacing(6)
-        box.set_border_width(12)
-        box.pack_start(Gtk.Label(label="Checking what's installed…", xalign=0), False, False, 0)
+        set_margins(box, 12)
+        put(box, Gtk.Label(label="Checking what's installed…", xalign=0), False, False, 0)
         grid = Gtk.Grid(column_spacing=12, row_spacing=4)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(grid)
-        box.pack_start(sw, True, True, 0)
+        set_child(sw, grid)
+        put(box, sw, True, True, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
                         "The commands match your distribution. Restart Shotrover afterwards.</small>")
-        box.pack_start(note, False, False, 0)
+        put(box, note, False, False, 0)
         checks: List[Tuple[Gtk.CheckButton, dict]] = []
-        d.show_all()
+        show_all(d)
         run_btn.set_sensitive(False)
         copy_btn.set_sensitive(False)
 
         def fill(deps):
-            box.get_children()[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
+            child_widgets(box)[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
                 gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
                 cb = Gtk.CheckButton()
@@ -774,22 +786,22 @@
                 st = Gtk.Label(xalign=0)
                 if gone:
                     st.set_text("not available")
-                    st.get_style_context().add_class("dim-label")
+                    css_class(st, "dim-label")
                 else:
                     st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
-                g.get_style_context().add_class("dim-label")
+                css_class(g, "dim-label")
                 grid.attach(g, 3, i, 1, 1)
                 name.set_tooltip_text(gone or dep["cmd"])
                 checks.append((cb, dep))
-            grid.show_all()
+            show_all(grid)
             run_btn.set_sensitive(True)
             copy_btn.set_sensitive(True)
             return False
-        threading.Thread(target=lambda: GLib.idle_add(fill, optional_deps()), daemon=True).start()
+        bg(lambda: GLib.idle_add(fill, optional_deps()))
         while True:
-            resp = d.run()
+            resp = run_dialog(d)
             chosen = [dep for cb, dep in checks if cb.get_active() and dep["found"] is None]
             if resp == 1:
                 set_clipboard_text("\n".join(dep["cmd"] for dep in chosen) or "# nothing selected")
@@ -824,7 +836,7 @@
                 GLib.idle_add(lambda: message(self, "Checksum", str(ex), Gtk.MessageType.ERROR) and False)
                 return
             GLib.idle_add(lambda: (set_clipboard_text(digest), self.flash(f"SHA-256 copied: {digest[:16]}…")) and False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def new_folder(self):
         self.new_item("folder")
@@ -936,13 +948,13 @@
         d = Gtk.Dialog(title="Compress", transient_for=self, modal=True)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Create", Gtk.ResponseType.OK)
         box = d.get_content_area()
-        box.set_border_width(12)
+        set_margins(box, 12)
         box.set_spacing(6)
         base = sel[0].name if len(sel) == 1 else self.display_path(t.path)
         stem = base if sel[0].is_dir or len(sel) > 1 else os.path.splitext(base)[0]
-        box.pack_start(Gtk.Label(label="Archive name:", xalign=0), False, False, 0)
+        put(box, Gtk.Label(label="Archive name:", xalign=0), False, False, 0)
         name = Gtk.Entry(text=stem, activates_default=True)
-        box.pack_start(name, False, False, 0)
+        put(box, name, False, False, 0)
         combo = Gtk.ComboBoxText()
         fmts = [("zip (Compressed folder)", "zip"), ("tar.gz", "gztar"), ("tar.xz", "xztar"), ("tar", "tar")]
         if sevenzip():
@@ -950,10 +962,10 @@
         for f, _ in fmts:
             combo.append_text(f)
         combo.set_active(0)
-        box.pack_start(combo, False, False, 0)
+        put(box, combo, False, False, 0)
         d.set_default_response(Gtk.ResponseType.OK)
-        d.show_all()
-        r = d.run()
+        show_all(d)
+        r = run_dialog(d)
         fmt = fmts[combo.get_active()][1]
         stem = name.get_text().strip() or stem
         d.destroy()
@@ -1308,11 +1320,14 @@ class ExplorerApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN | Gio.ApplicationFlags.NON_UNIQUE)
         self.cfg = load_config()
+        if GTK4_FAILED and self.cfg.get("toolkit") == "gtk4":      # do not try again at every start
+            self.cfg["toolkit"] = "gtk3"
+            save_config(self.cfg)
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
         icons = [p for p in (app_icon(s) for s in (16, 24, 32, 48, 64, 128, 256)) if p is not None]
-        if icons:
+        if icons and not GTK4:            # GTK 4 takes window icons from the icon theme by name only
             Gtk.Window.set_default_icon_list(icons)
         else:
             Gtk.Window.set_default_icon_name("shotrover")
@@ -1320,14 +1335,12 @@ class ExplorerApp(Gtk.Application):
         # The stylesheet. (These lines once sat after the `return True` of _index_tick below, where they could
         # never run, so the app shipped with none of its own styling. A broken sheet must not stop startup.)
         try:
-            prov = Gtk.CssProvider()
-            prov.load_from_data(CSS)
-            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            load_app_css(CSS)
         except GLib.Error as ex:
             print("shotrover: stylesheet not loaded —", ex, file=sys.stderr)
         apply_theme_mode(self.cfg.get("theme", "system"))
         ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
-        GLib.timeout_add(400, lambda: (threading.Thread(target=warm_workers, daemon=True).start(), False)[1])
+        GLib.timeout_add(400, lambda: (bg(warm_workers), False)[1])
         GLib.timeout_add(1500, self._index_startup)
 
     def _index_startup(self):
@@ -1342,7 +1355,7 @@ class ExplorerApp(Gtk.Application):
             age_h = (time.time() - INDEX.progress.get("finished", 0)) / 3600.0
             if age_h > float(cfg.get("index_interval_h", 6)):
                 INDEX.crawl(cfg.get("index_roots", [HOME]), cfg.get("index_network", False), cfg.get("index_hidden", False))
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         GLib.timeout_add_seconds(1800, self._index_tick)
         return False
 
@@ -1380,8 +1393,21 @@ class ExplorerApp(Gtk.Application):
     def new_window(self, path: Optional[str]):
         if path in VIRTUAL:
             path = HOME
-        w = MainWindow(self, path)
-        w.present()
+        try:
+            w = MainWindow(self, path)
+            w.present()
+        except Exception as ex:
+            if GTK4:
+                gtk4_start_failed(ex)      # does not return when a GTK 3 fallback is standing by
+            raise
+        if not getattr(self, "_toolkit_checked", False):          # the first window of this run
+            self._toolkit_checked = True
+            if GTK4:
+                GLib.timeout_add(3000, lambda: (gtk4_started(), False)[1])
+            elif GTK4_FAILED:
+                GLib.timeout_add(1200, lambda: (message(w, "GTK 4 did not start", f"The GTK 4 interface could not be used: {GTK4_FAILED}.",
+                                                        secondary="Shotrover is running on GTK 3, and \"Use GTK 4\" in Preferences → "
+                                                                  "Optional has been switched off."), False)[1])
         if not self.cfg.get("setup_done") and DEMO is None and STRESS is None and not getattr(self, "_welcomed", False):
             self._welcomed = True                    # once per run, on the first window, however it was opened
             GLib.timeout_add(350, lambda: (WelcomeDialog(w, self.cfg, w.apply_cfg), False)[1])
@@ -1417,8 +1443,8 @@ def _probe_gl_child() -> int:
                 out["error"] = f"shader/render: {ex}"[:400]
             return True
         area.connect("render", render)
-        win.add(area)
-        win.show_all()
+        set_child(win, area)
+        show_all(win)
         t0 = time.time()
         while time.time() - t0 < 3 and not out["ok"] and not out["error"]:
             while Gtk.events_pending():

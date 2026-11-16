@@ -691,6 +691,56 @@ def run_selftest(bench: bool = False) -> int:
             self.assertEqual(len(g), 3)
             self.assertEqual(fc.payload("image/jpeg")[:3], b"\xff\xd8\xff")
 
+        @timed("file index round trip, both formats")
+        def test_file_index(self):
+            if not shutil.which("openssl"):
+                self.skipTest("openssl not installed")
+            import zlib
+            g = globals()
+            keep = g["INDEX_FILE"]
+            g["INDEX_FILE"] = os.path.join(self.tmp, "index-test.enc")
+            try:
+                key = bytes(range(32))
+                data = {"/a": (1.5, [("x.exr", False, 10, 2.0), ("sub", True, 0, 3.0)]), "/a/sub": (4.0, []),
+                        "/odd\nname": (5.0, [("line\nbreak.txt", False, 1, 6.0)])}
+                one = FileIndex()
+                one._k, one.data = key, dict(data)
+                one.progress["finished"] = 123.0
+                self.assertTrue(one.save(), one.last_error)
+                two = FileIndex()
+                two._k = key
+                self.assertTrue(two.load(), two.last_error)
+                self.assertEqual(two.data, data)
+                self.assertEqual(two.progress["finished"], 123.0)
+                # an index written by 1.1.2 and earlier (one JSON document) still loads, and is rewritten
+                raw = zlib.compress(json.dumps({"version": 1, "finished": 7.0, "dirs": {d: [m, e] for d, (m, e) in data.items()}},
+                                               separators=(",", ":")).encode(), 6)
+                body = _openssl([], raw, key)
+                with open(g["INDEX_FILE"], "wb") as f:
+                    f.write(FileIndex.MAGIC + _mac(key, body) + body)
+                old = FileIndex()
+                old._k = key
+                self.assertTrue(old.load(), old.last_error)
+                self.assertEqual(old.data, data)
+                again = FileIndex()
+                again._k = key
+                self.assertTrue(again.load(), again.last_error)
+                self.assertEqual((again.data, again.progress["finished"]), (data, 7.0))
+                # the application's side: the same index, held by the helper process
+                cl = IndexClient(key)
+                try:
+                    self.assertTrue(cl.load(), cl.last_error)
+                    self.assertTrue(cl.loaded)
+                    self.assertEqual(cl.progress["finished"], 7.0)
+                    self.assertEqual(cl.lookup("/a"), data["/a"][1])
+                    self.assertEqual(cl.lookup("/nowhere"), None)
+                    self.assertEqual(cl.search("x.e"), [("/a/x.exr", False, 10, 2.0)])
+                    self.assertEqual(cl.stats()["dirs"], 3)
+                finally:
+                    cl.close()
+            finally:
+                g["INDEX_FILE"] = keep
+
         @timed("zip round trip (ArchiveOp)")
         def test_zip_roundtrip(self):
             src = os.path.join(self.tmp, "ziptest")
@@ -1366,7 +1416,7 @@ class StressDriver:
         w = self.win
         dlg = OptionsDialog(w, w.cfg, lambda: None, 0)
         GLib.timeout_add(300, lambda: (dlg.response(Gtk.ResponseType.CLOSE), False)[1])
-        dlg.run()
+        run_dialog(dlg)
         dlg.destroy()
 
     def _zip(self):

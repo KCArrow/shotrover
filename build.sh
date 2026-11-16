@@ -3,7 +3,10 @@
 # Usage: ./build.sh            (writes ./shotrover.py)
 set -e
 cd "$(dirname "$0")"
-PARTS="p1 p1b p1c p1d p1e p2 p2b p2c p2d p2e p3b p3c p3d p3e p3f p3g p3 p4 p5"
+# The order matters and is fixed here, not by the file names: the parts share one namespace, a class must be
+# defined before one that inherits from it, and mainwindow.py ENDS INSIDE class MainWindow, which
+# mainwindow_actions.py continues (it then holds the application class and main()).
+PARTS="core decoders diagnostics fileindex crashreport toolkit dialogs batchrename reportdialog largefiles icons_theme widgets preview_3d_video importers scenes shaders sceneobjects folderview mainwindow mainwindow_actions"
 : > shotrover.py.new
 for p in $PARTS; do cat "src/$p.py" >> shotrover.py.new; done
 PY=$(command -v python3.11 || command -v python3)

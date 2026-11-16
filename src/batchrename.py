@@ -22,11 +22,11 @@ class BatchRenameDialog(Gtk.Dialog):
         self.set_default_response(Gtk.ResponseType.OK)
         box = self.get_content_area()
         box.set_spacing(8)
-        box.set_border_width(10)
+        set_margins(box, 10)
 
         # ---- controls
         grid = Gtk.Grid(column_spacing=10, row_spacing=6)
-        box.pack_start(grid, False, False, 0)
+        put(box, grid, False, False, 0)
         r = 0
         grid.attach(Gtk.Label(label="Find:", xalign=1), 0, r, 1, 1)
         self.find = Gtk.Entry(hexpand=True, placeholder_text="text or regular expression")
@@ -40,7 +40,7 @@ class BatchRenameDialog(Gtk.Dialog):
         self.icase = Gtk.CheckButton(label="Ignore case")
         self.incl_ext = Gtk.CheckButton(label="Include extension")
         for w in (self.regex, self.icase, self.incl_ext):
-            opts.pack_start(w, False, False, 0)
+            put(opts, w, False, False, 0)
         grid.attach(opts, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Prefix:", xalign=1), 0, r, 1, 1)
@@ -54,19 +54,19 @@ class BatchRenameDialog(Gtk.Dialog):
         nb = Gtk.Box(spacing=6)
         self.pattern = Gtk.Entry(hexpand=True, placeholder_text="e.g.  Scene_{n}   or   {name}_{n}   (empty = off)")
         self.pattern.set_tooltip_text("{n} = counter, {name} = current name, {ext} = extension, {date} = file date, {i} = position")
-        nb.pack_start(self.pattern, True, True, 0)
-        nb.pack_start(Gtk.Label(label="start"), False, False, 0)
+        put(nb, self.pattern, True, True, 0)
+        put(nb, Gtk.Label(label="start"), False, False, 0)
         self.start = Gtk.SpinButton.new_with_range(0, 999999, 1)
         self.start.set_value(1)
-        nb.pack_start(self.start, False, False, 0)
-        nb.pack_start(Gtk.Label(label="step"), False, False, 0)
+        put(nb, self.start, False, False, 0)
+        put(nb, Gtk.Label(label="step"), False, False, 0)
         self.step = Gtk.SpinButton.new_with_range(1, 1000, 1)
         self.step.set_value(1)
-        nb.pack_start(self.step, False, False, 0)
-        nb.pack_start(Gtk.Label(label="digits"), False, False, 0)
+        put(nb, self.step, False, False, 0)
+        put(nb, Gtk.Label(label="digits"), False, False, 0)
         self.digits = Gtk.SpinButton.new_with_range(1, 10, 1)
         self.digits.set_value(max(2, len(str(len(self.entries)))))
-        nb.pack_start(self.digits, False, False, 0)
+        put(nb, self.digits, False, False, 0)
         grid.attach(nb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Case:", xalign=1), 0, r, 1, 1)
@@ -75,14 +75,14 @@ class BatchRenameDialog(Gtk.Dialog):
         for key, lab in self.CASE_OPTIONS:
             self.case.append(key, lab)
         self.case.set_active_id("keep")
-        cb.pack_start(self.case, False, False, 0)
+        put(cb, self.case, False, False, 0)
         self.order = Gtk.ComboBoxText()
         for key, lab in (("name", "Number by name"), ("modified", "Number by date modified"), ("size", "Number by size"), ("selection", "Number by selection order")):
             self.order.append(key, lab)
         self.order.set_active_id("name")
-        cb.pack_start(self.order, False, False, 0)
+        put(cb, self.order, False, False, 0)
         self.only_matching = Gtk.CheckButton(label="Only rename items that match Find")
-        cb.pack_start(self.only_matching, False, False, 0)
+        put(cb, self.only_matching, False, False, 0)
         grid.attach(cb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Frame offset:", xalign=1), 0, r, 1, 1)
@@ -91,13 +91,13 @@ class BatchRenameDialog(Gtk.Dialog):
         self.offset.set_value(0)
         self.offset.set_tooltip_text("Adds this to the frame number in each name, keeping its padding: "
                                      "shot.1001.exr with offset 60 → shot.1061.exr (0 = off)")
-        fb.pack_start(self.offset, False, False, 0)
-        fb.pack_start(Gtk.Label(label="applied to the"), False, False, 0)
+        put(fb, self.offset, False, False, 0)
+        put(fb, Gtk.Label(label="applied to the"), False, False, 0)
         self.offset_which = Gtk.ComboBoxText()
         self.offset_which.append("last", "last number in the name")
         self.offset_which.append("first", "first number in the name")
         self.offset_which.set_active_id("last")
-        fb.pack_start(self.offset_which, False, False, 0)
+        put(fb, self.offset_which, False, False, 0)
         grid.attach(fb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Move to:", xalign=1), 0, r, 1, 1)
@@ -105,13 +105,13 @@ class BatchRenameDialog(Gtk.Dialog):
         self.dest = Gtk.Entry(hexpand=True, placeholder_text="empty = rename in place   ·   e.g.  ../v004   /mnt/show/{parent}_fixed")
         self.dest.set_tooltip_text("Repath: move the renamed files into this folder (absolute, or relative to each file's folder).\n"
                                    "{parent} = the file's folder name, {dir} = its full folder path, {ext} = its extension")
-        mb.pack_start(self.dest, True, True, 0)
+        put(mb, self.dest, True, True, 0)
         browse = Gtk.Button(label="Browse…")
         browse.connect("clicked", self._browse_dest)
-        mb.pack_start(browse, False, False, 0)
+        put(mb, browse, False, False, 0)
         self.mkdirs = Gtk.CheckButton(label="Create missing folders")
         self.mkdirs.set_active(True)
-        mb.pack_start(self.mkdirs, False, False, 0)
+        put(mb, self.mkdirs, False, False, 0)
         grid.attach(mb, 1, r, 3, 1)
 
         # ---- preview
@@ -127,11 +127,11 @@ class BatchRenameDialog(Gtk.Dialog):
                 rend.set_property("foreground", COL_DANGER)
             tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        box.pack_start(sw, True, True, 0)
+        set_child(sw, tv)
+        put(box, sw, True, True, 0)
         self.summary = Gtk.Label(xalign=0)
-        self.summary.get_style_context().add_class("dim-label")
-        box.pack_start(self.summary, False, False, 0)
+        css_class(self.summary, "dim-label")
+        put(box, self.summary, False, False, 0)
 
         self._paths = {e.path for e in self.entries}
         self._dir_cache: Dict[str, Optional[set]] = {}      # destination folder → names in it (None = missing)
@@ -148,7 +148,7 @@ class BatchRenameDialog(Gtk.Dialog):
         self.connect("response", self._response)
         self.connect("destroy", lambda *_: self._timer and GLib.source_remove(self._timer))
         self.plan: List[Tuple[str, str]] = []
-        self.show_all()
+        show_all(self)
         self.refresh()
 
     def _schedule(self):

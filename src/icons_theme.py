@@ -256,28 +256,28 @@ class WelcomeDialog(Gtk.Dialog):
         self.add_button("_Continue", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         box = self.get_content_area()
-        box.set_border_width(18)
+        set_margins(box, 18)
         box.set_spacing(10)
         head = Gtk.Label(xalign=0)
         head.set_markup("<span size='x-large' weight='bold'>Choose how Shotrover looks</span>")
-        box.pack_start(head, False, False, 0)
+        put(box, head, False, False, 0)
         sub = Gtk.Label(label="You can change both later in Preferences → View.", xalign=0)
-        sub.get_style_context().add_class("dim-label")
-        box.pack_start(sub, False, False, 0)
+        css_class(sub, "dim-label")
+        put(box, sub, False, False, 0)
 
         lab = Gtk.Label(xalign=0, margin_top=8)
         lab.set_markup("<b>Icons</b>")
-        box.pack_start(lab, False, False, 0)
+        put(box, lab, False, False, 0)
         self.icon_radios = {}
         group = None
         for value, title, note in (("shotrover", "Shotrover icons", "Yellow folders and a clear picture for every production file type"),
                                    ("system", "System icons", "The icon theme your desktop already uses")):
-            rb = Gtk.RadioButton.new_from_widget(group)
+            rb = radio_button(group)
             group = group or rb
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+            card = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), 8)
             t = Gtk.Label(xalign=0)
             t.set_markup(f"<b>{title}</b>\n<small>{GLib.markup_escape_text(note)}</small>")
-            card.pack_start(t, False, False, 0)
+            put(card, t, False, False, 0)
             row = Gtk.Box(spacing=10)
             for name, fname in self.SAMPLES:
                 ent = None
@@ -285,29 +285,29 @@ class WelcomeDialog(Gtk.Dialog):
                     ent = Entry()
                     ent.name = fname
                 pb = ICONS.pixbuf(Gio.ThemedIcon.new_with_default_fallbacks(name), 48, ent, mode=value)
-                row.pack_start(Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_icon_name(name, Gtk.IconSize.DIALOG), False, False, 0)
-            card.pack_start(row, False, False, 0)
-            rb.add(card)
+                put(row, image_from_pixbuf(pb) if pb is not None else icon_image(name, "dialog"), False, False, 0)
+            put(card, row, False, False, 0)
+            set_child(rb, card)
             rb.set_active(cfg.get("icons", "shotrover") == value)
-            box.pack_start(rb, False, False, 0)
+            put(box, rb, False, False, 0)
             self.icon_radios[value] = rb
 
         lab = Gtk.Label(xalign=0, margin_top=8)
         lab.set_markup("<b>Colours</b>")
-        box.pack_start(lab, False, False, 0)
+        put(box, lab, False, False, 0)
         trow = Gtk.Box(spacing=18)
         self.theme_radios = {}
         group = None
         for value, title in (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")):
-            rb = Gtk.RadioButton.new_with_label_from_widget(group, title)
+            rb = radio_button(group, title)
             group = group or rb
             rb.set_active(cfg.get("theme", "system") == value)
             rb.connect("toggled", lambda b, v=value: b.get_active() and apply_theme_mode(v))     # live, so the choice is seen
-            trow.pack_start(rb, False, False, 0)
+            put(trow, rb, False, False, 0)
             self.theme_radios[value] = rb
-        box.pack_start(trow, False, False, 0)
+        put(box, trow, False, False, 0)
         self.connect("response", self._response)
-        self.show_all()
+        show_all(self)
 
     def _response(self, d, r):
         # closing the window any other way keeps what is selected too: the question is asked once

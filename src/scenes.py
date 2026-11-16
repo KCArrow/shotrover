@@ -2,7 +2,7 @@
 import io  # noqa: E402  (scene breakdowns: in-memory decompressed .blend)
 
 
-# =========================================================================== scene breakdowns (p3e)
+# =========================================================================== scene breakdowns (scenes.py)
 # What's inside a scene file, read without opening the application: Unreal (.umap / .uasset / .uproject),
 # Unity (.unity / .prefab / .mat / .unitypackage), Maya (.ma / .mb) and Blender (.blend). Each reader returns
 #   {"kind": str, "info": [(key, value)], "tree": [node], "notes": [str]}

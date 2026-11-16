@@ -1,6 +1,6 @@
 
 
-# =========================================================================== shader & material previews (p3f)
+# =========================================================================== shader & material previews (shaders.py)
 # A material read from any format becomes one plain dict (MATERIAL_DEFAULTS keys, colours in linear RGB,
 # textures as file paths or (path, channel, invert) tuples) and is rendered as a "material ball": a sphere in a
 # small studio (key, fill and rim light plus a procedural softbox environment), GGX specular, optional clear
@@ -1411,14 +1411,15 @@ class GLSLRunner:
             pass
 
 
-class GLSLView(Gtk.GLArea):
+class GLSLView(Gtk.DrawingArea):
     """Runs a fragment shader live in the preview pane. Animates while visible and the window is active;
-    click (or drag) feeds iMouse; double-click restarts the clock."""
+    click (or drag) feeds iMouse; double-click restarts the clock. Rendered offscreen and painted as a
+    picture (GLOffscreen), so the window it sits in never switches to GL painting."""
 
     def __init__(self):
         super().__init__()
-        self.set_auto_render(False)
-        self.set_has_depth_buffer(False)
+        self.gl: Optional[GLOffscreen] = None
+        self._surf = None
         self.runner: Optional[GLSLRunner] = None
         self.src, self.style = "", ""
         self.dirty = False
@@ -1429,30 +1430,30 @@ class GLSLView(Gtk.GLArea):
         self.on_status = None                # callable(error text or "") set by the window
         self.flavour = ""
         self._tick = None
-        self.connect("create-context", self._create_context)
         self.connect("realize", self._realize)
         self.connect("unrealize", self._unrealize)
-        self.connect("render", self._render)
+        on_draw(self, self._draw)
         self.connect("map", lambda w: self._start() if self.playing else None)
         self.connect("unmap", lambda w: self._stop())
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", self._release)
-        self.connect("motion-notify-event", self._motion)
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK | EVMASK.POINTER_MOTION_MASK)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", self._release)
+        on_event(self, "motion-notify-event", self._motion)
 
-    def _create_context(self, area):
-        ctx, label = gl_try_contexts(self.get_window(), [])
-        self.flavour = label or ""
-        return ctx
+    def queue_render(self):
+        self.queue_draw()
 
     def _realize(self, w):
-        self.make_current()
-        if self.get_error() is not None or self.get_context() is None:
+        try:
+            self.gl = GLOffscreen()
+            self.flavour = self.gl.flavour or ""
+        except Exception:
+            self.gl = None
             if self.on_status:
                 GLib.idle_add(lambda: (self.on_status("OpenGL isn't available here, so the shader can't run live."), False)[1])
             return
         try:
-            self.runner = GLSLRunner(_gl_header(self.get_context()))
+            self.runner = GLSLRunner(_gl_header(self.gl.ctx))
         except Exception as ex:
             if self.on_status:
                 msg = f"OpenGL error: {ex}"
@@ -1463,10 +1464,17 @@ class GLSLView(Gtk.GLArea):
 
     def _unrealize(self, w):
         self._stop()
-        self.make_current()
-        if self.runner:
-            self.runner.free()
+        if self.gl is not None:
+            try:
+                self.gl.make_current()
+                if self.runner:
+                    self.runner.free()
+            except Exception:
+                pass
+            self.gl.free()
         self.runner = None
+        self.gl = None
+        self._surf = None
 
     def load(self, src: str, style: str):
         self.src, self.style = src, style
@@ -1496,34 +1504,47 @@ class GLSLView(Gtk.GLArea):
             self._tick = None
 
     def _on_tick(self, widget, clock):
-        top = self.get_toplevel()
+        top = toplevel(self)
         active = top.is_active() if isinstance(top, Gtk.Window) else True
         if self.playing and active and self.get_mapped():
             self.queue_render()
         return True
 
-    def _render(self, area, ctx):
-        if self.runner is None:
+    def _draw(self, w, cr):
+        if self.runner is None or self.gl is None:
             return True
+        try:
+            self._render()
+        except Exception as ex:
+            if self.on_status:
+                self.on_status(f"OpenGL error: {ex}")
+        if self._surf is not None:
+            cr.set_source_surface(self._surf, 0, 0)
+            cr.paint()
+        return True
+
+    def _render(self):
+        self.gl.make_current()
         if self.dirty:
             self.dirty = False
             ok = self.runner.compile(self.src, self.style)
             if self.on_status:
                 self.on_status("" if ok else self.runner.error)
         scale = self.get_scale_factor()
-        W, H = max(1, self.get_allocated_width() * scale), max(1, self.get_allocated_height() * scale)
-        fb = int(np.asarray(_GL.glGetIntegerv(_GL.GL_DRAW_FRAMEBUFFER_BINDING)).reshape(-1)[0])
+        lw, lh = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
+        W, H = lw * scale, lh * scale
+        fb = self.gl.target(W, H)
         t = (time.monotonic() - self.t0) if self.playing else getattr(self, "_paused_at", 0.0)
         self.runner.draw(W, H, t, self.frame, tuple(self.mouse), fb)
+        self._surf = self.gl.read(lw, lh)
         self.frame += 1
-        return True
 
     def _xy(self, event):
         s = self.get_scale_factor()
         return event.x * s, (self.get_allocated_height() - event.y) * s
 
     def _press(self, w, event):
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
+        if event.type == EV_PRESS2:
             self.t0 = time.monotonic()
             self.frame = 0
             return True

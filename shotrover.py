@@ -37,11 +37,170 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
+# Shotrover runs on GTK 3 (the default) or GTK 4 (experimental; docs/internal/GTK4-PORT.md). The toolkit has
+# to be chosen before Gtk is imported, so the setting is read here by hand, long before load_config().
+
+
+def gtk4_installed() -> bool:
+    try:
+        return "4.0" in gi.Repository.get_default().enumerate_versions("Gtk")
+    except Exception:
+        return False
+
+
+def _choose_gtk4() -> bool:
+    """SHOTROVER_GTK=3 or =4 decides when set (the way back if the GTK 4 interface will not start); otherwise
+    "toolkit" in the config file (Preferences → Optional). Demo mode and the self-test never read the real
+    config. GTK 4 chosen but not installed: GTK 3."""
+    loaded = sys.modules.get("gi.repository.Gtk")
+    if loaded is not None:           # loaded as a module by a script that already has a Gtk (the GUI tests): that one
+        return getattr(loaded, "_version", "3.0") == "4.0"
+    env = os.environ.get("SHOTROVER_GTK")
+    if env in ("3", "4"):
+        want = env == "4"
+    else:
+        want = False
+        if "--demo" not in sys.argv and "--selftest" not in sys.argv:
+            try:
+                base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+                with open(os.path.join(base, "shotrover", "config.json"), encoding="utf-8") as f:
+                    want = json.load(f).get("toolkit") == "gtk4"
+            except Exception:
+                want = False
+    if env in ("3", "4") or not want:
+        return want
+    if not gtk4_installed():
+        return False
+    return _gtk4_guarded()
+
+
+GTK4_FAILED = ""          # why the GTK 4 interface was given up at this start ("" = it was not)
+_GTK4_MARK = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
+                          "shotrover", "gtk4-starting")
+
+
+def _gtk4_guarded() -> bool:
+    """The setting asks for GTK 4. Make sure a GTK 4 that cannot start leaves the user with a working GTK 3
+    window instead of nothing: this process stays behind as a small watcher and the application runs in a
+    child. The child writes a marker file and removes it once its window has been up for a few seconds
+    (gtk4_started). If the child dies before that, by a crash, a kill or an error, the watcher itself
+    carries on as the GTK 3 application (it has not loaded Gtk yet). Returns True in the child only."""
+    global GTK4_FAILED
+    try:
+        with open(_GTK4_MARK) as f:
+            old = int(f.read().strip() or 0)
+        try:
+            os.kill(old, 0)                  # that start is still going on in another process: no verdict
+        except OSError:
+            GTK4_FAILED = "it did not finish starting last time"
+            os.remove(_GTK4_MARK)
+            return False
+    except (OSError, ValueError):
+        pass
+    if any(a.startswith("--") for a in sys.argv[1:]):       # tests and probes: no watcher
+        return True
+    try:
+        os.makedirs(os.path.dirname(_GTK4_MARK), exist_ok=True)
+        child = os.fork()
+    except OSError:
+        return True
+    if child == 0:
+        try:
+            with open(_GTK4_MARK, "w") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+        return True
+    asked = []                               # signals sent to us: passed on, and then the end is no failure
+
+    def forward(sig, frame):
+        asked.append(sig)
+        try:
+            os.kill(child, sig)
+        except OSError:
+            pass
+    olds = {sg: signal.signal(sg, forward) for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    while True:
+        try:
+            status = os.waitpid(child, 0)[1]
+            break
+        except InterruptedError:
+            continue
+        except OSError:
+            status = 0
+            break
+    for sg, old_handler in olds.items():
+        signal.signal(sg, old_handler)
+    try:
+        with open(_GTK4_MARK) as f:
+            unfinished = f.read().strip() == str(child)
+    except OSError:
+        unfinished = False
+    if unfinished:
+        try:
+            os.remove(_GTK4_MARK)
+        except OSError:
+            pass
+    code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
+    if unfinished and code != 0 and not asked:
+        GTK4_FAILED = ("it was closed by force while starting" if code == -signal.SIGKILL else
+                       f"it crashed while starting (signal {-code})" if code < 0 else "it hit an error while starting")
+        print(f"shotrover: the GTK 4 interface did not start ({GTK4_FAILED}); using GTK 3", file=sys.stderr)
+        return False
+    os._exit(code if code >= 0 else 128 - code)
+
+
+def gtk4_started():
+    """The GTK 4 window is up and working: a later crash is an ordinary crash, not a failed start."""
+    try:
+        with open(_GTK4_MARK) as f:
+            mine = f.read().strip() == str(os.getpid())
+        if mine:
+            os.remove(_GTK4_MARK)
+    except OSError:
+        pass
+
+
+def gtk4_start_failed(ex):
+    """Called in the GTK 4 process when building the first window raised: end with an error so the watcher
+    (see _gtk4_guarded) takes over with GTK 3. Without a watcher this returns and the error is raised."""
+    try:
+        with open(_GTK4_MARK) as f:
+            watched = f.read().strip() == str(os.getpid())
+    except OSError:
+        watched = False
+    if watched:
+        import traceback
+        traceback.print_exception(type(ex), ex, ex.__traceback__)
+        os._exit(70)
+
+
+GTK4 = _choose_gtk4()
+if GTK4:
+    os.environ.setdefault("GSK_RENDERER", "cairo")      # GTK 4's CPU renderer; must be set before Gtk loads
+    # GTK 4 makes its GL contexts with EGL, on X11 as well as Wayland (GTK 3 on X11 used GLX). PyOpenGL has to
+    # be told before it is imported, or it looks for a GLX context and finds none ("no valid context").
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    if not os.environ.get("SHOTROVER_GTK_WARN"):
+        # GTK 4.12 marks the old list, dialog and style calls deprecated and PyGObject prints one warning per
+        # call site: hundreds of lines that bury real errors. They still work; replacing them is stage 8 of
+        # the port. Set SHOTROVER_GTK_WARN=1 to see them.
+        import warnings
+        warnings.filterwarnings("ignore", message=r".* is deprecated", category=DeprecationWarning)
+gi.require_version("Gtk", "4.0" if GTK4 else "3.0")
+gi.require_version("Gdk", "4.0" if GTK4 else "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
+ALT_MASK = Gdk.ModifierType.ALT_MASK if GTK4 else Gdk.ModifierType.MOD1_MASK      # the Alt key's modifier bit
+
+
+def rgba(red: float, green: float, blue: float, alpha: float = 1.0):
+    """A Gdk.RGBA. Always build colours with this: with GTK 4 and PyGObject before 3.42 the constructor
+    ignores its arguments and Gdk.RGBA(r, g, b, a) comes out as transparent black."""
+    c = Gdk.RGBA()
+    c.red, c.green, c.blue, c.alpha = red, green, blue, alpha
+    return c
 
 # numpy is optional: the 3D previewer uses it for projection/sorting when present (h5py pulls it in anyway),
 # and falls back to pure Python otherwise.
@@ -53,7 +212,7 @@ except ImportError:   # pragma: no cover
 # GtkSourceView is optional: it gives the preview pane syntax colouring, line numbers and a proper code
 # editor. most GNOME desktops ship it; without it the preview falls back to a plain TextView.
 GtkSource = None
-for _ver in ("4", "3.0"):
+for _ver in (("5",) if GTK4 else ("4", "3.0")):
     try:
         gi.require_version("GtkSource", _ver)
         from gi.repository import GtkSource  # noqa: E402
@@ -78,7 +237,7 @@ def bench(label: str):
 APP_ID = "io.github.KCArrow.Shotrover"
 APP_NAME = "Shotrover"
 APP_FULL_NAME = "Shotrover"
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 # the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
 # file and the portable build show it in the title bar, task switcher and About box without installing
 APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
@@ -278,7 +437,7 @@ DEFAULT_CONFIG = {
     "open_to": "quick", "browse_in_new_tab": False, "single_click": False,
     "show_recent": True, "show_frequent": True,
     "show_hidden": False, "hide_extensions": False, "full_path_title": False, "folders_first": True,
-    "confirm_delete": True, "checkboxes": False, "gl_preview": True, "seq_fps": 24, "blend_view": "breakdown", "gdk_backend": "", "rv_enabled": False, "rv_path": "", "ui_cores": 2, "archive_action": "extract", "index_enabled": False, "index_roots": [HOME], "index_network": False, "index_hidden": False, "index_interval_h": 6, "nav_pane": True, "preview_pane": False, "details_pane": False,
+    "confirm_delete": True, "checkboxes": False, "gl_preview": True, "toolkit": "gtk3", "seq_fps": 24, "blend_view": "breakdown", "gdk_backend": "", "rv_enabled": False, "rv_path": "", "ui_cores": 2, "archive_action": "extract", "index_enabled": False, "index_roots": [HOME], "index_network": False, "index_hidden": False, "index_interval_h": 6, "nav_pane": True, "preview_pane": False, "details_pane": False,
     "size_in_bytes": False, "date_format": "%Y-%m-%d %H:%M", "layout": "details",
     "sort_key": "name", "sort_desc": False, "group_by": "none",
     "columns": ["name", "modified", "type", "size"],
@@ -334,7 +493,7 @@ SHORTCUT_ACTIONS = [
 ]
 SHORTCUT_DEFAULTS = {a[0]: a[2] for a in SHORTCUT_ACTIONS}
 SHORTCUT_LIST_ONLY = {a[0] for a in SHORTCUT_ACTIONS if a[3]}
-_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
+_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | ALT_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
 _SC_RESERVED = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Escape, Gdk.KEY_Menu, Gdk.KEY_F10, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab,
                 Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End, Gdk.KEY_Page_Up, Gdk.KEY_Page_Down)
 
@@ -346,12 +505,12 @@ def shortcut_accels(cfg: dict, aid: str) -> List[str]:
 
 
 def shortcut_key(accel: str) -> Optional[Tuple[int, int]]:
-    key, mods = Gtk.accelerator_parse(accel or "")
+    key, mods = accel_parse(accel or "")
     return (Gdk.keyval_to_lower(key), int(mods)) if key else None
 
 
 def shortcut_label(accel: str) -> str:
-    key, mods = Gtk.accelerator_parse(accel or "")
+    key, mods = accel_parse(accel or "")
     return Gtk.accelerator_get_label(key, mods) if key else ""
 
 
@@ -1731,7 +1890,7 @@ def dir_stats_cached(path: str, cancel: threading.Event) -> Tuple[int, int, int]
     return res
 
 
-def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
+def _dir_stats_here(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
     files = folders = total = 0
     for root, ds, fs in os.walk(path, onerror=lambda e: None):
         if cancel.is_set():
@@ -1744,6 +1903,91 @@ def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
             except OSError:
                 pass
     return files, folders, total
+
+
+# The same walk, as a program of its own: reads one JSON path per line, answers "files folders bytes".
+_STAT_HELPER = r"""
+import json, os, sys
+try:
+    cores = json.loads(sys.argv[1])
+    if cores:
+        os.sched_setaffinity(0, cores)
+    os.nice(5)
+except Exception:
+    pass
+for line in sys.stdin.buffer:
+    files = folders = total = 0
+    try:
+        for root, ds, fs in os.walk(json.loads(line), onerror=lambda e: None):
+            folders += len(ds)
+            files += len(fs)
+            for f in fs:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    sys.stdout.write("%d %d %d\n" % (files, folders, total))
+    sys.stdout.flush()
+"""
+_STAT_IDLE: list = []                     # helper processes waiting for the next folder
+_STAT_LOCK = threading.Lock()
+
+
+def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
+    """(files, folders, bytes) under a folder. Blocks, so call it from a worker thread.
+
+    The walk runs in a helper process, not in the calling thread. Walking a big tree is a tight Python loop
+    of lstat calls; in a thread of this process it takes the interpreter lock back after every call faster
+    than the GTK thread can get hold of it, and the window froze for seconds at a time whenever a large
+    folder (a network share, most of all) was selected. A cancelled walk has its helper killed and returns
+    zeros; if no helper can be started the walk runs here as it used to."""
+    import select
+    proc = None
+    try:
+        with _STAT_LOCK:
+            while _STAT_IDLE and proc is None:
+                cand = _STAT_IDLE.pop()
+                if cand.poll() is None:
+                    proc = cand
+        if proc is None:
+            proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", _STAT_HELPER, json.dumps(sorted(_cpu_sets()[1] or []))],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        proc.stdin.write((json.dumps(path) + "\n").encode())
+        proc.stdin.flush()
+        fd, buf = proc.stdout.fileno(), b""
+        while b"\n" not in buf:
+            if cancel.is_set():
+                _stat_helper_end(proc)
+                return 0, 0, 0
+            if select.select([fd], [], [], 0.1)[0]:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    raise OSError("the helper ended")
+                buf += chunk
+        files, folders, total = (int(x) for x in buf.split()[:3])
+        with _STAT_LOCK:
+            keep = len(_STAT_IDLE) < 2
+            if keep:
+                _STAT_IDLE.append(proc)
+        if not keep:
+            _stat_helper_end(proc)
+        return files, folders, total
+    except Exception:
+        if proc is not None:
+            _stat_helper_end(proc)
+        return _dir_stats_here(path, cancel)
+
+
+def _stat_helper_end(proc):
+    try:
+        proc.kill()
+        proc.wait(timeout=2)
+        proc.stdin.close()
+        proc.stdout.close()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- launching
@@ -1846,8 +2090,14 @@ def shortcut_name(e) -> str:
 
 
 def set_clipboard_text(text: str) -> None:
+    """Put plain text on the clipboard. Every text copy in the application goes through here."""
+    if GTK4:
+        data = GLib.Bytes.new((text or "").encode("utf-8"))
+        Gdk.Display.get_default().get_clipboard().set_content(
+            Gdk.ContentProvider.new_for_bytes("text/plain;charset=utf-8", data))
+        return
     cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-    cb.set_text(text, -1)
+    cb.set_text(text or "", -1)
     cb.store()
 
 
@@ -2684,15 +2934,26 @@ class PathCache:
         self._pending: set = set()
         self._lock = threading.Lock()
         self.on_change: Optional[Callable] = None               # called (idle) when a verdict flips
+        # A few long-lived workers take the paths from a queue. There used to be one new thread per path, and
+        # the navigation pane asks about a couple of hundred paths in one go: Thread.start() waits for the new
+        # thread to report in, which costs a hand-over of the interpreter lock each time, and the window sat
+        # dead for two seconds or more whenever the pane was rebuilt while anything else was working.
+        import queue as _queue
+        self._q = _queue.Queue()
+        self._workers = 0
+        self._idle = 0
+        self._busy: Dict[int, float] = {}                         # worker id → when its current stat began
 
-    def _schedule(self, path: str):
-        with self._lock:
-            if path in self._pending:
-                return
-            self._pending.add(path)
-
-        def work():
-            pin_worker()
+    def _worker(self):
+        pin_worker()
+        me = threading.get_ident()
+        while True:
+            with self._lock:
+                self._idle += 1
+            path = self._q.get()
+            with self._lock:
+                self._idle -= 1
+                self._busy[me] = time.monotonic()
             try:
                 st = os.stat(path)
                 ex, isd = True, _stat.S_ISDIR(st.st_mode)
@@ -2702,11 +2963,25 @@ class PathCache:
                 old = self._v.get(path)
                 self._v[path] = (ex, isd, time.monotonic())
                 self._pending.discard(path)
-            if old is not None and old[:2] != (ex, isd) and self.on_change:
+                self._busy.pop(me, None)
+            if self.on_change and ((old is not None and old[:2] != (ex, isd)) or (old is None and not ex)):
                 GLib.idle_add(lambda: (self.on_change(), False)[1])
-            elif old is None and not ex and self.on_change:
-                GLib.idle_add(lambda: (self.on_change(), False)[1])
-        threading.Thread(target=work, daemon=True).start()
+
+    def _schedule(self, path: str):
+        with self._lock:
+            if path in self._pending:
+                return
+            self._pending.add(path)
+            # 4 workers in the normal case. One that has been inside a stat for 2 s is on a dead mount and
+            # does not count, so the others' paths are never held up behind it (up to 32 threads in all).
+            now = time.monotonic()
+            stuck = sum(1 for t in self._busy.values() if now - t > 2.0)
+            spawn = self._idle == 0 and self._workers - stuck < 4 and self._workers < 32
+            if spawn:
+                self._workers += 1
+        self._q.put(path)
+        if spawn:
+            threading.Thread(target=self._worker, daemon=True).start()
 
     def _get(self, path: str) -> Tuple[bool, bool]:
         with self._lock:
@@ -2792,10 +3067,67 @@ def install_thread_pinning():
     threading.Thread = PinnedThread
 
 
+# Background jobs for the interface. Thread.start() does not return until the new thread has reported in,
+# which takes two hand-overs of the interpreter lock: while another Python thread is busy (listing a big
+# folder, say) that is tens to hundreds of milliseconds, and it was being paid on the GTK thread for every
+# selection. bg() hands the job to threads that already exist.
+_BG_LOCK = threading.Lock()
+_BG = {"q": None, "n": 0, "idle": 0, "queued": 0}
+
+
+def _bg_worker():
+    pin_worker()
+    while True:
+        with _BG_LOCK:
+            _BG["idle"] += 1
+        fn = _BG["q"].get()
+        with _BG_LOCK:
+            _BG["idle"] -= 1
+            _BG["queued"] -= 1
+        try:
+            fn()
+        except BaseException:                 # report it the way a thread of its own would have
+            try:
+                threading.excepthook(threading.ExceptHookArgs(sys.exc_info() + (threading.current_thread(),)))
+            except Exception:
+                pass
+
+
+def _bg_grow(n: int):
+    for _ in range(n):
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+
+def bg(fn):
+    """Run fn() on a background thread; returns at once. In place of threading.Thread(target=fn).start()
+    for anything started from the GTK thread. A job may run for as long as it likes: when every worker is
+    busy another is added (64 at most; beyond that jobs wait their turn)."""
+    with _BG_LOCK:
+        if _BG["q"] is None:
+            import queue
+            _BG["q"] = queue.Queue()
+        grow = _BG["idle"] <= _BG["queued"] and _BG["n"] < 64
+        if grow:
+            _BG["n"] += 1
+        _BG["queued"] += 1
+    _BG["q"].put(fn)
+    if grow:
+        _bg_grow(1)
+
+
 def warm_workers():
     """Fork the decoder pool (and the 3D render worker) right after startup, while RSS is a few tens of MB.
     os.fork() copies the page tables with the GIL held, so forking later — with a 5M-face mesh and thumbnail
     caches resident — would freeze the interface for a noticeable fraction of a second."""
+    try:                                    # a few bg() threads, started here and not on the GTK thread
+        with _BG_LOCK:
+            if _BG["q"] is None:
+                import queue
+                _BG["q"] = queue.Queue()
+            _BG["n"] += 6
+        _bg_grow(6)
+    except Exception:
+        pass
     try:
         run_heavy(int, 0)
     except Exception:
@@ -3614,6 +3946,56 @@ def run_selftest(bench: bool = False) -> int:
             self.assertEqual(len(g), 3)
             self.assertEqual(fc.payload("image/jpeg")[:3], b"\xff\xd8\xff")
 
+        @timed("file index round trip, both formats")
+        def test_file_index(self):
+            if not shutil.which("openssl"):
+                self.skipTest("openssl not installed")
+            import zlib
+            g = globals()
+            keep = g["INDEX_FILE"]
+            g["INDEX_FILE"] = os.path.join(self.tmp, "index-test.enc")
+            try:
+                key = bytes(range(32))
+                data = {"/a": (1.5, [("x.exr", False, 10, 2.0), ("sub", True, 0, 3.0)]), "/a/sub": (4.0, []),
+                        "/odd\nname": (5.0, [("line\nbreak.txt", False, 1, 6.0)])}
+                one = FileIndex()
+                one._k, one.data = key, dict(data)
+                one.progress["finished"] = 123.0
+                self.assertTrue(one.save(), one.last_error)
+                two = FileIndex()
+                two._k = key
+                self.assertTrue(two.load(), two.last_error)
+                self.assertEqual(two.data, data)
+                self.assertEqual(two.progress["finished"], 123.0)
+                # an index written by 1.1.2 and earlier (one JSON document) still loads, and is rewritten
+                raw = zlib.compress(json.dumps({"version": 1, "finished": 7.0, "dirs": {d: [m, e] for d, (m, e) in data.items()}},
+                                               separators=(",", ":")).encode(), 6)
+                body = _openssl([], raw, key)
+                with open(g["INDEX_FILE"], "wb") as f:
+                    f.write(FileIndex.MAGIC + _mac(key, body) + body)
+                old = FileIndex()
+                old._k = key
+                self.assertTrue(old.load(), old.last_error)
+                self.assertEqual(old.data, data)
+                again = FileIndex()
+                again._k = key
+                self.assertTrue(again.load(), again.last_error)
+                self.assertEqual((again.data, again.progress["finished"]), (data, 7.0))
+                # the application's side: the same index, held by the helper process
+                cl = IndexClient(key)
+                try:
+                    self.assertTrue(cl.load(), cl.last_error)
+                    self.assertTrue(cl.loaded)
+                    self.assertEqual(cl.progress["finished"], 7.0)
+                    self.assertEqual(cl.lookup("/a"), data["/a"][1])
+                    self.assertEqual(cl.lookup("/nowhere"), None)
+                    self.assertEqual(cl.search("x.e"), [("/a/x.exr", False, 10, 2.0)])
+                    self.assertEqual(cl.stats()["dirs"], 3)
+                finally:
+                    cl.close()
+            finally:
+                g["INDEX_FILE"] = keep
+
         @timed("zip round trip (ArchiveOp)")
         def test_zip_roundtrip(self):
             src = os.path.join(self.tmp, "ziptest")
@@ -4289,7 +4671,7 @@ class StressDriver:
         w = self.win
         dlg = OptionsDialog(w, w.cfg, lambda: None, 0)
         GLib.timeout_add(300, lambda: (dlg.response(Gtk.ResponseType.CLOSE), False)[1])
-        dlg.run()
+        run_dialog(dlg)
         dlg.destroy()
 
     def _zip(self):
@@ -4700,12 +5082,33 @@ class FileIndex:
                 raise ValueError("index authentication failed (wrong key or tampered file) — it will be rebuilt")
             import zlib
             raw = zlib.decompress(_openssl(["-d"], body, k))
-            obj = json.loads(raw.decode("utf-8"))
+            # The index is read and written one folder at a time. Parsing it as a single JSON document (the
+            # first format) is one C call that keeps the interpreter lock for its whole length: with 100,000
+            # folders the window did not react for a second and a half, shortly after every start and again
+            # after each save. A loop of small steps lets the interface thread in between them.
+            nl = raw.find(b"\n")
+            if nl < 0:                               # first format: one document. Read it once more, rewrite it
+                obj = json.loads(raw.decode("utf-8"))
+                data = {d: (m, [tuple(x) for x in ents]) for d, (m, ents) in obj["dirs"].items()}
+                finished, old_format = obj.get("finished", 0.0), True
+            else:
+                finished, old_format = json.loads(raw[:nl]).get("finished", 0.0), False
+                data, pos, end = {}, nl + 1, len(raw)
+                while pos < end:
+                    nl = raw.find(b"\n", pos)
+                    if nl < 0:
+                        nl = end
+                    if nl > pos:
+                        d, m, ents = json.loads(raw[pos:nl])
+                        data[d] = (m, [tuple(x) for x in ents])
+                    pos = nl + 1
             with self.lock:
-                self.data = {d: (m, [tuple(x) for x in ents]) for d, (m, ents) in obj["dirs"].items()}
+                self.data = data
                 self._flat = None
-            self.progress["finished"] = obj.get("finished", 0.0)
+            self.progress["finished"] = finished
             self.loaded = True
+            if old_format:
+                self.save()
             return True
         except Exception as ex:
             self.last_error = str(ex)
@@ -4719,8 +5122,15 @@ class FileIndex:
         try:
             import zlib
             with self.lock:
-                obj = {"version": 1, "finished": self.progress["finished"], "dirs": {d: [m, ents] for d, (m, ents) in self.data.items()}}
-            raw = zlib.compress(json.dumps(obj, separators=(",", ":")).encode("utf-8"), 6)
+                items = list(self.data.items())
+            # one line per folder, compressed a few hundred folders at a time: see load() for why
+            co = zlib.compressobj(6)
+            parts = [co.compress((json.dumps({"version": 2, "finished": self.progress["finished"]}) + "\n").encode("utf-8"))]
+            for i in range(0, len(items), 400):
+                chunk = "".join(json.dumps([d, m, ents], separators=(",", ":")) + "\n" for d, (m, ents) in items[i:i + 400])
+                parts.append(co.compress(chunk.encode("utf-8")))
+            parts.append(co.flush())
+            raw = b"".join(parts)
             body = _openssl([], raw, k)
             blob = self.MAGIC + _mac(k, body) + body
             os.makedirs(os.path.dirname(INDEX_FILE), exist_ok=True)
@@ -4758,8 +5168,11 @@ class FileIndex:
             mt = os.stat(path).st_mtime
         except OSError:
             return
+        self.put_dir(path, mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries])
+
+    def put_dir(self, path: str, mtime: float, rows: list):
         with self.lock:
-            self.data[path.rstrip("/") or "/"] = (mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries])
+            self.data[path.rstrip("/") or "/"] = (mtime, rows)
             self._flat = None
             self.dirty = True
         self._schedule_save()
@@ -4880,20 +5293,222 @@ class FileIndex:
                         self.save()
                         last_save = time.time()
                         if self.on_status:
-                            GLib.idle_add(lambda: (self.on_status(), False)[1])
+                            self.on_status()
             self.progress["finished"] = time.time()
             self.progress["current"] = ""
             self.save()
             self.crawling = False
             if self.on_status:
-                GLib.idle_add(lambda: (self.on_status(), False)[1])
+                self.on_status()             # called on this thread: the caller takes it where it wants it
         threading.Thread(target=work, daemon=True, name="shotrover-indexer").start()
 
     def stop(self):
         self.cancel.set()
 
 
-INDEX = FileIndex()
+def _index_serve(conn, other, parent: int, key: Optional[bytes]):
+    """The index helper process: it owns the FileIndex and answers IndexClient until the pipe closes or the
+    application is gone. Loading, crawling and saving run in threads of this process, where they can keep
+    its interpreter lock as long as they like."""
+    try:
+        other.close()                        # the application's end; open here it would hide its closing
+    except Exception:
+        pass
+    pin_worker()
+    idx = FileIndex()
+    idx._k = key
+    slock = threading.Lock()
+
+    def send(msg):
+        with slock:
+            try:
+                conn.send(msg)
+            except (OSError, ValueError):
+                os._exit(0)
+
+    def state(notify: bool = False):
+        send(("s", {"loaded": idx.loaded, "crawling": idx.crawling, "progress": dict(idx.progress),
+                    "last_error": idx.last_error}, notify))
+
+    def load(rid):
+        ok = idx.load()
+        state()
+        send(("r", rid, ok))
+    idx.on_status = lambda: state(True)
+    was = False
+    while True:
+        try:
+            if not conn.poll(0.5):
+                if os.getppid() != parent:
+                    os._exit(0)
+                if idx.crawling or was:
+                    state()
+                was = idx.crawling
+                continue
+            rid, op, args = conn.recv()
+        except (EOFError, OSError):
+            os._exit(0)
+        res = None
+        try:
+            if op == "load":
+                threading.Thread(target=load, args=(rid,), daemon=True).start()
+                continue
+            if op == "lookup":
+                res = idx.lookup(*args)
+            elif op == "search":
+                res = idx.search(*args)
+            elif op == "put":
+                idx.put_dir(*args)
+            elif op == "stats":
+                res = idx.stats()
+            elif op == "crawl":
+                idx.crawl(*args)
+                state()
+            elif op == "stop":
+                idx.stop()
+            elif op == "wipe":
+                idx.wipe()
+                state()
+        except Exception as ex:
+            idx.last_error = f"{op}: {ex}"
+        if rid:
+            send(("r", rid, res))
+
+
+class IndexClient:
+    """The file index as the application sees it. The index itself (FileIndex) lives in a helper process.
+
+    Reading a big index is a long Python loop, and so is walking the disk to refresh it. In a thread of
+    this process each of them took the interpreter lock back faster than the GTK thread could get hold of
+    it: the window stuttered badly for the first seconds after every start, and for as long as a crawl
+    ran. Here only small messages cross a pipe. `loaded`, `crawling` and `progress` are kept up to date by
+    the helper; a question it does not answer in time counts as "not in the index"."""
+
+    def __init__(self, key: Optional[bytes] = None):
+        self.loaded = False
+        self.crawling = False
+        self.progress = {"dirs": 0, "files": 0, "current": "", "started": 0.0, "finished": 0.0}
+        self.last_error = ""
+        self.on_status: Optional[Callable] = None
+        self._key = key                      # tests only: otherwise the helper fetches the key itself
+        self._proc = None
+        self._conn = None
+        self._lock = threading.Lock()
+        self._wait: Dict[int, list] = {}     # request number → [Event, answer]
+        self._n = 0
+
+    def _start(self) -> bool:
+        with self._lock:
+            if self._proc is not None and self._proc.is_alive():
+                return True
+            try:
+                import multiprocessing
+                ctx = multiprocessing.get_context("fork")
+                mine, theirs = ctx.Pipe()
+                proc = ctx.Process(target=_index_serve, args=(theirs, mine, os.getpid(), self._key), daemon=True, name="shotrover-index")
+                proc.start()
+                theirs.close()
+            except Exception as ex:
+                self.last_error = f"index helper: {ex}"
+                return False
+            self._proc, self._conn = proc, mine
+            threading.Thread(target=self._read, args=(mine,), daemon=True, name="shotrover-index-reader").start()
+            return True
+
+    def _read(self, conn):
+        """Everything the helper sends: answers, and news about its state."""
+        while True:
+            try:
+                msg = conn.recv()
+            except (EOFError, OSError, ValueError):
+                break
+            if msg[0] == "r":
+                w = self._wait.pop(msg[1], None)
+                if w is not None:
+                    w[1] = msg[2]
+                    w[0].set()
+            elif msg[0] == "s":
+                st = msg[1]
+                self.progress.update(st["progress"])
+                self.last_error = st["last_error"]
+                self.loaded, self.crawling = st["loaded"], st["crawling"]
+                cb = self.on_status
+                if msg[2] and cb is not None:
+                    GLib.idle_add(lambda cb=cb: (cb(), False)[1])
+        if conn is self._conn:               # the helper is gone: the next load() starts another
+            self.loaded = self.crawling = False
+        for w in list(self._wait.values()):
+            w[0].set()
+
+    def _call(self, op: str, *args, timeout: Optional[float] = None, reply: bool = True):
+        conn = self._conn
+        if conn is None:
+            return None
+        w = None
+        with self._lock:
+            rid = 0
+            if reply:
+                self._n += 1
+                rid = self._n
+                w = self._wait[rid] = [threading.Event(), None]
+            try:
+                conn.send((rid, op, args))
+            except (OSError, ValueError):
+                self._wait.pop(rid, None)
+                return None
+        if w is None:
+            return None
+        w[0].wait(timeout)
+        self._wait.pop(rid, None)
+        return w[1]
+
+    def load(self) -> bool:
+        """Blocks until the helper has read the index: call it from a worker thread."""
+        if not self._start():
+            return False
+        return bool(self._call("load"))
+
+    def lookup(self, path: str) -> Optional[list]:
+        return self._call("lookup", path, timeout=0.1)
+
+    def search(self, pattern: str, root: Optional[str] = None, limit: int = 5000) -> list:
+        return self._call("search", pattern, root, limit, timeout=3.0) or []
+
+    def update_dir(self, path: str, entries: List["Entry"]):
+        try:
+            mt = os.stat(path).st_mtime
+        except OSError:
+            return
+        self._call("put", path, mt, [(e.name, e.is_dir, e.size or 0, e.mtime or 0.0) for e in entries], reply=False)
+
+    def stats(self) -> dict:
+        return self._call("stats", timeout=1.0) or {"dirs": 0, "files": 0, "size": 0, "finished": self.progress["finished"], "key": "—",
+                                                    "crawling": self.crawling, "error": self.last_error}
+
+    def crawl(self, roots: List[str], include_network: bool, include_hidden: bool, full: bool = False):
+        if self.crawling or self._conn is None:
+            return
+        self.crawling = True
+        self._call("crawl", roots, include_network, include_hidden, full, reply=False)
+
+    def stop(self):
+        self._call("stop", reply=False)
+
+    def wipe(self):
+        self._call("wipe", timeout=30.0)
+
+    def close(self):
+        """Quit: end the helper at once (a crawl in it is simply dropped; the last save is on disk)."""
+        proc, self._proc, self._conn = self._proc, None, None
+        self.loaded = self.crawling = False
+        if proc is not None:
+            try:
+                proc.kill()
+            except Exception:
+                pass
+
+
+INDEX = IndexClient()
 
 
 def index_entries_for(path: str, rows: list) -> List["Entry"]:
@@ -4919,7 +5534,7 @@ def index_entries_for(path: str, rows: list) -> List["Entry"]:
 #   crash  — the process died (segfault in a C library, abort, killed). faulthandler writes the stacks of
 #            every thread to a per-process file on fatal signals; a per-process session marker that is only
 #            removed on a clean exit tells the next start that the previous run ended abnormally.
-#   freeze — the stall watchdog's >4 s lock-up dump (p1c), picked up the same way.
+#   freeze — the stall watchdog's >4 s lock-up dump (diagnostics.py), picked up the same way.
 # Nothing is ever sent automatically: the user reviews (and can edit) the report, then opens it as a
 # pre-filled GitHub issue (or copies it). Home folder and user name are replaced with "~" / "<user>" before anything is shown.
 
@@ -5241,6 +5856,1203 @@ class CrashReporter:
 CRASH = CrashReporter()
 
 
+# =========================================================================== toolkit compatibility layer
+# Small functions the rest of the code calls in place of GTK 3 calls that GTK 4 removed or changed. The
+# interface is being ported in stages (docs/internal/GTK4-PORT.md): first every caller moves to these while
+# the application still runs on GTK 3, then each function gets its GTK 4 body. Keep them few and small, and
+# keep the GTK 3 behaviour exactly what the replaced call did.
+
+def put(box, child, expand: bool = True, fill: bool = True, padding: int = 0):
+    """box.pack_start(child, expand, fill, padding). The defaults are PyGObject's (expand and fill on).
+    Anything that is not a Gtk.Box (a tree-view column, a header bar…) keeps its own pack_start."""
+    if not isinstance(box, Gtk.Box):
+        if isinstance(box, Gtk.CellLayout):
+            return box.pack_start(child, expand)
+        return box.pack_start(child)
+    if not GTK4:
+        return box.pack_start(child, expand, fill, padding)
+    _pack4(box, child, expand, fill, padding, False)
+
+
+def put_end(box, child, expand: bool = True, fill: bool = True, padding: int = 0):
+    """box.pack_end(child, expand, fill, padding): packed from the far end, the first one outermost."""
+    if not isinstance(box, Gtk.Box):
+        return box.pack_end(child, expand) if isinstance(box, Gtk.CellLayout) else box.pack_end(child)
+    if not GTK4:
+        return box.pack_end(child, expand, fill, padding)
+    _pack4(box, child, expand, fill, padding, True)
+
+
+def _pack4(box, child, expand, fill, padding, at_end):
+    """GTK 4 has only append(): expand and padding become properties of the child, and children packed
+    from the end are inserted after the last start child, so the first end child stays outermost. While no
+    child expands, the innermost end child is given the spare room and aligned to the end, which is what
+    keeps the end group at the far side."""
+    # children may have been taken out since the last call (a bar that is rebuilt): forget those
+    ends = [c for c in (getattr(box, "_sr_ends", None) or []) if c.get_parent() is box]
+    box._sr_ends = ends
+    last_start = getattr(box, "_sr_last_start", None)
+    if last_start is not None and last_start.get_parent() is not box:
+        starts = [c for c in child_widgets(box) if not any(c is e for e in ends)]
+        last_start = box._sr_last_start = starts[-1] if starts else None
+    pusher = getattr(box, "_sr_pusher", None)
+    if pusher is not None and pusher.get_parent() is not box:
+        box._sr_pusher = None
+    if not child_widgets(box):
+        box._sr_expands = False
+    horiz = box.get_orientation() == Gtk.Orientation.HORIZONTAL
+    set_expand = child.set_hexpand if horiz else child.set_vexpand
+    set_align = child.set_halign if horiz else child.set_valign
+    if expand:
+        set_expand(True)
+        if not fill:
+            set_align(Gtk.Align.CENTER)
+        box._sr_expands = True
+    if padding:
+        for side in (("start", "end") if horiz else ("top", "bottom")):
+            getattr(child, "set_margin_" + side)(getattr(child, "get_margin_" + side)() + padding)
+    if not at_end:
+        if getattr(box, "_sr_ends", None):
+            box.insert_child_after(child, last_start)
+        else:
+            box.append(child)
+        box._sr_last_start = child
+    else:
+        box.insert_child_after(child, last_start)            # None puts it first: right when nothing starts
+        box._sr_ends = (getattr(box, "_sr_ends", None) or []) + [child]
+    pusher = getattr(box, "_sr_pusher", None)
+    if pusher is not None:                                   # undo the previous stand-in for spare room
+        (pusher.set_hexpand if horiz else pusher.set_vexpand)(False)
+        (pusher.set_halign if horiz else pusher.set_valign)(Gtk.Align.FILL)
+        box._sr_pusher = None
+    ends = getattr(box, "_sr_ends", None)
+    if ends and not getattr(box, "_sr_expands", False):
+        inner = ends[-1]
+        (inner.set_hexpand if horiz else inner.set_vexpand)(True)
+        (inner.set_halign if horiz else inner.set_valign)(Gtk.Align.END)
+        box._sr_pusher = inner
+
+
+def show_all(widget):
+    """widget.show_all(). GTK 4 widgets are visible unless hidden, so there it only has to show the widget."""
+    if not GTK4:
+        return widget.show_all()
+    widget.set_visible(True)
+
+
+def child_widgets(widget) -> list:
+    """widget.get_children(): the direct children, in order."""
+    if not GTK4:
+        return widget.get_children()
+    out, c = [], widget.get_first_child()
+    while c is not None:
+        out.append(c)
+        c = c.get_next_sibling()
+    return out
+
+
+def set_child(container, child):
+    """container.add(child) for a container that holds one child: a window, scrolled window, frame, button,
+    expander, overlay, event box."""
+    if not GTK4:
+        return container.add(child)
+    if hasattr(container, "set_child"):
+        return container.set_child(child)
+    container.append(child)                      # event_box() is a plain Gtk.Box there
+
+
+def take_out(container, child):
+    """container.remove(child) for a widget container (box, grid, stack, pane, menu, single-child holder)."""
+    if not GTK4:
+        return container.remove(child)
+    if isinstance(container, Gtk.Paned):
+        if container.get_start_child() is child:
+            return container.set_start_child(None)
+        return container.set_end_child(None)
+    if hasattr(container, "remove"):
+        return container.remove(child)
+    container.set_child(None)
+
+
+def pane_first(paned, child, resize: bool = False, shrink: bool = True):
+    """paned.pack1(child, resize, shrink): the left or top side."""
+    if not GTK4:
+        return paned.pack1(child, resize, shrink)
+    paned.set_start_child(child)
+    paned.set_resize_start_child(resize)
+    paned.set_shrink_start_child(shrink)
+
+
+def pane_second(paned, child, resize: bool = True, shrink: bool = True):
+    """paned.pack2(child, resize, shrink): the right or bottom side."""
+    if not GTK4:
+        return paned.pack2(child, resize, shrink)
+    paned.set_end_child(child)
+    paned.set_resize_end_child(resize)
+    paned.set_shrink_end_child(shrink)
+
+
+def event_box():
+    """A holder that exists only so its child can receive mouse events. GTK 4 has no Gtk.EventBox (every
+    widget takes input there), so it is a plain box."""
+    return Gtk.Box() if GTK4 else Gtk.EventBox()
+
+
+def on_draw(area, handler):
+    """area.connect("draw", handler) for a Gtk.DrawingArea: handler(widget, cr) paints it."""
+    if not GTK4:
+        return area.connect("draw", handler)
+    area.set_draw_func(lambda a, cr, w, h, *_: handler(a, cr))
+
+
+def on_draw_over(widget, handler, under: bool = False):
+    """Extra painting on a widget that also draws itself: rules over a list, an outline round a bar.
+    handler(widget, cr) runs after the widget's own drawing, or before it with under=True.
+    GTK 4 has no draw signal on ordinary widgets, so nothing extra is painted there yet (cosmetic only)."""
+    if not GTK4:
+        return widget.connect("draw", handler) if under else widget.connect_after("draw", handler)
+    return 0
+
+
+def start_hidden(widget, on: bool = True):
+    """widget.set_no_show_all(on): the widget stays hidden when its window is shown, until code shows it.
+    GTK 4 widgets are visible unless hidden, so there the widget is hidden now."""
+    if not GTK4:
+        return widget.set_no_show_all(on)
+    if on:
+        widget.set_visible(False)
+
+
+def css_class(widget, name: str, on: bool = True):
+    """Add (or with on=False remove) a CSS class on a widget."""
+    if GTK4:
+        return widget.add_css_class(name) if on else widget.remove_css_class(name)
+    sc = widget.get_style_context()
+    return sc.add_class(name) if on else sc.remove_class(name)
+
+
+def style_fg(style_context, state=None):
+    """style_context.get_color(state): the text colour (Gdk.RGBA) for a widget state; NORMAL when not given.
+    GTK 4's style context has one colour, for the widget's current state.
+
+    The other style-context calls the code uses (lookup_color, add_class / remove_class on a context held in
+    a variable, get_state, Gtk.render_background) still exist in GTK 4.12, where they are deprecated. They
+    are left as they are for now; replace them when GTK 3 is dropped."""
+    if GTK4:
+        return style_context.get_color()
+    return style_context.get_color(Gtk.StateFlags.NORMAL if state is None else state)
+
+
+# Extra rules for GTK 4 only: its menus are popovers of buttons and its menu bar a row of menu buttons (see
+# menu4 and menu_bar), and buttons are far taller than GTK 3 menu items unless told otherwise.
+CSS_GTK4 = """
+.sr-menubar > menubutton > button { min-height: 0; padding: 3px 8px; border-radius: 0; font-weight: normal; }
+popover.menu > contents { padding: 4px 0; }
+popover.menu button, popover.menu menubutton > button { min-height: 0; padding: 4px 10px; border-radius: 0; font-weight: normal; }
+popover.menu checkbutton { min-height: 0; padding: 0; }
+/* GTK 3 draws no focus ring round a list; GTK 4 outlined the whole file area and the navigation pane */
+treeview:focus-visible, treeview.view:focus-visible, .icongrid:focus-visible { outline: none; }
+popover.menu separator { margin: 4px 0; }
+/* painted in code under GTK 3 (on_draw_over), which GTK 4 cannot do: the same lines through CSS */
+.pathbar { border: 1px solid alpha(@theme_fg_color, 0.16); }
+.pathbar:hover, .pathbar:focus-within { border-color: alpha(@theme_fg_color, 0.34); }
+.pane-header button { min-height: 0; min-width: 0; padding: 0 2px; }
+popover.sr-rename > contents { padding: 0; border-radius: 0; box-shadow: none; border: none; }
+popover.sr-rename entry { min-height: 0; border-radius: 0; }
+/* the Details list (Gtk.ColumnView): rows as tight as the tree view's were, no outline round the list */
+columnview.sr-details > listview > row > cell { padding: 3px 6px; }
+columnview.sr-details:focus-visible, columnview.sr-details > listview:focus-visible { outline: none; }
+columnview.sr-details > listview > row:focus-visible { outline-offset: -1px; }
+columnview.sr-details .sr-group { font-weight: bold; opacity: 0.72; }
+"""
+
+
+def load_app_css(css: bytes):
+    """Install the application's stylesheet for every window. Raises GLib.Error if it does not parse."""
+    prov = Gtk.CssProvider()
+    if GTK4:
+        # GTK 4 drops a rule it cannot parse and says nothing unless asked; while the port is in progress, say it
+        def bad(provider, section, error):      # do not touch `section`: reading it hangs PyGObject 3.40
+            print("shotrover[gtk4]: stylesheet:", error.message, file=sys.stderr)
+        prov.connect("parsing-error", bad)
+        prov.load_from_data((css.decode() if isinstance(css, bytes) else css) + CSS_GTK4, -1)
+        Gtk.StyleContext.add_provider_for_display(Gdk.Display.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+    else:
+        prov.load_from_data(css)
+        Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+
+
+def run_dialog(dialog) -> int:
+    """dialog.run(): show a modal dialog, wait for an answer and return the response id. The caller still
+    destroys the dialog. GTK 4 has no run(); there a nested main loop waits for the response signal."""
+    if not GTK4:
+        return dialog.run()
+    out = {"r": int(Gtk.ResponseType.DELETE_EVENT)}
+    loop = GLib.MainLoop()
+
+    def answered(d, r):
+        out["r"] = r
+        loop.quit()
+    # Gtk.AboutDialog is a plain window in GTK 4: it has no response signal and ends only by being closed
+    h1 = dialog.connect("response", answered) if GObject.signal_lookup("response", type(dialog)) else 0
+    h2 = dialog.connect("close-request", lambda d: (loop.quit(), False)[1])
+    dialog.set_modal(True)
+    dialog.present()
+    loop.run()
+    for h in (h1, h2):
+        if h:
+            dialog.disconnect(h)
+    return out["r"]
+
+
+# ---- input events
+# Handlers keep the GTK 3 form handler(widget, event) and read event.button, .x, .y, .state, .keyval, .type…
+# Under GTK 3 on_event is a plain signal connection. Under GTK 4, which has no event signals, it will attach
+# the matching controller and hand the handler an object with the same fields.
+EV_PRESS = Gdk.EventType.BUTTON_PRESS if not GTK4 else "press"
+EV_PRESS2 = Gdk.EventType._2BUTTON_PRESS if not GTK4 else "press2"           # double click
+EV_PRESS3 = Gdk.EventType._3BUTTON_PRESS if not GTK4 else "press3"           # triple click
+
+
+class Ev:
+    """GTK 4 only: what a GTK 3 handler reads from its event. Controllers have no event structure, so
+    on_event() fills one of these in and passes it instead."""
+
+    def __init__(self, type_=None, **kw):
+        self.type = type_
+        self.button = 0
+        self.x = self.y = self.x_root = self.y_root = 0.0
+        self.state = Gdk.ModifierType(0)
+        self.keyval = 0
+        self.hardware_keycode = 0
+        self.time = 0
+        self.direction = None
+        self.delta_x = self.delta_y = 0.0
+        self.string = ""
+        self.detail = None                  # crossing events: GTK 4's leave already ignores moves onto a child
+        self.__dict__.update(kw)
+
+    def __getattr__(self, name):            # a field no handler was known to read: say so once, answer None
+        if name.startswith("__"):
+            raise AttributeError(name)
+        port_todo("event field ." + name)
+        return None
+
+    def triggers_context_menu(self) -> bool:
+        return self.button == 3
+
+    def get_scroll_deltas(self):
+        return True, self.delta_x, self.delta_y
+
+    def get_state(self):
+        return True, self.state
+
+
+def _ev_from(controller, type_=None, **kw):
+    ev = Ev(type_, **kw)
+    try:
+        ev.state = controller.get_current_event_state()
+        ev.time = controller.get_current_event_time()
+    except Exception:
+        pass
+    ev.x_root, ev.y_root = ev.x, ev.y
+    return ev
+
+
+def _ev_xy(widget, x, y):
+    """GTK 4 only: pointer coordinates as the GTK 3 handlers expect them. A controller reports them relative
+    to the widget; GTK 3 reported a tree view's relative to its rows (below the header, scrolled) and the
+    icon canvas's relative to the whole scrolled canvas."""
+    if isinstance(widget, Gtk.TreeView):
+        return widget.convert_widget_to_bin_window_coords(int(x), int(y))
+    if isinstance(widget, ScrollCanvas):
+        h, v = widget.hadjustment, widget.vadjustment
+        return x + (h.get_value() if h is not None else 0), y + (v.get_value() if v is not None else 0)
+    return x, y
+
+
+def current_modifiers():
+    """The modifier keys held right now (Ctrl, Shift…), for code that runs inside a signal with no event."""
+    if not GTK4:
+        return Gtk.get_current_event_state()[1]
+    try:
+        return Gdk.Display.get_default().get_default_seat().get_keyboard().get_modifier_state()
+    except Exception:
+        return Gdk.ModifierType(0)
+
+
+def _one_group(widget, gesture):
+    """GTK 4 only: add a gesture to a widget, in one group with every other gesture we attach to it. Gestures that are not grouped cancel
+    each other: a second click handler, or the drag gesture that reports releases, went dead the moment
+    another one claimed the press (seen with a real pointer: drag-end arrived at once with 0, 0)."""
+    widget.add_controller(gesture)          # first: GTK only groups gestures that are already on the same widget
+    first = getattr(widget, "_sr_gesture", None)
+    if first is None:
+        widget._sr_gesture = gesture
+    else:
+        gesture.group(first)
+
+
+def on_event(widget, name: str, handler, *args):
+    """widget.connect("<name>-event", handler, *args). A handler returns True to stop the event there.
+    GTK 4: attaches the matching controller and calls handler(widget, Ev, *args)."""
+    if not GTK4:
+        return widget.connect(name, handler, *args)
+    if name == "button-release-event":
+        # Not Gtk.GestureClick: it gives up as soon as the pointer moves a few pixels, so the release that ends
+        # a rubber band never arrived. A drag gesture follows the button until it is let go. It is put in one
+        # group with the click gesture, or it would be cancelled the moment a press handler claims the click.
+        # While the button is held, a claimed sequence no longer reaches the motion controller either, so the
+        # drag gesture also feeds the widget's motion handlers.
+        # (The raw-event controller, Gtk.EventControllerLegacy, is no use: PyGObject 3.40 hands it None.)
+        g = Gtk.GestureDrag()
+        g.set_button(0)
+
+        def where(gesture, dx, dy):
+            start = gesture.get_start_point()
+            x, y = (start[-2] + dx, start[-1] + dy) if start and start[0] else (dx, dy)
+            return _ev_xy(widget, x, y)
+
+        def dragging(gesture, dx, dy):
+            ex, ey = where(gesture, dx, dy)
+            button = gesture.get_current_button()
+            mask = {1: Gdk.ModifierType.BUTTON1_MASK, 2: Gdk.ModifierType.BUTTON2_MASK, 3: Gdk.ModifierType.BUTTON3_MASK}.get(button)
+            for mh, margs in getattr(widget, "_sr_motion", ()):
+                ev = _ev_from(gesture, None, x=ex, y=ey, button=button)
+                if mask is not None:
+                    ev.state = ev.state | mask
+                mh(widget, ev, *margs)
+
+        def let_go(gesture, dx, dy):
+            ex, ey = where(gesture, dx, dy)
+            handler(widget, _ev_from(gesture, None, x=ex, y=ey, button=gesture.get_current_button()), *args)
+        g.connect("drag-update", dragging)
+        g.connect("drag-end", let_go)
+        _one_group(widget, g)
+    elif name == "button-press-event":
+        g = Gtk.GestureClick()
+        g.set_button(0)                                     # every button; the handler looks at event.button
+
+        def click(gesture, n_press, x, y):
+            def send(type_):
+                ex, ey = _ev_xy(widget, x, y)
+                ev = _ev_from(gesture, type_, x=ex, y=ey, button=gesture.get_current_button())
+                if handler(widget, ev, *args):
+                    gesture.set_state(Gtk.EventSequenceState.CLAIMED)
+            send(EV_PRESS)                                  # GTK 3 sends the plain press first, then the
+            if n_press == 2:                                # double- or triple-click event on top of it
+                send(EV_PRESS2)
+            elif n_press >= 3:
+                send(EV_PRESS3)
+        g.connect("pressed", click)
+        _one_group(widget, g)
+    elif name in ("motion-notify-event", "enter-notify-event", "leave-notify-event"):
+        c = Gtk.EventControllerMotion()
+        if name == "leave-notify-event":
+            c.connect("leave", lambda ctl: handler(widget, _ev_from(ctl), *args))
+        else:
+            if name == "motion-notify-event":           # also called by the drag gesture, see above
+                widget._sr_motion = list(getattr(widget, "_sr_motion", ())) + [(handler, args)]
+
+            def moved(ctl, x, y):
+                ex, ey = _ev_xy(widget, x, y)
+                return handler(widget, _ev_from(ctl, x=ex, y=ey), *args)
+            c.connect("motion" if name == "motion-notify-event" else "enter", moved)
+        widget.add_controller(c)
+    elif name == "scroll-event":
+        c = Gtk.EventControllerScroll.new(Gtk.EventControllerScrollFlags.BOTH_AXES)
+
+        def scrolled(ctl, dx, dy):
+            d = Gdk.ScrollDirection
+            direction = (d.UP if dy < 0 else d.DOWN) if dy else (d.LEFT if dx < 0 else d.RIGHT)
+            return bool(handler(widget, _ev_from(ctl, delta_x=dx, delta_y=dy, direction=direction), *args))
+        c.connect("scroll", scrolled)
+        widget.add_controller(c)
+    elif name == "key-press-event":
+        c = Gtk.EventControllerKey()
+        if isinstance(widget, Gtk.Window):                  # a window's handler ran before the focused widget's
+            c.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+
+        def pressed(ctl, keyval, keycode, state):
+            uni = Gdk.keyval_to_unicode(keyval)
+            ev = Ev(keyval=keyval, hardware_keycode=keycode, state=state, string=chr(uni) if uni else "")
+            try:
+                ev.time = ctl.get_current_event_time()
+            except Exception:
+                pass
+            return bool(handler(widget, ev, *args))
+        c.connect("key-pressed", pressed)
+        widget.add_controller(c)
+    elif name in ("focus-in-event", "focus-out-event"):
+        c = Gtk.EventControllerFocus()
+        c.connect("enter" if name == "focus-in-event" else "leave", lambda ctl: handler(widget, Ev(), *args))
+        widget.add_controller(c)
+    elif name == "delete-event":
+        return widget.connect("close-request", lambda w: bool(handler(w, None, *args)))
+    elif name == "unmap-event":
+        return widget.connect("unmap", lambda w: handler(w, None, *args))
+    else:
+        port_todo("on_event " + name)
+    return 0
+
+
+# ---- small differences in widget construction and properties
+_ICON_SIZES = {"menu": "MENU", "button": "BUTTON", "dialog": "DIALOG"}
+
+
+def icon_image(icon, size: str = "button"):
+    """A Gtk.Image for an icon name or a Gio.Icon. size: "menu" and "button" are 16 px, "dialog" is 48 px."""
+    by_name = isinstance(icon, str)
+    if not GTK4:
+        sz = getattr(Gtk.IconSize, _ICON_SIZES[size])
+        return Gtk.Image.new_from_icon_name(icon, sz) if by_name else Gtk.Image.new_from_gicon(icon, sz)
+    img = Gtk.Image.new_from_icon_name(icon) if by_name else Gtk.Image.new_from_gicon(icon)
+    if size == "dialog":
+        img.set_pixel_size(48)
+    return img
+
+
+def icon_button(icon_name: str, size: str = "button"):
+    """A button showing only an icon."""
+    if not GTK4:
+        return Gtk.Button.new_from_icon_name(icon_name, getattr(Gtk.IconSize, _ICON_SIZES[size]))
+    return Gtk.Button.new_from_icon_name(icon_name)
+
+
+def button_image(button, image):
+    """button.set_image(image): replace the picture on an icon-only button."""
+    if not GTK4:
+        return button.set_image(image)
+    button.set_child(image)
+
+
+def flat_button(button):
+    """button.set_relief(Gtk.ReliefStyle.NONE): no frame until the pointer is over it."""
+    if not GTK4:
+        return button.set_relief(Gtk.ReliefStyle.NONE)
+    button.set_has_frame(False)
+
+
+def set_margins(widget, n: int):
+    """container.set_border_width(n): n pixels of space round the contents."""
+    if not GTK4:
+        return widget.set_border_width(n)
+    for side in ("top", "bottom", "start", "end"):
+        getattr(widget, "set_margin_" + side)(n)
+
+
+def label_wrap(label, on: bool = True):
+    """label.set_line_wrap(on)."""
+    return label.set_wrap(on) if GTK4 else label.set_line_wrap(on)
+
+
+def label_wrap_mode(label, mode):
+    """label.set_line_wrap_mode(mode)."""
+    return label.set_wrap_mode(mode) if GTK4 else label.set_line_wrap_mode(mode)
+
+
+def set_frame(widget, on: bool):
+    """set_shadow_type(IN or NONE) on a scrolled window or frame: a thin frame round it, or none."""
+    if not GTK4:
+        return widget.set_shadow_type(Gtk.ShadowType.IN if on else Gtk.ShadowType.NONE)
+    if hasattr(widget, "set_has_frame"):
+        widget.set_has_frame(on)
+
+
+def toplevel(widget):
+    """widget.get_toplevel(): the window a widget is in."""
+    return widget.get_root() if GTK4 else widget.get_toplevel()
+
+
+def dialog_secondary(dialog, text: str):
+    """message_dialog.format_secondary_text(text): the smaller text under the heading."""
+    dialog.props.secondary_use_markup = False
+    dialog.props.secondary_text = text
+
+
+def center_on_parent(window):
+    """window.set_position(CENTER_ON_PARENT). GTK 4 leaves placement to the window manager."""
+    if not GTK4:
+        window.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+
+
+class _NoMask:
+    def __getattr__(self, name):
+        return 0
+
+
+EVMASK = _NoMask() if GTK4 else Gdk.EventMask      # GTK 4 widgets receive every event; there are no masks
+
+
+def add_event_mask(widget, mask):
+    """widget.add_events(mask). Nothing to do under GTK 4."""
+    if not GTK4:
+        widget.add_events(mask)
+
+
+def with_margins(widget, n: int, inner: bool = False):
+    """Give a new widget n pixels of space on every side and return it. Stands in for the constructor
+    properties margin=n (space outside the widget) and, with inner=True, border_width=n (space inside a
+    container); GTK 4 has neither property, and there both become the four margins."""
+    if not GTK4 and inner:
+        widget.set_border_width(n)
+    else:
+        for side in ("top", "bottom", "start", "end"):
+            getattr(widget, "set_margin_" + side)(n)
+    return widget
+
+
+# ---- bookkeeping for the port
+_TODO_SEEN: set = set()
+
+
+def port_todo(what: str):
+    """Mark a place that does nothing under GTK 4 yet. Each one is printed once, so a GTK 4 run lists what is
+    still missing. Never called under GTK 3."""
+    if what not in _TODO_SEEN:
+        _TODO_SEEN.add(what)
+        print("shotrover[gtk4]: not ported yet:", what, file=sys.stderr)
+
+
+def on_resize(widget, handler):
+    """Call handler() whenever the widget gets a new size (GTK 3: size-allocate)."""
+    if not GTK4:
+        return widget.connect("size-allocate", lambda w, a: handler())
+    if isinstance(widget, Gtk.DrawingArea):
+        return widget.connect("resize", lambda w, width, height: handler())
+    if isinstance(widget, Gtk.Window):
+        widget.connect("map", lambda w: GLib.idle_add(lambda: (handler(), False)[1]))      # its first real size
+        widget.connect("notify::default-width", lambda *a: handler())
+        return widget.connect("notify::default-height", lambda *a: handler())
+    if isinstance(widget, Gtk.Paned):                   # its furthest divider position changes with its size
+        return widget.connect("notify::max-position", lambda *a: handler())
+    port_todo("on_resize for " + type(widget).__name__)
+    return widget.connect("map", lambda w: GLib.idle_add(lambda: (handler(), False)[1]))
+
+
+# ---- a scrollable canvas that draws only what is visible (the icon layouts)
+if GTK4:
+    class ScrollCanvas(Gtk.DrawingArea, Gtk.Scrollable):
+        """What IconGrid used Gtk.Layout for: a canvas far larger than the widget, scrolled by the adjustments
+        of the Gtk.ScrolledWindow it sits in. The subclass draws in canvas coordinates after translating by
+        the adjustment values, exactly as it did with Gtk.Layout."""
+        hadjustment = GObject.Property(type=Gtk.Adjustment)
+        vadjustment = GObject.Property(type=Gtk.Adjustment)
+        hscroll_policy = GObject.Property(type=Gtk.ScrollablePolicy, default=Gtk.ScrollablePolicy.MINIMUM)
+        vscroll_policy = GObject.Property(type=Gtk.ScrollablePolicy, default=Gtk.ScrollablePolicy.MINIMUM)
+
+        def __init__(self):
+            super().__init__()
+            self._sr_canvas = (1, 1)
+            self._sr_watch: dict = {}
+            self.set_hexpand(True)
+            self.set_vexpand(True)
+            self.connect("notify::vadjustment", lambda *a: self._sr_adopt("v"))
+            self.connect("notify::hadjustment", lambda *a: self._sr_adopt("h"))
+            self.connect("resize", lambda *a: self._sr_sync())
+
+        def _sr_adopt(self, which: str):
+            adj = self.vadjustment if which == "v" else self.hadjustment
+            old = self._sr_watch.pop(which, None)
+            if old is not None:
+                old[0].disconnect(old[1])
+            if adj is not None:
+                self._sr_watch[which] = (adj, adj.connect("value-changed", lambda a: self.queue_draw()))
+            self._sr_sync()
+
+        def _sr_sync(self):
+            for adj, total, page in ((self.vadjustment, self._sr_canvas[1], self.get_height()),
+                                     (self.hadjustment, self._sr_canvas[0], self.get_width())):
+                if adj is None:
+                    continue
+                upper = max(total, page)
+                adj.configure(max(0, min(adj.get_value(), upper - page)), 0, upper, max(1, page * 0.1), max(1, page * 0.9), page)
+
+        def set_size(self, width: int, height: int):
+            """The size of the whole canvas, as Gtk.Layout.set_size."""
+            self._sr_canvas = (int(width), int(height))
+            self._sr_sync()
+else:
+    ScrollCanvas = Gtk.Layout
+
+
+def theme_icon_pixbuf(icon, size: int):
+    """The desktop icon theme's picture for a Gio.Icon at size px (GdkPixbuf), or the generic file icon when
+    the theme has none, or None when even that is missing. icon may be None."""
+    if not GTK4:
+        theme = Gtk.IconTheme.get_default()
+        try:
+            info = theme.lookup_by_gicon(icon, size, Gtk.IconLookupFlags.FORCE_SIZE) if icon else None
+            if info is None:
+                info = theme.lookup_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
+            pb = info.load_icon() if info else None
+        except GLib.Error:
+            pb = None
+        if pb is None:
+            try:
+                pb = theme.load_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
+            except GLib.Error:
+                pb = None
+        return pb
+    theme = Gtk.IconTheme.get_for_display(Gdk.Display.get_default())
+    for candidate in (icon, Gio.ThemedIcon.new("text-x-generic")):
+        if candidate is None:
+            continue
+        try:
+            paintable = theme.lookup_by_gicon(candidate, size, 1, Gtk.TextDirection.NONE, Gtk.IconLookupFlags(0))
+            f = paintable.get_file() if paintable is not None else None
+            path = f.get_path() if f is not None else None
+            if path:
+                return GdkPixbuf.Pixbuf.new_from_file_at_size(path, size, size)
+        except (GLib.Error, TypeError):
+            pass
+    return None
+
+
+# ---- dragging files
+def _uri_targets():
+    return [Gtk.TargetEntry.new("text/uri-list", 0, 0)]
+
+
+class _Sel4:
+    """GTK 4 only: stands in for the Gtk.SelectionData the GTK 3 drag handlers read and fill."""
+
+    def __init__(self, uris=None):
+        self.uris = list(uris or [])
+
+    def set_uris(self, uris):
+        self.uris = list(uris or [])
+        return True
+
+    def get_uris(self):
+        return self.uris
+
+
+def read_files4(clipboard, done):
+    """GTK 4 only: ask the clipboard for files without blocking, then call done(paths) (an empty list when
+    it holds none).
+
+    Do NOT read the clipboard or a drop as a stream (read_async / read_finish) from Python for a format
+    that may be missing: with PyGObject 3.40 the finish call then corrupts memory and the process aborts
+    with "free(): invalid pointer". Asking for a Gdk.FileList value is safe on both paths. The one stream
+    read there is, read_cut_files4, checks that the format is on offer first."""
+    def got(clip, res):
+        try:
+            files = clip.read_value_finish(res).get_files()
+            paths = [p for p in (f.get_path() for f in files) if p]
+        except Exception:
+            paths = []
+        done(paths)
+    try:
+        clipboard.read_value_async(Gdk.FileList, GLib.PRIORITY_DEFAULT, None, got)
+    except Exception:
+        done([])
+
+
+def read_cut_files4(clipboard, done):
+    """GTK 4 only: files on the clipboard with whether they were cut or copied; calls done(mode, paths) with
+    mode "cut", "copy" or "" (no files).
+
+    Cut or copy is the first line of x-special/gnome-copied-files, which can only be read as a stream. That
+    is the read read_files4 warns about, so it is done ONLY when the clipboard lists that format (asking for
+    the list reads nothing): with the format present the read is sound, tested 30 times in a row against a
+    GTK 3 owner. Anything else, and any failure, falls back to the plain file list, as a copy."""
+    mime = "x-special/gnome-copied-files"
+
+    def plain():
+        read_files4(clipboard, lambda paths: done("copy" if paths else "", paths))
+
+    def got_bytes(stream, res):
+        try:
+            raw = stream.read_bytes_finish(res).get_data() or b""
+            stream.close(None)
+            lines = bytes(raw).decode("utf-8", "replace").split("\n")
+            paths = [p for p in (Gio.File.new_for_uri(u.strip()).get_path() for u in lines[1:] if u.strip()) if p]
+        except Exception:
+            paths = []
+        if not paths:
+            return plain()
+        done("cut" if lines[0].strip() == "cut" else "copy", paths)
+
+    def got(clip, res):
+        try:
+            stream = clip.read_finish(res)[0]
+            stream.read_bytes_async(1 << 20, GLib.PRIORITY_DEFAULT, None, got_bytes)
+        except Exception:
+            plain()
+    try:
+        if not clipboard.get_formats().contain_mime_type(mime):
+            return plain()
+        clipboard.read_async([mime], GLib.PRIORITY_DEFAULT, None, got)
+    except Exception:
+        plain()
+
+
+def file_drag_source(widget, on_get):
+    """Let the user drag the selected files out of a list. on_get(widget, context, selection_data, info, time)
+    fills in the file URIs, as GTK 3's drag-data-get."""
+    if not GTK4:
+        widget.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, _uri_targets(),
+                                        Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.ASK)
+        return widget.connect("drag-data-get", on_get)
+    src = Gtk.DragSource()
+    src.set_actions(Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+
+    def prepare(source, x, y):
+        # only a drag that starts on a selected item moves files; anywhere else it is a rubber band or nothing
+        ex, ey = _ev_xy(widget, x, y)
+        if isinstance(widget, Gtk.TreeView):
+            hit = widget.get_path_at_pos(int(ex), int(ey))
+            if not hit or not widget.get_selection().path_is_selected(hit[0]):
+                return None
+        elif hasattr(widget, "_index_at"):
+            if widget._index_at(ex, ey) not in widget.selected:
+                return None
+        if hasattr(widget, "_reset_press"):
+            widget._reset_press()               # the grid's own press tracking ends where the drag starts
+        sel = _Sel4()
+        on_get(widget, None, sel, 0, 0)
+        if not sel.uris:
+            return None
+        body = ("\r\n".join(sel.uris) + "\r\n").encode("utf-8")
+        return Gdk.ContentProvider.new_for_bytes("text/uri-list", GLib.Bytes.new(body))
+    src.connect("prepare", prepare)
+    _one_group(widget, src)
+
+
+def file_drop_target(widget, on_received, *args):
+    """Let files be dropped on a widget. on_received(widget, context, x, y, selection_data, info, time, *args),
+    as GTK 3's drag-data-received; x and y are relative to the widget."""
+    if not GTK4:
+        widget.drag_dest_set(Gtk.DestDefaults.ALL, _uri_targets(), Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+        return widget.connect("drag-data-received", on_received, *args)
+    target = Gtk.DropTarget.new(Gdk.FileList, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
+
+    def dropped(tgt, value, x, y):                      # GTK turns a dropped text/uri-list into a file list
+        try:
+            uris = [f.get_uri() for f in value.get_files()]
+        except Exception:
+            uris = []
+        if uris:
+            on_received(widget, None, int(x), int(y), _Sel4(uris), 0, 0, *args)
+        return bool(uris)
+    target.connect("drop", dropped)
+    widget.add_controller(target)
+
+
+def drag_finish(context, ok: bool, time_):
+    """Gtk.drag_finish(context, ok, False, time). GTK 4 finishes the drop in file_drop_target itself."""
+    if not GTK4:
+        Gtk.drag_finish(context, ok, False, time_)
+
+
+# ---- keyboard shortcuts
+def accel_parse(accel: str):
+    """(keyval, modifiers) for an accelerator string such as "<Control>l"; (0, 0) when it does not parse."""
+    r = Gtk.accelerator_parse(accel or "")
+    if GTK4:                                    # GTK 4 returns (parsed, keyval, modifiers)
+        return (r[1], r[2]) if r[0] else (0, Gdk.ModifierType(0))
+    return r
+
+
+class Shortcuts:
+    """The window's keyboard shortcuts: bind(accel, callback) and unbind(handle).
+    GTK 3: an accelerator group. GTK 4: a shortcut controller on the window."""
+
+    def __init__(self, window):
+        if GTK4:
+            self.ctl = Gtk.ShortcutController()
+            self.ctl.set_scope(Gtk.ShortcutScope.GLOBAL)
+            window.add_controller(self.ctl)
+        else:
+            self.group = Gtk.AccelGroup()
+            window.add_accel_group(self.group)
+
+    def bind(self, accel: str, callback):
+        """Run callback() when the accelerator is pressed. Returns a handle for unbind, or None."""
+        key, mods = accel_parse(accel)
+        if not key:
+            return None
+        if GTK4:
+            sc = Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string(accel),
+                                  Gtk.CallbackAction.new(lambda widget, args: (callback(), True)[1]))
+            self.ctl.add_shortcut(sc)
+            return sc
+        self.group.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m: (callback(), True)[1])
+        return (key, int(mods))
+
+    def unbind(self, handle):
+        if handle is None:
+            return
+        if GTK4:
+            self.ctl.remove_shortcut(handle)
+        else:
+            self.group.disconnect_key(handle[0], Gdk.ModifierType(handle[1]))
+
+
+# ---- menus
+# Menus are described by specs (see build_menu in mainwindow.py): "-" for a separator, (label, callback, accel) tuples,
+# or dicts with label / cb / accel / check / radio / sensitive / sub. GTK 3 builds Gtk.Menu from them.
+# GTK 4 has no Gtk.Menu; there a menu is a popover holding a column of flat buttons.
+def _close_menus(pop):
+    while pop is not None:
+        pop.popdown()
+        parent = pop.get_parent()
+        pop = parent.get_ancestor(Gtk.Popover) if parent is not None else None
+
+
+def menu4(spec):
+    """GTK 4 only: a popover menu for a spec."""
+    pop = Gtk.Popover()
+    pop.set_has_arrow(False)
+    pop.add_css_class("menu")
+    box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
+    pop.set_child(box)
+    for s in spec:
+        if s == "-":
+            box.append(Gtk.Separator())
+            continue
+        if isinstance(s, tuple):
+            s = {"label": s[0], "cb": s[1] if len(s) > 1 else None, "accel": s[2] if len(s) > 2 else ""}
+        label, cb, radio = s["label"], s.get("cb"), s.get("radio")
+        if label == "-":
+            box.append(Gtk.Separator())
+            continue
+        if "sub" in s:
+            b = Gtk.MenuButton()
+            b.set_direction(Gtk.ArrowType.RIGHT)
+            b.set_has_frame(False)
+            row = Gtk.Box(spacing=24)                # our own child: the label at the left, like the items
+            text = Gtk.Label.new_with_mnemonic(label)
+            text.set_xalign(0)
+            text.set_hexpand(True)
+            row.append(text)
+            row.append(Gtk.Image.new_from_icon_name("pan-end-symbolic"))
+            b.set_child(row)
+            b.set_popover(menu4(s["sub"]))
+        elif radio is not None or s.get("check") is not None:
+            # a flat button like the plain items, with a box (or, in a radio group, a round mark) in front
+            # that only shows the state; the item's shortcut is listed at the right like everywhere else
+            b = Gtk.Button()
+            b.set_has_frame(False)
+            row = Gtk.Box(spacing=8)
+            mark = Gtk.CheckButton()
+            mark.set_can_target(False)
+            mark.set_focusable(False)
+            if radio is not None:
+                pair = Gtk.CheckButton()                 # a second button in the group makes GTK draw it round
+                mark.set_group(pair)
+                mark._sr_pair = pair
+                radio.append(mark)
+            mark.set_active(bool(s.get("check")))
+            row.append(mark)
+            text = Gtk.Label.new_with_mnemonic(label)
+            text.set_xalign(0)
+            text.set_hexpand(True)
+            text.set_mnemonic_widget(b)
+            row.append(text)
+            if s.get("accel"):
+                key = Gtk.Label(label=shortcut_label(s["accel"]))
+                key.add_css_class("dim-label")
+                key.set_margin_start(16)
+                row.append(key)
+            b.set_child(row)
+            if cb is not None:              # a radio item reports only when it becomes the chosen one
+                b.connect("clicked", lambda w, cb=cb, mark=mark, is_radio=radio is not None:
+                          None if (is_radio and mark.get_active()) else (_close_menus(pop), cb()))
+        else:
+            b = Gtk.Button()
+            b.set_has_frame(False)
+            row = Gtk.Box(spacing=24)
+            text = Gtk.Label.new_with_mnemonic(label)
+            text.set_xalign(0)
+            text.set_hexpand(True)
+            text.set_mnemonic_widget(b)
+            row.append(text)
+            if s.get("accel"):
+                key = Gtk.Label(label=shortcut_label(s["accel"]))
+                key.add_css_class("dim-label")
+                row.append(key)
+            b.set_child(row)
+            if cb is not None:
+                b.connect("clicked", lambda w, cb=cb: (_close_menus(pop), cb()))
+        b.set_sensitive(s.get("sensitive", True))
+        box.append(b)
+    return pop
+
+
+def popup_menu(menu, widget, event=None, where: str = "pointer"):
+    """Show a menu made by build_menu() for a widget: at the pointer (pass the button event), "under" the
+    widget's left edge, or at its "center"."""
+    if not GTK4:
+        menu.attach_to_widget(widget, None)
+        if where == "pointer" and event is not None:
+            return menu.popup_at_pointer(event)
+        if where == "under":
+            return menu.popup_at_widget(widget, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+        return menu.popup_at_widget(widget, Gdk.Gravity.CENTER, Gdk.Gravity.NORTH_WEST, None)
+    # A popover has to be the child of the widget it points at. The previous menu is let go only now, when the
+    # next one opens: unparenting one from its own "closed" signal crashed GTK now and then (a segfault inside
+    # the main loop, seen with real clicks on a test display).
+    old = getattr(widget, "_sr_menu", None)
+    if old is not None and old is not menu and old.get_parent() is widget:
+        old.unparent()
+    if not hasattr(widget, "_sr_menu"):
+        widget.connect("unrealize", lambda w: (w._sr_menu.unparent() if getattr(w, "_sr_menu", None) is not None
+                                               and w._sr_menu.get_parent() is w else None, setattr(w, "_sr_menu", None))[1])
+    widget._sr_menu = menu
+    if menu.get_parent() is not widget:
+        if menu.get_parent() is not None:
+            menu.unparent()
+        menu.set_parent(widget)
+    if where == "pointer" and event is not None:
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = int(event.x), int(event.y), 1, 1
+        menu.set_pointing_to(rect)
+    elif where == "under":
+        menu.set_position(Gtk.PositionType.BOTTOM)
+        menu.set_halign(Gtk.Align.START)
+    else:                                   # "center", or a pointer menu asked for from the keyboard
+        rect = Gdk.Rectangle()
+        rect.x, rect.y, rect.width, rect.height = widget.get_width() // 2, widget.get_height() // 3, 1, 1
+        menu.set_pointing_to(rect)
+    menu.popup()
+
+
+def menu_bar():
+    """The row of menus at the top of a window (GTK 3: Gtk.MenuBar; GTK 4: a row of menu buttons)."""
+    if not GTK4:
+        return Gtk.MenuBar()
+    bar = Gtk.Box()
+    bar.add_css_class("sr-menubar")
+    return bar
+
+
+def menu_bar_add4(bar, title: str, spec_fn):
+    """GTK 4 only: add a menu to the bar. spec_fn() is asked for the spec each time the menu opens."""
+    b = Gtk.MenuButton()
+    b.set_child(Gtk.Label.new_with_mnemonic(title))      # a child of our own: set_label() would add an arrow
+    b.set_has_frame(False)
+    b.set_create_popup_func(lambda button: button.set_popover(menu4(spec_fn())))
+    bar.append(b)
+
+
+def info_bar_content(bar, widget):
+    """Put a widget in an info bar's content area, taking the spare width."""
+    if not GTK4:
+        return bar.get_content_area().pack_start(widget, True, True, 0)
+    widget.set_hexpand(True)
+    bar.add_child(widget)
+
+
+def see_through(area):
+    """Make a drawing area that is laid over other widgets ignore the mouse and keyboard, so input reaches
+    what is underneath."""
+    area.set_can_focus(False)
+    if GTK4:
+        area.set_can_target(False)
+    else:
+        area.set_has_window(False)              # no GdkWindow of its own, so it can never intercept input
+        area.set_app_paintable(True)
+
+
+def move_child(box, child, position: int):
+    """box.reorder_child(child, position): move a child to the given place among its siblings."""
+    if not GTK4:
+        return box.reorder_child(child, position)
+    others = [c for c in child_widgets(box) if c is not child]
+    box.reorder_child_after(child, others[position - 1] if position > 0 and others else None)
+
+
+def on_menu_key(widget, callback):
+    """Run callback() when the keyboard asks for the widget's context menu (the Menu key, Shift+F10)."""
+    if not GTK4:
+        return widget.connect("popup-menu", lambda w: callback() or True)
+    ctl = Gtk.ShortcutController()
+    ctl.add_shortcut(Gtk.Shortcut.new(Gtk.ShortcutTrigger.parse_string("Menu|<Shift>F10"),
+                                      Gtk.CallbackAction.new(lambda w, a: (callback(), True)[1])))
+    widget.add_controller(ctl)
+
+
+# ---- list rows as tall as under GTK 3
+# GTK 3 put 2 px between the rows of every tree view (its "vertical-separator" style property); GTK 4 has no
+# such thing, so every list came out tighter. Each cell gets 1 px more above and below instead, once: columns
+# are rebuilt with the same renderers when the layout changes.
+if GTK4:
+    _append_column3 = Gtk.TreeView.append_column
+
+    def _append_column4(tree, column):
+        for cell in column.get_cells():
+            if not getattr(cell, "_sr_padded", False):
+                xpad, ypad = cell.get_padding()
+                cell.set_padding(xpad, ypad + 1)
+                cell._sr_padded = True
+        return _append_column3(tree, column)
+    Gtk.TreeView.append_column = _append_column4
+
+
+# ---- PyGObject older than 3.42 with GTK 4 (RHEL 9 ships 3.40)
+# Its Python overrides for list and tree stores still call insert_with_valuesv, which GTK 4 exposes as
+# insert_with_values. Without this, every store.append(row) raises AttributeError.
+if GTK4:
+    for _store in (Gtk.ListStore, Gtk.TreeStore):
+        if not hasattr(_store, "insert_with_valuesv") and hasattr(_store, "insert_with_values"):
+            _store.insert_with_valuesv = _store.insert_with_values
+
+
+def radio_button(group, label: Optional[str] = None):
+    """A radio button in the same group as `group` (another radio button, or None to start a group).
+    Without a label the caller gives it a child. GTK 4 has no Gtk.RadioButton: check buttons are grouped."""
+    if not GTK4:
+        if label is None:
+            return Gtk.RadioButton.new_from_widget(group)
+        return Gtk.RadioButton.new_with_label_from_widget(group, label)
+    b = Gtk.CheckButton(label=label) if label is not None else Gtk.CheckButton()
+    if group is not None:
+        b.set_group(group)
+    return b
+
+
+def window_size(window):
+    """(width, height) of a window, as Gtk.Window.get_size()."""
+    if not GTK4:
+        return tuple(window.get_size())
+    return window.get_width(), window.get_height()
+
+
+def resize_window(window, width: int, height: int):
+    """window.resize(width, height)."""
+    if not GTK4:
+        return window.resize(width, height)
+    window.set_default_size(width, height)
+
+
+def about_logo(dialog, pixbuf):
+    """Set an about dialog's logo from a pixbuf."""
+    if not GTK4:
+        return dialog.set_logo(pixbuf)
+    dialog.set_logo(Gdk.Texture.new_for_pixbuf(pixbuf))
+
+
+def pixbuf_surface(pixbuf):
+    """A cairo surface holding a pixbuf's picture, for drawing it many times without converting it again."""
+    if not GTK4:
+        return Gdk.cairo_surface_create_from_pixbuf(pixbuf, 1, None)
+    import cairo
+    surf = cairo.ImageSurface(cairo.FORMAT_ARGB32, pixbuf.get_width(), pixbuf.get_height())
+    cr = cairo.Context(surf)
+    Gdk.cairo_set_source_pixbuf(cr, pixbuf, 0, 0)
+    cr.paint()
+    return surf
+
+
+def image_set_pixbuf(image, pixbuf):
+    """image.set_from_pixbuf(pixbuf), shown at the pixbuf's own size. (A GTK 4 Gtk.Image draws every picture
+    at icon size, 16 px, unless told otherwise.) Also accepts Shotrover's FitImage."""
+    image.set_from_pixbuf(pixbuf)
+    if GTK4 and pixbuf is not None and isinstance(image, Gtk.Image):
+        image.set_pixel_size(max(pixbuf.get_width(), pixbuf.get_height()))
+
+
+def image_from_pixbuf(pixbuf):
+    """Gtk.Image.new_from_pixbuf(pixbuf), shown at the pixbuf's own size."""
+    img = Gtk.Image()
+    image_set_pixbuf(img, pixbuf)
+    return img
+
+
+def clip_wide(child):
+    """A holder for a row that may be wider than the room it gets (the breadcrumbs of a deep path).
+    GTK 3 lets such a row be cut off. GTK 4 would instead make the whole window as wide as the row, so there
+    the row sits in a scroller without scroll bars, which clips it."""
+    if not GTK4:
+        return child
+    sw = Gtk.ScrolledWindow()
+    sw.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
+    sw.set_propagate_natural_height(True)
+    sw.set_hexpand(True)                    # or it is given its minimum width, which is nothing
+    sw.set_child(child)
+    adj = sw.get_hadjustment()              # keep the END in view: the folder you are in matters most
+    adj.connect("changed", lambda a: a.set_value(max(0, a.get_upper() - a.get_page_size())))
+    return sw
+
+
+def edit_cell4(tree, path, column, renderer, text: str, select_len: int, on_done):
+    """GTK 4 only: edit one cell of a tree view in place, then call on_done(new_text) (not called when the
+    edit is cancelled).
+
+    GTK 4.12 puts its own cell editor one row too high when the list has headers (seen in a ten-line test
+    program, so it is GTK's bug, not ours). This shows an entry in a borderless popover laid exactly over the
+    cell instead."""
+    area = tree.get_cell_area(path, column)
+    pos = column.cell_get_position(renderer)
+    xoff, width = (pos[0], pos[1]) if pos else (0, area.width)
+    x, y = tree.convert_bin_window_to_widget_coords(area.x + xoff, area.y)
+    edit_over4(tree, x, y, width, area.height, text, select_len, on_done, tree.get_selection())
+
+
+def edit_over4(parent, x, y, width, height, text: str, select_len: int, on_done, selection):
+    """GTK 4 only: an entry in a borderless popover laid over the rectangle (x, y, width, height) of `parent`;
+    on_done(new_text) when Enter is pressed, on_done(None) when the edit is cancelled or `selection` changes."""
+    old = getattr(parent, "_sr_edit_pop", None)
+    if old is not None and old.get_parent() is parent:
+        old.unparent()
+    pop = Gtk.Popover()
+    parent._sr_edit_pop = pop
+    pop.set_has_arrow(False)
+    pop.add_css_class("sr-rename")
+    pop.set_parent(parent)
+    rect = Gdk.Rectangle()
+    rect.x, rect.y, rect.width, rect.height = int(x), int(y), max(1, int(width)), int(height)
+    pop.set_pointing_to(rect)
+    pop.set_position(Gtk.PositionType.BOTTOM)
+    pop.set_halign(Gtk.Align.START)
+    pop.set_offset(0, -int(height))                      # down from the cell's bottom edge, so back up over it
+    entry = Gtk.Entry()
+    entry.set_text(text)
+    entry.set_size_request(max(160, int(width)), int(height))
+    pop.set_child(entry)
+    state = {"done": False}
+
+    def finish(ok):
+        if state["done"]:
+            return
+        state["done"] = True
+        new = entry.get_text()
+        pop.popdown()
+        on_done(new if ok else None)
+    entry.connect("activate", lambda e: finish(True))
+    pop.connect("closed", lambda p: finish(False))
+    # GTK 3's editor ends when the selection moves on (navigation, a reload, another click); so does this one
+    watch = selection.connect("changed", lambda *a: finish(False))
+    pop.connect("closed", lambda p: selection.disconnect(watch) if selection.handler_is_connected(watch) else None)
+    pop.popup()
+    entry.grab_focus()
+    GLib.idle_add(lambda: (entry.select_region(0, select_len), False)[1])
+
+
+_TEXTURES4: dict = {}
+
+
+def texture4(pixbuf):
+    """GTK 4 only: the pixbuf as a texture for a Gtk.Image, made once per pixbuf (the icon cache hands out the
+    same pixbuf for the same icon, so a list of a thousand rows needs a few dozen)."""
+    hit = _TEXTURES4.get(id(pixbuf))
+    if hit is None or hit[0] is not pixbuf:
+        if len(_TEXTURES4) > 6000:
+            _TEXTURES4.clear()
+        hit = _TEXTURES4[id(pixbuf)] = (pixbuf, Gdk.Texture.new_for_pixbuf(pixbuf))      # keeps the pixbuf, so its id stays its own
+    return hit[1]
+
+
+def fixed_width(widget):
+    """Stop a widget from taking spare width although something inside it would like to. Under GTK 4 a
+    child that expands makes every parent expand too (a tab label made its tab fill the tab bar)."""
+    if GTK4:
+        widget.set_hexpand(False)
+    return widget
+
+
 # --------------------------------------------------------------------------- small dialog helpers
 def message(parent, title: str, text: str, kind=Gtk.MessageType.INFO, buttons=Gtk.ButtonsType.OK, secondary: str = "") -> int:
     if STRESS is not None:                 # stress run: a modal box would stall the script; log it instead
@@ -5248,8 +7060,8 @@ def message(parent, title: str, text: str, kind=Gtk.MessageType.INFO, buttons=Gt
         return Gtk.ResponseType.OK
     d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=kind, buttons=buttons, text=title)
     if text:
-        d.format_secondary_text(text)
-    r = d.run()
+        dialog_secondary(d, text)
+    r = run_dialog(d)
     d.destroy()
     return r
 
@@ -5257,9 +7069,9 @@ def message(parent, title: str, text: str, kind=Gtk.MessageType.INFO, buttons=Gt
 def ask_yes_no(parent, title: str, text: str, default_no: bool = False) -> bool:
     d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
                           buttons=Gtk.ButtonsType.YES_NO, text=title)
-    d.format_secondary_text(text)
+    dialog_secondary(d, text)
     d.set_default_response(Gtk.ResponseType.NO if default_no else Gtk.ResponseType.YES)
-    r = d.run()
+    r = run_dialog(d)
     d.destroy()
     return r == Gtk.ResponseType.YES
 
@@ -5270,15 +7082,15 @@ def ask_text(parent, title: str, label: str, value: str = "", select_stem: bool 
     d.set_default_response(Gtk.ResponseType.OK)
     box = d.get_content_area()
     box.set_spacing(6)
-    box.set_border_width(12)
-    box.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
+    set_margins(box, 12)
+    put(box, Gtk.Label(label=label, xalign=0), False, False, 0)
     entry = Gtk.Entry(text=value, activates_default=True, width_chars=50)
-    box.pack_start(entry, False, False, 0)
-    d.show_all()
+    put(box, entry, False, False, 0)
+    show_all(d)
     if select_stem and value:
         stem = os.path.splitext(value)[0]
         entry.select_region(0, len(stem))
-    r = d.run()
+    r = run_dialog(d)
     txt = entry.get_text()
     d.destroy()
     return txt if r == Gtk.ResponseType.OK else None
@@ -5300,30 +7112,30 @@ class FolderPicker(Gtk.Dialog):
         self.show_hidden = bool(cfg.get("show_hidden"))
         box = self.get_content_area()
         box.set_spacing(6)
-        box.set_border_width(10)
+        set_margins(box, 10)
         self.entry = Gtk.Entry(text=start or HOME, activates_default=True)
         self.entry.set_tooltip_text("Type or paste a path, or pick a folder below")
-        box.pack_start(self.entry, False, False, 0)
+        put(box, self.entry, False, False, 0)
         self.store = Gtk.TreeStore(str, str, str, bool)          # label, path, icon name, loaded
         self.tv = Gtk.TreeView(model=self.store, headers_visible=False, enable_search=True, search_column=0)
         col = Gtk.TreeViewColumn()
         ri = Gtk.CellRendererPixbuf()
         rt = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
-        col.pack_start(ri, False)
-        col.pack_start(rt, True)
+        put(col, ri, False)
+        put(col, rt, True)
         col.add_attribute(ri, "icon-name", 2)
         col.add_attribute(rt, "text", 0)
         self.tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.set_shadow_type(Gtk.ShadowType.IN)
-        sw.add(self.tv)
-        box.pack_start(sw, True, True, 0)
+        set_frame(sw, True)
+        set_child(sw, self.tv)
+        put(box, sw, True, True, 0)
         self.tv.connect("row-expanded", self._expanded)
         self.tv.connect("row-activated", lambda tv, path, c: tv.collapse_row(path) if tv.row_expanded(path) else tv.expand_row(path, False))
         self.tv.get_selection().connect("changed", self._selected)
         self._reveal_target: Optional[str] = None
         self._roots()
-        self.show_all()
+        show_all(self)
         if start and os.path.isdir(start):
             self._reveal(os.path.abspath(start))
 
@@ -5384,7 +7196,7 @@ class FolderPicker(Gtk.Dialog):
                 self._add(pit, n, os.path.join(folder, n), "folder")
             self._continue_reveal(pit)
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _selected(self, sel):
         model, it = sel.get_selected()
@@ -5435,7 +7247,7 @@ class FolderPicker(Gtk.Dialog):
     # ---- run
     def choose(self) -> Optional[str]:
         while True:
-            r = self.run()
+            r = run_dialog(self)
             path = os.path.abspath(os.path.expanduser(self.entry.get_text().strip())) if self.entry.get_text().strip() else ""
             if r == 1:                                           # New folder inside the current one
                 base = path if os.path.isdir(path) else HOME
@@ -5492,12 +7304,12 @@ def conflict_dialog(parent, src: str, dst: str) -> Tuple[Optional[str], bool]:
     d.add_buttons("_Replace", 1, "_Skip", 2, "_Keep both", 3, "_Cancel", Gtk.ResponseType.CANCEL)
     d.set_default_response(1)
     box = d.get_content_area()
-    box.set_border_width(12)
+    set_margins(box, 12)
     box.set_spacing(8)
     lab = Gtk.Label(xalign=0, wrap=True)
     lab.set_markup(f"The destination already has a {what} named <b>{GLib.markup_escape_text(os.path.basename(dst))}</b>."
                    + ("\nMerging folders replaces files with the same name." if both_dirs else ""))
-    box.pack_start(lab, False, False, 0)
+    put(box, lab, False, False, 0)
     grid = Gtk.Grid(column_spacing=12, row_spacing=4)
     for i, (title, p) in enumerate((("Source", src), ("Destination", dst))):
         try:
@@ -5507,11 +7319,11 @@ def conflict_dialog(parent, src: str, dst: str) -> Tuple[Optional[str], bool]:
             info = "?"
         grid.attach(Gtk.Label(label=title + ":", xalign=0), 0, i, 1, 1)
         grid.attach(Gtk.Label(label=info, xalign=0), 1, i, 1, 1)
-    box.pack_start(grid, False, False, 0)
+    put(box, grid, False, False, 0)
     chk = Gtk.CheckButton(label="Do this for all conflicts")
-    box.pack_start(chk, False, False, 0)
-    d.show_all()
-    r = d.run()
+    put(box, chk, False, False, 0)
+    show_all(d)
+    r = run_dialog(d)
     all_ = chk.get_active()
     d.destroy()
     return {1: "replace", 2: "skip", 3: "keep"}.get(r), all_
@@ -5521,59 +7333,62 @@ class ProgressDialog(Gtk.Window):
     """Windows 11-style file-operation window: percent, bar, speed graph, items/time remaining, Pause, Cancel."""
 
     def __init__(self, parent, op, title: str):
-        super().__init__(title=title, transient_for=parent, type_hint=Gdk.WindowTypeHint.DIALOG)
+        super().__init__(title=title, transient_for=parent)
+        if not GTK4:
+            self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         self.op = op
         self.set_default_size(520, -1)
         self.set_resizable(False)
-        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        center_on_parent(self)
         self.last_t, self.last_done = time.time(), 0
         self.rate = 0.0
         self.expanded = True
-        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
-        self.add(v)
+        v = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 16)
+        set_child(self, v)
         self.head = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.head.set_markup(f"<span size='large'>{GLib.markup_escape_text(title)}</span>")
-        v.pack_start(self.head, False, False, 0)
+        put(v, self.head, False, False, 0)
         self.pct = Gtk.Label(xalign=0)
         self.pct.set_markup("<span size='x-large' weight='bold'>0%</span> complete")
-        v.pack_start(self.pct, False, False, 0)
+        put(v, self.pct, False, False, 0)
         self.bar = Gtk.ProgressBar()
-        v.pack_start(self.bar, False, False, 0)
+        put(v, self.bar, False, False, 0)
         self.graph = Gtk.DrawingArea()
         self.graph.set_size_request(-1, 70)
-        self.graph.connect("draw", self._draw_graph)
-        v.pack_start(self.graph, False, False, 0)
+        on_draw(self.graph, self._draw_graph)
+        put(v, self.graph, False, False, 0)
         self.details = Gtk.Grid(column_spacing=12, row_spacing=3)
         self.rows = {}
         for i, key in enumerate(("Name", "Speed", "Items remaining", "Time remaining")):
             k = Gtk.Label(label=key + ":", xalign=0)
-            k.get_style_context().add_class("dim-label")
+            css_class(k, "dim-label")
             val = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, hexpand=True)
             self.details.attach(k, 0, i, 1, 1)
             self.details.attach(val, 1, i, 1, 1)
             self.rows[key] = val
-        v.pack_start(self.details, False, False, 0)
+        put(v, self.details, False, False, 0)
         hb = Gtk.Box(spacing=6)
-        self.more = Gtk.Button(label="Fewer details", relief=Gtk.ReliefStyle.NONE)
+        self.more = Gtk.Button(label="Fewer details")
+        flat_button(self.more)
         self.more.connect("clicked", self._toggle)
-        hb.pack_start(self.more, False, False, 0)
+        put(hb, self.more, False, False, 0)
         self.btn_cancel = Gtk.Button(label="Cancel")
         self.btn_cancel.connect("clicked", lambda b: op.cancel.cancel())
-        hb.pack_end(self.btn_cancel, False, False, 0)
+        put_end(hb, self.btn_cancel, False, False, 0)
         self.btn_pause = Gtk.Button(label="Pause")
         self.btn_pause.connect("clicked", self._pause)
-        hb.pack_end(self.btn_pause, False, False, 0)
-        v.pack_start(hb, False, False, 0)
-        self.connect("delete-event", lambda w, e: (op.cancel.cancel(), True)[1])
+        put_end(hb, self.btn_pause, False, False, 0)
+        put(v, hb, False, False, 0)
+        on_event(self, "delete-event", lambda w, e: (op.cancel.cancel(), True)[1])
         self.timer = GLib.timeout_add(150, self.tick)
-        self.show_all()
+        show_all(self)
 
     def _toggle(self, b):
         self.expanded = not self.expanded
         self.details.set_visible(self.expanded)
         self.graph.set_visible(self.expanded)
         self.more.set_label("Fewer details" if self.expanded else "More details")
-        self.resize(520, 1)
+        resize_window(self, 520, 1)
 
     def _pause(self, b):
         op = self.op
@@ -5587,7 +7402,7 @@ class ProgressDialog(Gtk.Window):
     def _draw_graph(self, w, cr):
         a = w.get_allocation()
         sc = w.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.06)
         cr.rectangle(0, 0, a.width, a.height)
         cr.fill()
@@ -5661,7 +7476,7 @@ class PropertiesDialog(Gtk.Dialog):
         self.set_default_size(480, -1)
         self.cancel = threading.Event()
         nb = Gtk.Notebook()
-        self.get_content_area().pack_start(nb, True, True, 0)
+        put(self.get_content_area(), nb, True, True, 0)
         try:
             self.st = os.lstat(e.path)
         except OSError:
@@ -5671,10 +7486,10 @@ class PropertiesDialog(Gtk.Dialog):
         nb.append_page(self._details(), Gtk.Label(label="Details"))
         self.connect("response", self._response)
         self.connect("destroy", lambda *_: self.cancel.set())
-        self.show_all()
+        show_all(self)
 
     def _grid(self):
-        g = Gtk.Grid(column_spacing=12, row_spacing=6, border_width=12)
+        g = with_margins(Gtk.Grid(column_spacing=12, row_spacing=6), 12, inner=True)
         return g
 
     def _row(self, g, r, key, widget):
@@ -5690,10 +7505,10 @@ class PropertiesDialog(Gtk.Dialog):
         g = self._grid()
         hb = Gtk.Box(spacing=8)
         pb = ICONS.pixbuf(e.icon or Gio.ThemedIcon.new("text-x-generic"), 48, e)
-        img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
-        hb.pack_start(img, False, False, 0)
+        img = image_from_pixbuf(pb) if pb is not None else icon_image(e.icon or Gio.ThemedIcon.new("text-x-generic"), "dialog")
+        put(hb, img, False, False, 0)
         self.name_entry = Gtk.Entry(text=e.name, hexpand=True)
-        hb.pack_start(self.name_entry, True, True, 0)
+        put(hb, self.name_entry, True, True, 0)
         g.attach(hb, 0, 0, 2, 1)
         g.attach(Gtk.Separator(), 0, 1, 2, 1)
         r = 2
@@ -5707,7 +7522,7 @@ class PropertiesDialog(Gtk.Dialog):
         self._row(g, r, "Size on disk:", f"{fmt_size(blocks)} ({blocks:,} bytes)"); r += 1
         if e.is_dir:
             self.contains_lab = self._row(g, r, "Contains:", "calculating…"); r += 1
-            threading.Thread(target=self._calc, daemon=True).start()
+            bg(self._calc)
         g.attach(Gtk.Separator(), 0, r, 2, 1); r += 1
         f = "%A, %B %d, %Y, %H:%M:%S"
         self._row(g, r, "Created:", fmt_date(e.ctime, f) or fmt_date(st.st_ctime if st else 0, f) + "  (inode change)"); r += 1
@@ -5761,7 +7576,7 @@ class PropertiesDialog(Gtk.Dialog):
         g.attach(pg, 1, 3, 1, 1)
         self.mode_lab = self._row(g, 4, "Mode:", f"{_stat.filemode(st.st_mode) if st else ''}  ({oct(mode)})")
         note = Gtk.Label(label="Changing the owner requires root (use chown in a terminal).", xalign=0)
-        note.get_style_context().add_class("dim-label")
+        css_class(note, "dim-label")
         g.attach(note, 0, 5, 2, 1)
         return g
 
@@ -5793,7 +7608,7 @@ class PropertiesDialog(Gtk.Dialog):
                 except OSError:
                     digest = "unavailable"
                 GLib.idle_add(lambda: (lab.set_text(digest), False)[1])
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
         return g
 
     def _apply(self):
@@ -5842,7 +7657,7 @@ class MultiPropertiesDialog(Gtk.Dialog):
         super().__init__(title=f"{len(sel)} Items Properties", transient_for=parent, modal=True)
         self.add_button("_OK", Gtk.ResponseType.OK)
         self.cancel = threading.Event()
-        g = Gtk.Grid(column_spacing=12, row_spacing=6, border_width=12)
+        g = with_margins(Gtk.Grid(column_spacing=12, row_spacing=6), 12, inner=True)
         nf = sum(1 for e in sel if not e.is_dir)
         g.attach(Gtk.Label(label="Type:", xalign=1), 0, 0, 1, 1)
         g.attach(Gtk.Label(label=f"Multiple Types ({nf} Files, {len(sel) - nf} Folders)", xalign=0), 1, 0, 1, 1)
@@ -5854,10 +7669,10 @@ class MultiPropertiesDialog(Gtk.Dialog):
         g.attach(Gtk.Label(label="Contains:", xalign=1), 0, 3, 1, 1)
         self.cont_lab = Gtk.Label(label="…", xalign=0)
         g.attach(self.cont_lab, 1, 3, 1, 1)
-        self.get_content_area().pack_start(g, True, True, 0)
+        put(self.get_content_area(), g, True, True, 0)
         self.connect("response", lambda *_: (self.cancel.set(), self.destroy()))
-        self.show_all()
-        threading.Thread(target=self._calc, args=(sel,), daemon=True).start()
+        show_all(self)
+        bg(lambda: self._calc(sel))
 
     def _calc(self, sel):
         f = d = b = 0
@@ -5880,7 +7695,7 @@ class OptionsDialog(Gtk.Dialog):
         self.add_buttons("Restore _Defaults", 10, "_Cancel", Gtk.ResponseType.CANCEL, "_OK", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         nb = Gtk.Notebook()
-        self.get_content_area().pack_start(nb, True, True, 0)
+        put(self.get_content_area(), nb, True, True, 0)
         self.w: Dict[str, Gtk.Widget] = {}
         nb.append_page(self._general(), Gtk.Label(label="General"))
         nb.append_page(self._view(), Gtk.Label(label="View"))
@@ -5888,34 +7703,34 @@ class OptionsDialog(Gtk.Dialog):
         nb.append_page(self._dependencies(), Gtk.Label(label="Optional"))
         nb.append_page(self._shortcuts(), Gtk.Label(label="Shortcuts"))
         self.set_default_size(720, 560)
-        self.show_all()
+        show_all(self)
         nb.set_current_page(page)
         self.connect("response", self._response)
 
     @staticmethod
     def _vbox():
-        return Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, border_width=12)
+        return with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 12, inner=True)
 
     @staticmethod
     def _heading(box, text):
         l = Gtk.Label(xalign=0)
         l.set_markup(f"<b>{text}</b>")
         l.set_margin_top(8)
-        box.pack_start(l, False, False, 0)
+        put(box, l, False, False, 0)
 
     def _radios(self, box, key, options):
         group = None
         for value, label in options:
-            rb = Gtk.RadioButton.new_with_label_from_widget(group, label)
+            rb = radio_button(group, label)
             group = group or rb
             rb.set_active(self.cfg[key] == value)
             rb.value = value
-            box.pack_start(rb, False, False, 0)
+            put(box, rb, False, False, 0)
             self.w.setdefault("radio:" + key, []).append(rb)
 
     def _check(self, box, key, label):
         cb = Gtk.CheckButton(label=label, active=bool(self.cfg[key]))
-        box.pack_start(cb, False, False, 0)
+        put(box, cb, False, False, 0)
         self.w[key] = cb
 
     def _general(self):
@@ -5931,18 +7746,18 @@ class OptionsDialog(Gtk.Dialog):
                                            ("open", "Double-click opens the archive with the default application")])
         self._heading(b, "Performance")
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="CPU cores reserved for the interface:"), False, False, 0)
+        put(row, Gtk.Label(label="CPU cores reserved for the interface:"), False, False, 0)
         self.cores_spin = Gtk.SpinButton.new_with_range(0, max(0, os.cpu_count() or 0), 1)
         self.cores_spin.set_value(int(self.cfg.get("ui_cores", 2)))
         self.cores_spin.set_tooltip_text("Preview decoding, 3D rendering and thumbnails run on the other cores so the window never stalls.\n0 disables pinning. Takes effect after a restart.")
-        row.pack_start(self.cores_spin, False, False, 0)
-        b.pack_start(row, False, False, 0)
+        put(row, self.cores_spin, False, False, 0)
+        put(b, row, False, False, 0)
         self._heading(b, "Privacy")
         self._check(b, "show_recent", "Show recently used files in Quick access")
         self._check(b, "show_frequent", "Show frequently used folders in Quick access")
         btn = Gtk.Button(label="Clear Shotrover history", halign=Gtk.Align.START)
         btn.connect("clicked", lambda *_: (self.cfg["recent"].clear(), self.cfg["frequent"].clear()))
-        b.pack_start(btn, False, False, 4)
+        put(b, btn, False, False, 4)
         return b
 
     def _view(self):
@@ -5964,13 +7779,13 @@ class OptionsDialog(Gtk.Dialog):
         for key, title, options in (("icons", "Icons", (("shotrover", "Shotrover icons"), ("system", "System icons (your desktop's icon theme)"))),
                                     ("theme", "Colours", (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")))):
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            col.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            put(col, Gtk.Label(label=title, xalign=0), False, False, 0)
             self._radios(col, key, options)
-            row.pack_start(col, False, False, 0)
-        b.pack_start(row, False, False, 0)
+            put(row, col, False, False, 0)
+        put(b, row, False, False, 0)
         self._heading(b, "Date format (strftime)")
         e = Gtk.Entry(text=self.cfg["date_format"])
-        b.pack_start(e, False, False, 0)
+        put(b, e, False, False, 0)
         self.w["date_format"] = e
         return b
 
@@ -5985,8 +7800,8 @@ class OptionsDialog(Gtk.Dialog):
         info.set_markup("<small>Folders you open paint instantly from the index while the real listing loads, and name searches "
                         "answer from it immediately. The index is AES-256 encrypted and authenticated; its key is kept in your desktop "
                         "keyring (or a private key file), never next to the index. Plaintext exists only in Shotrover's memory.</small>")
-        b.pack_start(info, False, False, 0)
-        b.pack_start(Gtk.Label(label="Folders to index:", xalign=0), False, False, 0)
+        put(b, info, False, False, 0)
+        put(b, Gtk.Label(label="Folders to index:", xalign=0), False, False, 0)
         self.roots_store = Gtk.ListStore(str)
         for r in self.cfg.get("index_roots", [HOME]):
             self.roots_store.append([r])
@@ -5996,40 +7811,40 @@ class OptionsDialog(Gtk.Dialog):
         rcol.set_cell_data_func(rcell, lambda c, cell, m, it, d=None: cell.set_property("text", pretty_path(m[it][0])), None)
         tv.append_column(rcol)
         sw = Gtk.ScrolledWindow(min_content_height=90)
-        sw.add(tv)
-        b.pack_start(sw, False, False, 0)
+        set_child(sw, tv)
+        put(b, sw, False, False, 0)
         row = Gtk.Box(spacing=6)
         add = Gtk.Button(label="Add folder…")
         rem = Gtk.Button(label="Remove")
         add.connect("clicked", lambda w: self._root_add())
         rem.connect("clicked", lambda w: self._root_remove(tv))
-        row.pack_start(add, False, False, 0)
-        row.pack_start(rem, False, False, 0)
-        b.pack_start(row, False, False, 0)
+        put(row, add, False, False, 0)
+        put(row, rem, False, False, 0)
+        put(b, row, False, False, 0)
         self._check(b, "index_network", "Include network shares (slow to crawl; off by default)")
         self._check(b, "index_hidden", "Include hidden files and folders")
         row2 = Gtk.Box(spacing=6)
-        row2.pack_start(Gtk.Label(label="Re-check every"), False, False, 0)
+        put(row2, Gtk.Label(label="Re-check every"), False, False, 0)
         self.index_interval = Gtk.SpinButton.new_with_range(1, 168, 1)
         self.index_interval.set_value(int(self.cfg.get("index_interval_h", 6)))
-        row2.pack_start(self.index_interval, False, False, 0)
-        row2.pack_start(Gtk.Label(label="hours (only changed folders are re-read)"), False, False, 0)
-        b.pack_start(row2, False, False, 0)
+        put(row2, self.index_interval, False, False, 0)
+        put(row2, Gtk.Label(label="hours (only changed folders are re-read)"), False, False, 0)
+        put(b, row2, False, False, 0)
         row3 = Gtk.Box(spacing=6)
         upd = Gtk.Button(label="Update now")
         full = Gtk.Button(label="Rebuild from scratch")
         wipe = Gtk.Button(label="Delete index and key")
-        wipe.get_style_context().add_class("destructive-action")
+        css_class(wipe, "destructive-action")
         upd.connect("clicked", lambda w: self._index_action("update"))
         full.connect("clicked", lambda w: self._index_action("full"))
         wipe.connect("clicked", lambda w: self._index_action("wipe"))
         for w_ in (upd, full):
-            row3.pack_start(w_, False, False, 0)
-        row3.pack_end(wipe, False, False, 0)
-        b.pack_start(row3, False, False, 0)
+            put(row3, w_, False, False, 0)
+        put_end(row3, wipe, False, False, 0)
+        put(b, row3, False, False, 0)
         self.index_status = Gtk.Label(xalign=0, wrap=True)
-        self.index_status.get_style_context().add_class("dim-label")
-        b.pack_start(self.index_status, False, False, 0)
+        css_class(self.index_status, "dim-label")
+        put(b, self.index_status, False, False, 0)
         self._index_status_refresh()
         GLib.timeout_add(1500, self._index_status_tick)
         return b
@@ -6077,7 +7892,7 @@ class OptionsDialog(Gtk.Dialog):
     def _pick_rv(self, btn):
         d = Gtk.FileChooserDialog(title="Locate the rv executable", transient_for=self, action=Gtk.FileChooserAction.OPEN)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Select", Gtk.ResponseType.OK)
-        if d.run() == Gtk.ResponseType.OK:
+        if run_dialog(d) == Gtk.ResponseType.OK:
             self.rv_entry.set_text(d.get_filename() or "")
         d.destroy()
 
@@ -6091,65 +7906,79 @@ class OptionsDialog(Gtk.Dialog):
         self.gl_check.set_sensitive(HAVE_GL)
         if not HAVE_GL:
             self.gl_check.set_tooltip_text("PyOpenGL is not installed — tick it in the list below")
-        outer.pack_start(self.gl_check, False, False, 0)
+        put(outer, self.gl_check, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
         note.set_text("Needs the PyOpenGL add-on, which is installed." if HAVE_GL else
                       "Needs the PyOpenGL add-on, which is not installed: tick PyOpenGL in the list below and "
                       "install it, then restart Shotrover.")
-        note.get_style_context().add_class("dim-label")
-        outer.pack_start(note, False, False, 0)
+        css_class(note, "dim-label")
+        put(outer, note, False, False, 0)
+        self._heading(outer, "Interface")
+        have4 = gtk4_installed()
+        self.gtk4_check = Gtk.CheckButton(label="Use GTK 4 (experimental) — smoother window resizing; applies after a restart",
+                                          active=self.cfg.get("toolkit") == "gtk4")
+        self.gtk4_check.set_sensitive(have4)
+        put(outer, self.gtk4_check, False, False, 0)
+        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
+        forced = os.environ.get("SHOTROVER_GTK") in ("3", "4")
+        note.set_text(("GTK 4 is not installed." if not have4 else
+                       f"GTK 4 did not start ({GTK4_FAILED}), so this was switched off." if GTK4_FAILED else
+                       f"Running on GTK {'4' if GTK4 else '3'}" + (", set by SHOTROVER_GTK." if forced else ".")) +
+                      " If GTK 4 cannot start, Shotrover goes back to GTK 3 by itself.")
+        css_class(note, "dim-label")
+        put(outer, note, False, False, 0)
         self._heading(outer, "OpenRV")
         self._check(outer, "rv_enabled", "Enable OpenRV (right-click → Open in RV, Ctrl+Shift+R)")
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="RV executable:"), False, False, 0)
+        put(row, Gtk.Label(label="RV executable:"), False, False, 0)
         self.rv_entry = Gtk.Entry(text=self.cfg.get("rv_path", ""), hexpand=True, placeholder_text="auto-detect (rv on PATH, $RV_HOME, /opt/rv*, ~/OpenRV*)")
-        row.pack_start(self.rv_entry, True, True, 0)
+        put(row, self.rv_entry, True, True, 0)
         browse = Gtk.Button(label="Browse…")
         browse.connect("clicked", self._pick_rv)
-        row.pack_start(browse, False, False, 0)
-        outer.pack_start(row, False, False, 0)
+        put(row, browse, False, False, 0)
+        put(outer, row, False, False, 0)
         self.rv_status = Gtk.Label(xalign=0, wrap=True)
-        self.rv_status.get_style_context().add_class("dim-label")
-        outer.pack_start(self.rv_status, False, False, 0)
+        css_class(self.rv_status, "dim-label")
+        put(outer, self.rv_status, False, False, 0)
         self.rv_entry.connect("changed", lambda e: self._rv_detect())
         self._rv_detect()
         self._heading(outer, "Optional tools")
         self.dep_status = Gtk.Label(label="Checking what's installed…", xalign=0)
-        outer.pack_start(self.dep_status, False, False, 0)
+        put(outer, self.dep_status, False, False, 0)
         self.dep_grid = Gtk.Grid(column_spacing=12, row_spacing=3)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, min_content_height=220)
-        sw.add(self.dep_grid)
-        outer.pack_start(sw, True, True, 0)
+        set_child(sw, self.dep_grid)
+        put(outer, sw, True, True, 0)
         row = Gtk.Box(spacing=6)
         self.dep_install = Gtk.Button(label="Install selected in terminal…", sensitive=False)
-        self.dep_install.get_style_context().add_class("suggested-action")
+        css_class(self.dep_install, "suggested-action")
         self.dep_install.connect("clicked", lambda b: self._dep_install())
         self.dep_copy = Gtk.Button(label="Copy commands", sensitive=False)
         self.dep_copy.connect("clicked", lambda b: self._dep_copy())
         refresh = Gtk.Button(label="Re-check")
         refresh.connect("clicked", lambda b: self._dep_refresh())
-        row.pack_start(self.dep_install, False, False, 0)
-        row.pack_start(self.dep_copy, False, False, 0)
-        row.pack_end(refresh, False, False, 0)
-        outer.pack_start(row, False, False, 0)
+        put(row, self.dep_install, False, False, 0)
+        put(row, self.dep_copy, False, False, 0)
+        put_end(row, refresh, False, False, 0)
+        put(outer, row, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
                         "The commands match your distribution. Restart Shotrover afterwards.</small>")
-        outer.pack_start(note, False, False, 0)
+        put(outer, note, False, False, 0)
         exp = Gtk.Expander(label="Diagnostics (renderer, importers, converters, interpreters)")
         self.diag_view = Gtk.TextView(editable=False, monospace=True)
         dsw = Gtk.ScrolledWindow(min_content_height=200)
-        dsw.add(self.diag_view)
-        exp.add(dsw)
+        set_child(dsw, self.diag_view)
+        set_child(exp, dsw)
         exp.connect("notify::expanded", lambda e, p: e.get_expanded() and self._diag_load())
-        outer.pack_start(exp, False, False, 0)
+        put(outer, exp, False, False, 0)
         self.dep_checks: List[Tuple[Gtk.CheckButton, dict]] = []
         self._dep_refresh()
         return outer
 
     def _dep_refresh(self):
-        for c in self.dep_grid.get_children():
-            self.dep_grid.remove(c)
+        for c in child_widgets(self.dep_grid):
+            take_out(self.dep_grid, c)
         self.dep_checks = []
         self.dep_status.set_text("Checking what's installed…")
         self.dep_install.set_sensitive(False)
@@ -6168,20 +7997,20 @@ class OptionsDialog(Gtk.Dialog):
                 st = Gtk.Label(xalign=0)
                 if gone:
                     st.set_text("not available")
-                    st.get_style_context().add_class("dim-label")
+                    css_class(st, "dim-label")
                     st.set_tooltip_text(gone)
                 else:
                     st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
-                g.get_style_context().add_class("dim-label")
+                css_class(g, "dim-label")
                 self.dep_grid.attach(g, 3, i, 1, 1)
                 self.dep_checks.append((cb, dep))
-            self.dep_grid.show_all()
+            show_all(self.dep_grid)
             self.dep_install.set_sensitive(True)
             self.dep_copy.set_sensitive(True)
             return False
-        threading.Thread(target=lambda: GLib.idle_add(fill, optional_deps()), daemon=True).start()
+        bg(lambda: GLib.idle_add(fill, optional_deps()))
 
     def _dep_chosen(self):
         return [dep for cb, dep in self.dep_checks if cb.get_active() and dep["found"] is None]
@@ -6207,7 +8036,7 @@ class OptionsDialog(Gtk.Dialog):
 
     def _diag_load(self):
         self.diag_view.get_buffer().set_text("Checking…")
-        threading.Thread(target=lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
+        bg(lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False))
 
     # ---- Shortcuts page
     def _shortcuts(self):
@@ -6215,7 +8044,7 @@ class OptionsDialog(Gtk.Dialog):
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_text("Click a shortcut, then press the new keys. Backspace removes it, Esc leaves it as it was. "
                       "An action with several shortcuts keeps only the one you set.")
-        b.pack_start(hint, False, False, 0)
+        put(b, hint, False, False, 0)
         self.sc = {a[0]: shortcut_accels(self.cfg, a[0]) for a in SHORTCUT_ACTIONS}
         self.sc_store = Gtk.ListStore(str, str, str, str)          # action id, name, first shortcut, the others
         tv = Gtk.TreeView(model=self.sc_store)
@@ -6228,7 +8057,7 @@ class OptionsDialog(Gtk.Dialog):
         col = Gtk.TreeViewColumn("Shortcut", r)
 
         def show(column, cell, model, it, data=None):
-            key, mods = Gtk.accelerator_parse(model[it][2] or "")
+            key, mods = accel_parse(model[it][2] or "")
             cell.set_property("accel-key", key)
             cell.set_property("accel-mods", mods)
         col.set_cell_data_func(r, show)
@@ -6236,19 +8065,20 @@ class OptionsDialog(Gtk.Dialog):
         tv.append_column(col)
         tv.append_column(Gtk.TreeViewColumn("Also", Gtk.CellRendererText(), text=3))
         self.sc_view = tv
-        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN)
-        sw.add(tv)
-        b.pack_start(sw, True, True, 0)
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        set_frame(sw, True)
+        set_child(sw, tv)
+        put(b, sw, True, True, 0)
         row = Gtk.Box(spacing=6)
         one = Gtk.Button(label="Reset selected")
         one.connect("clicked", lambda w: self._sc_reset(False))
         every = Gtk.Button(label="Reset all shortcuts")
         every.connect("clicked", lambda w: self._sc_reset(True))
-        row.pack_start(one, False, False, 0)
-        row.pack_start(every, False, False, 0)
+        put(row, one, False, False, 0)
+        put(row, every, False, False, 0)
         self.sc_note = Gtk.Label(xalign=0, wrap=True)
-        row.pack_start(self.sc_note, True, True, 6)
-        b.pack_start(row, False, False, 0)
+        put(row, self.sc_note, True, True, 6)
+        put(b, row, False, False, 0)
         self._sc_fill()
         return b
 
@@ -6307,6 +8137,8 @@ class OptionsDialog(Gtk.Dialog):
             cfg["shortcuts"] = {aid: accels for aid, accels in self.sc.items() if accels != SHORTCUT_DEFAULTS[aid]}
         if hasattr(self, "gl_check"):
             cfg["gl_preview"] = self.gl_check.get_active()
+        if hasattr(self, "gtk4_check"):
+            cfg["toolkit"] = "gtk4" if self.gtk4_check.get_active() else "gtk3"
         if hasattr(self, "rv_entry"):
             cfg["rv_path"] = self.rv_entry.get_text().strip()
         if hasattr(self, "cores_spin"):
@@ -6369,20 +8201,21 @@ def show_shortcuts(parent):
     for i, t in enumerate(("Key", "Action")):
         tv.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
     sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-    sw.add(tv)
+    set_child(sw, tv)
     box = d.get_content_area()
-    box.pack_start(sw, True, True, 0)
-    note = Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0, margin=8)
-    note.get_style_context().add_class("dim-label")
-    box.pack_start(note, False, False, 0)
-    d.show_all()
-    d.run()
+    put(box, sw, True, True, 0)
+    note = with_margins(Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0), 8)
+    css_class(note, "dim-label")
+    put(box, note, False, False, 0)
+    show_all(d)
+    run_dialog(d)
     d.destroy()
 
 
 def show_about(parent):
     d = Gtk.AboutDialog(transient_for=parent, modal=True, program_name=APP_FULL_NAME, version=VERSION,
-                        comments="A fast, Windows-Explorer-style file manager for Linux.\nGTK 3 · PyGObject · GIO",
+                        comments="A fast, Windows-Explorer-style file manager for Linux.\n"
+                                 f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()} · PyGObject · GIO",
                         website="https://github.com/KCArrow/shotrover",
                         copyright="© 2026 Kalib Arrowsmith", license_type=Gtk.License.CUSTOM,
                         license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals, freelancers and noncommercial organizations. "
@@ -6390,10 +8223,10 @@ def show_about(parent):
                                 "at https://github.com/KCArrow/shotrover", wrap_license=True)
     logo = app_icon(128)
     if logo is not None:
-        d.set_logo(logo)
+        about_logo(d, logo)
     else:
         d.set_logo_icon_name("system-file-manager")
-    d.run()
+    run_dialog(d)
     d.destroy()
 
 
@@ -6419,11 +8252,11 @@ class BatchRenameDialog(Gtk.Dialog):
         self.set_default_response(Gtk.ResponseType.OK)
         box = self.get_content_area()
         box.set_spacing(8)
-        box.set_border_width(10)
+        set_margins(box, 10)
 
         # ---- controls
         grid = Gtk.Grid(column_spacing=10, row_spacing=6)
-        box.pack_start(grid, False, False, 0)
+        put(box, grid, False, False, 0)
         r = 0
         grid.attach(Gtk.Label(label="Find:", xalign=1), 0, r, 1, 1)
         self.find = Gtk.Entry(hexpand=True, placeholder_text="text or regular expression")
@@ -6437,7 +8270,7 @@ class BatchRenameDialog(Gtk.Dialog):
         self.icase = Gtk.CheckButton(label="Ignore case")
         self.incl_ext = Gtk.CheckButton(label="Include extension")
         for w in (self.regex, self.icase, self.incl_ext):
-            opts.pack_start(w, False, False, 0)
+            put(opts, w, False, False, 0)
         grid.attach(opts, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Prefix:", xalign=1), 0, r, 1, 1)
@@ -6451,19 +8284,19 @@ class BatchRenameDialog(Gtk.Dialog):
         nb = Gtk.Box(spacing=6)
         self.pattern = Gtk.Entry(hexpand=True, placeholder_text="e.g.  Scene_{n}   or   {name}_{n}   (empty = off)")
         self.pattern.set_tooltip_text("{n} = counter, {name} = current name, {ext} = extension, {date} = file date, {i} = position")
-        nb.pack_start(self.pattern, True, True, 0)
-        nb.pack_start(Gtk.Label(label="start"), False, False, 0)
+        put(nb, self.pattern, True, True, 0)
+        put(nb, Gtk.Label(label="start"), False, False, 0)
         self.start = Gtk.SpinButton.new_with_range(0, 999999, 1)
         self.start.set_value(1)
-        nb.pack_start(self.start, False, False, 0)
-        nb.pack_start(Gtk.Label(label="step"), False, False, 0)
+        put(nb, self.start, False, False, 0)
+        put(nb, Gtk.Label(label="step"), False, False, 0)
         self.step = Gtk.SpinButton.new_with_range(1, 1000, 1)
         self.step.set_value(1)
-        nb.pack_start(self.step, False, False, 0)
-        nb.pack_start(Gtk.Label(label="digits"), False, False, 0)
+        put(nb, self.step, False, False, 0)
+        put(nb, Gtk.Label(label="digits"), False, False, 0)
         self.digits = Gtk.SpinButton.new_with_range(1, 10, 1)
         self.digits.set_value(max(2, len(str(len(self.entries)))))
-        nb.pack_start(self.digits, False, False, 0)
+        put(nb, self.digits, False, False, 0)
         grid.attach(nb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Case:", xalign=1), 0, r, 1, 1)
@@ -6472,14 +8305,14 @@ class BatchRenameDialog(Gtk.Dialog):
         for key, lab in self.CASE_OPTIONS:
             self.case.append(key, lab)
         self.case.set_active_id("keep")
-        cb.pack_start(self.case, False, False, 0)
+        put(cb, self.case, False, False, 0)
         self.order = Gtk.ComboBoxText()
         for key, lab in (("name", "Number by name"), ("modified", "Number by date modified"), ("size", "Number by size"), ("selection", "Number by selection order")):
             self.order.append(key, lab)
         self.order.set_active_id("name")
-        cb.pack_start(self.order, False, False, 0)
+        put(cb, self.order, False, False, 0)
         self.only_matching = Gtk.CheckButton(label="Only rename items that match Find")
-        cb.pack_start(self.only_matching, False, False, 0)
+        put(cb, self.only_matching, False, False, 0)
         grid.attach(cb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Frame offset:", xalign=1), 0, r, 1, 1)
@@ -6488,13 +8321,13 @@ class BatchRenameDialog(Gtk.Dialog):
         self.offset.set_value(0)
         self.offset.set_tooltip_text("Adds this to the frame number in each name, keeping its padding: "
                                      "shot.1001.exr with offset 60 → shot.1061.exr (0 = off)")
-        fb.pack_start(self.offset, False, False, 0)
-        fb.pack_start(Gtk.Label(label="applied to the"), False, False, 0)
+        put(fb, self.offset, False, False, 0)
+        put(fb, Gtk.Label(label="applied to the"), False, False, 0)
         self.offset_which = Gtk.ComboBoxText()
         self.offset_which.append("last", "last number in the name")
         self.offset_which.append("first", "first number in the name")
         self.offset_which.set_active_id("last")
-        fb.pack_start(self.offset_which, False, False, 0)
+        put(fb, self.offset_which, False, False, 0)
         grid.attach(fb, 1, r, 3, 1)
         r += 1
         grid.attach(Gtk.Label(label="Move to:", xalign=1), 0, r, 1, 1)
@@ -6502,13 +8335,13 @@ class BatchRenameDialog(Gtk.Dialog):
         self.dest = Gtk.Entry(hexpand=True, placeholder_text="empty = rename in place   ·   e.g.  ../v004   /mnt/show/{parent}_fixed")
         self.dest.set_tooltip_text("Repath: move the renamed files into this folder (absolute, or relative to each file's folder).\n"
                                    "{parent} = the file's folder name, {dir} = its full folder path, {ext} = its extension")
-        mb.pack_start(self.dest, True, True, 0)
+        put(mb, self.dest, True, True, 0)
         browse = Gtk.Button(label="Browse…")
         browse.connect("clicked", self._browse_dest)
-        mb.pack_start(browse, False, False, 0)
+        put(mb, browse, False, False, 0)
         self.mkdirs = Gtk.CheckButton(label="Create missing folders")
         self.mkdirs.set_active(True)
-        mb.pack_start(self.mkdirs, False, False, 0)
+        put(mb, self.mkdirs, False, False, 0)
         grid.attach(mb, 1, r, 3, 1)
 
         # ---- preview
@@ -6524,11 +8357,11 @@ class BatchRenameDialog(Gtk.Dialog):
                 rend.set_property("foreground", COL_DANGER)
             tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        box.pack_start(sw, True, True, 0)
+        set_child(sw, tv)
+        put(box, sw, True, True, 0)
         self.summary = Gtk.Label(xalign=0)
-        self.summary.get_style_context().add_class("dim-label")
-        box.pack_start(self.summary, False, False, 0)
+        css_class(self.summary, "dim-label")
+        put(box, self.summary, False, False, 0)
 
         self._paths = {e.path for e in self.entries}
         self._dir_cache: Dict[str, Optional[set]] = {}      # destination folder → names in it (None = missing)
@@ -6545,7 +8378,7 @@ class BatchRenameDialog(Gtk.Dialog):
         self.connect("response", self._response)
         self.connect("destroy", lambda *_: self._timer and GLib.source_remove(self._timer))
         self.plan: List[Tuple[str, str]] = []
-        self.show_all()
+        show_all(self)
         self.refresh()
 
     def _schedule(self):
@@ -6783,17 +8616,17 @@ class ReportDialog(Gtk.Dialog):
         self.set_default_size(760, 560)
         box = self.get_content_area()
         box.set_spacing(8)
-        box.set_border_width(12)
+        set_margins(box, 12)
         head = Gtk.Label(xalign=0)
         head.set_markup(f"<b>{GLib.markup_escape_text(CRASH.summary_of(path))}</b>")
-        head.set_line_wrap(True)
-        box.pack_start(head, False, False, 0)
+        label_wrap(head, True)
+        put(box, head, False, False, 0)
         sub = Gtk.Label(xalign=0, label="Review before reporting. Your home folder and user name are already replaced; "
                                         "edit out anything else you'd rather not share. Reporting opens a pre-filled "
                                         "issue on GitHub (a free GitHub account is needed).")
-        sub.set_line_wrap(True)
-        sub.get_style_context().add_class("dim-label")
-        box.pack_start(sub, False, False, 0)
+        label_wrap(sub, True)
+        css_class(sub, "dim-label")
+        put(box, sub, False, False, 0)
         try:
             with open(path) as f:
                 text = f.read()
@@ -6805,18 +8638,18 @@ class ReportDialog(Gtk.Dialog):
         tv.set_left_margin(6)
         tv.set_right_margin(6)
         sw = Gtk.ScrolledWindow()
-        sw.set_shadow_type(Gtk.ShadowType.IN)
-        sw.add(tv)
-        box.pack_start(sw, True, True, 0)
+        set_frame(sw, True)
+        set_child(sw, tv)
+        put(box, sw, True, True, 0)
         self.note = Gtk.Label(xalign=0)
-        self.note.set_line_wrap(True)
-        box.pack_start(self.note, False, False, 0)
+        label_wrap(self.note, True)
+        put(box, self.note, False, False, 0)
         self.add_button("Don't send", self.DISMISS)
         self.add_button("Copy", self.COPY)
         b = self.add_button("Report on GitHub…", self.ISSUE)
-        b.get_style_context().add_class("suggested-action")
+        css_class(b, "suggested-action")
         self.add_button("Close", Gtk.ResponseType.CLOSE)
-        self.show_all()
+        show_all(self)
 
     def text(self) -> str:
         return self.buf.get_text(self.buf.get_start_iter(), self.buf.get_end_iter(), False)
@@ -6830,9 +8663,9 @@ class ReportDialog(Gtk.Dialog):
 
     def run_report(self):
         while True:
-            r = self.run()
+            r = run_dialog(self)
             if r == self.COPY:
-                Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(self.text(), -1)
+                set_clipboard_text(self.text())
                 self.note.set_text("Copied.")
                 continue
             if r == self.ISSUE:
@@ -6861,7 +8694,7 @@ def open_report(parent, path: Optional[str] = None):
     def work():
         p = CRASH.manual_report()
         GLib.idle_add(lambda: (ReportDialog(parent, p).run_report(), False)[1])
-    threading.Thread(target=work, daemon=True).start()
+    bg(work)
 
 
 # =========================================================================== Find large files (disk cleanup)
@@ -7196,47 +9029,47 @@ class LargeFilesWindow(Gtk.Window):
         self.win = win
         self.cfg = win.cfg
         self.set_default_size(*self.cfg.get("cleanup_size", (980, 640)))
-        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        center_on_parent(self)
         self.items: List[CleanupItem] = []
         self.cancel: Optional[threading.Event] = None
         self.scanning = False
         self._alive = True
-        self.connect("delete-event", self._closing)
+        on_event(self, "delete-event", self._closing)
         self.connect("destroy", lambda w: setattr(self, "_alive", False))
-        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=12)
-        self.add(v)
+        v = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 12)
+        set_child(self, v)
         # where + what
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="Look in"), False, False, 0)
+        put(row, Gtk.Label(label="Look in"), False, False, 0)
         self.folder = Gtk.Entry(text=folder, hexpand=True)
         self.folder.connect("activate", lambda e: self.start())
-        row.pack_start(self.folder, True, True, 0)
+        put(row, self.folder, True, True, 0)
         b = Gtk.Button(label="Browse…")
         b.connect("clicked", self._browse)
-        row.pack_start(b, False, False, 0)
+        put(row, b, False, False, 0)
         self.scan_btn = Gtk.Button(label="Scan")
-        self.scan_btn.get_style_context().add_class("suggested-action")
+        css_class(self.scan_btn, "suggested-action")
         self.scan_btn.connect("clicked", lambda b: self.stop() if self.scanning else self.start())
-        row.pack_start(self.scan_btn, False, False, 0)
-        v.pack_start(row, False, False, 0)
+        put(row, self.scan_btn, False, False, 0)
+        put(v, row, False, False, 0)
         opts = Gtk.Box(spacing=10)
-        opts.pack_start(Gtk.Label(label="At least"), False, False, 0)
+        put(opts, Gtk.Label(label="At least"), False, False, 0)
         self.min_combo = Gtk.ComboBoxText()
         for label, _ in self.SIZES:
             self.min_combo.append_text(label)
         self.min_combo.set_active(int(self.cfg.get("cleanup_min", 2)))
-        opts.pack_start(self.min_combo, False, False, 0)
+        put(opts, self.min_combo, False, False, 0)
         self.seq_check = Gtk.CheckButton(label="Count frame sequences as one item", active=bool(self.cfg.get("cleanup_seq", True)))
         self.seq_check.set_tooltip_text("render.1001.exr … render.1240.exr shows as one row with the total size; "
                                         "a folder of medium-sized frames is usually where the space went")
-        opts.pack_start(self.seq_check, False, False, 0)
+        put(opts, self.seq_check, False, False, 0)
         self.fs_check = Gtk.CheckButton(label="Stay on this drive", active=bool(self.cfg.get("cleanup_onefs", True)))
         self.fs_check.set_tooltip_text("Don't follow into other drives or network shares mounted inside this folder")
-        opts.pack_start(self.fs_check, False, False, 0)
+        put(opts, self.fs_check, False, False, 0)
         self.dup_check = Gtk.CheckButton(label="Look for duplicates", active=bool(self.cfg.get("cleanup_dups", False)))
         self.dup_check.set_tooltip_text("Reads files of equal size to find identical copies (slower on big files)")
-        opts.pack_start(self.dup_check, False, False, 0)
-        v.pack_start(opts, False, False, 0)
+        put(opts, self.dup_check, False, False, 0)
+        put(v, opts, False, False, 0)
         # filter the results
         frow = Gtk.Box(spacing=6)
         self.kind_combo = Gtk.ComboBoxText()
@@ -7244,21 +9077,21 @@ class LargeFilesWindow(Gtk.Window):
             self.kind_combo.append_text(k)
         self.kind_combo.set_active(0)
         self.kind_combo.connect("changed", lambda c: self._refilter())
-        frow.pack_start(self.kind_combo, False, False, 0)
+        put(frow, self.kind_combo, False, False, 0)
         self.age_combo = Gtk.ComboBoxText()
         for label, _ in self.AGES:
             self.age_combo.append_text(label)
         self.age_combo.set_active(0)
         self.age_combo.connect("changed", lambda c: self._refilter())
-        frow.pack_start(self.age_combo, False, False, 0)
+        put(frow, self.age_combo, False, False, 0)
         self.hide_sys = Gtk.CheckButton(label="Hide system files", active=bool(self.cfg.get("cleanup_hide_system", False)))
         self.hide_sys.set_tooltip_text("Files that belong to the operating system, installed programs or another account")
         self.hide_sys.connect("toggled", lambda c: (self.cfg.__setitem__("cleanup_hide_system", c.get_active()), self._refilter()))
-        frow.pack_start(self.hide_sys, False, False, 0)
+        put(frow, self.hide_sys, False, False, 0)
         self.name_filter = Gtk.SearchEntry(placeholder_text="Filter names and folders")
         self.name_filter.connect("search-changed", lambda e: self._refilter())
-        frow.pack_start(self.name_filter, True, True, 0)
-        v.pack_start(frow, False, False, 0)
+        put(frow, self.name_filter, True, True, 0)
+        put(v, frow, False, False, 0)
         # results: check, name, size text, size, type, modified text, mtime, folder, index, tooltip, visible,
         # notes, colour (system files are drawn in the warning colour)
         self.store = Gtk.ListStore(bool, str, str, GObject.TYPE_INT64, str, str, float, str, int, str, bool, str, str)
@@ -7270,8 +9103,8 @@ class LargeFilesWindow(Gtk.Window):
         tv.set_tooltip_column(9)
         tv.get_selection().set_mode(Gtk.SelectionMode.MULTIPLE)
         tv.connect("row-activated", lambda t, p, c: self._reveal_rows([p]))
-        tv.connect("button-press-event", self._button)
-        tv.connect("key-press-event", self._key)
+        on_event(tv, "button-press-event", self._button)
+        on_event(tv, "key-press-event", self._key)
         tog = Gtk.CellRendererToggle()
         tog.connect("toggled", self._toggled)
         c = Gtk.TreeViewColumn("", tog, active=0)
@@ -7296,35 +9129,35 @@ class LargeFilesWindow(Gtk.Window):
             tv.append_column(cc)
         self.view = tv
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         self.stack = Gtk.Stack()
         self.empty = Gtk.Label(label="Pick a folder (or a whole drive) and press Scan.\nThe biggest files and frame sequences "
                                      "are listed here; nothing is removed until you tick items and choose Move to Recycle Bin.",
                                justify=Gtk.Justification.CENTER, wrap=True)
-        self.empty.get_style_context().add_class("dim-label")
+        css_class(self.empty, "dim-label")
         self.stack.add_named(self.empty, "empty")
         self.stack.add_named(sw, "list")
-        v.pack_start(self.stack, True, True, 0)
+        put(v, self.stack, True, True, 0)
         # status + actions
         self.status = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.status.get_style_context().add_class("dim-label")
-        v.pack_start(self.status, False, False, 0)
+        css_class(self.status, "dim-label")
+        put(v, self.status, False, False, 0)
         act = Gtk.Box(spacing=6)
         self.spinner = Gtk.Spinner()
-        act.pack_start(self.spinner, False, False, 0)
+        put(act, self.spinner, False, False, 0)
         self.sel_label = Gtk.Label(xalign=0)
-        act.pack_start(self.sel_label, True, True, 0)
+        put(act, self.sel_label, True, True, 0)
         self.reveal_btn = Gtk.Button(label="Show in folder")
         self.reveal_btn.connect("clicked", lambda b: self._reveal_rows(self.view.get_selection().get_selected_rows()[1]))
-        act.pack_end(self.reveal_btn, False, False, 0)
+        put_end(act, self.reveal_btn, False, False, 0)
         self.trash_btn = Gtk.Button(label="Move to Recycle Bin")
-        self.trash_btn.get_style_context().add_class("destructive-action")
+        css_class(self.trash_btn, "destructive-action")
         self.trash_btn.set_sensitive(False)
         self.trash_btn.connect("clicked", lambda b: self._trash_checked())
-        act.pack_end(self.trash_btn, False, False, 0)
-        v.pack_start(act, False, False, 0)
+        put_end(act, self.trash_btn, False, False, 0)
+        put(v, act, False, False, 0)
         self._update_selection()
-        self.show_all()
+        show_all(self)
 
     # ---- scanning
     def _browse(self, btn):
@@ -7401,7 +9234,7 @@ class LargeFilesWindow(Gtk.Window):
                 self.empty.set_text(f"Nothing of {self.min_combo.get_active_text()} or more in {root}.")
                 self.stack.set_visible_child_name("empty")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def stop(self):
         if self.cancel is not None:
@@ -7410,7 +9243,7 @@ class LargeFilesWindow(Gtk.Window):
     def _closing(self, *a):
         self.stop()
         try:
-            self.cfg["cleanup_size"] = tuple(self.get_size())
+            self.cfg["cleanup_size"] = tuple(window_size(self))
             save_config(self.cfg)
         except Exception:
             pass
@@ -7522,28 +9355,17 @@ class LargeFilesWindow(Gtk.Window):
             sel.select_path(hit[0])
         rows = sel.get_selected_rows()[1]
         its = self._rows_items(rows)
-        menu = Gtk.Menu()
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-
         def set_checks(on):
             for p in rows:
                 it = self.sorted.get_iter(p)
                 child = self.filtered.convert_iter_to_child_iter(self.sorted.convert_iter_to_child_iter(it))
                 self.store.set_value(child, 0, on)
             self._update_selection()
-        for label, fn in (("Tick", lambda *_: set_checks(True)), ("Untick", lambda *_: set_checks(False)), (None, None),
-                          ("Show in folder", lambda *_: self._reveal_rows(rows)),
-                          ("Open", lambda *_: self._open(its[0])),
-                          ("Copy path", lambda *_: cb.set_text("\n".join(os.path.join(x.folder, x.name) for x in its), -1))):
-            if label is None:
-                menu.append(Gtk.SeparatorMenuItem())
-                continue
-            mi = Gtk.MenuItem(label=label)
-            mi.connect("activate", fn)
-            menu.append(mi)
-        menu.show_all()
-        menu.attach_to_widget(tv, None)
-        menu.popup_at_pointer(event)
+        menu = build_menu([("Tick", lambda: set_checks(True)), ("Untick", lambda: set_checks(False)), "-",
+                           ("Show in folder", lambda: self._reveal_rows(rows)),
+                           ("Open", lambda: self._open(its[0])),
+                           ("Copy path", lambda: set_clipboard_text("\n".join(os.path.join(x.folder, x.name) for x in its)))])
+        popup_menu(menu, tv, event)
         return True
 
     def _open(self, it: CleanupItem):
@@ -7576,15 +9398,15 @@ class LargeFilesWindow(Gtk.Window):
         lines = [f"• {it.name} — {it.reason}" for it in sysitems[:8]]
         if len(sysitems) > 8:
             lines.append(f"• … and {len(sysitems) - 8} more")
-        d.format_secondary_text("Removing these can break installed programs or the system itself, and files you don't own "
+        dialog_secondary(d, "Removing these can break installed programs or the system itself, and files you don't own "
                                 "can't be moved without administrator rights anyway.\n\n" + "\n".join(lines))
         d.add_button("_Cancel", Gtk.ResponseType.CANCEL)
         d.add_button("Remove them _too", 2)
         skip = d.add_button("_Skip system files", 1)
-        d.get_widget_for_response(2).get_style_context().add_class("destructive-action")
+        css_class(d.get_widget_for_response(2), "destructive-action")
         d.set_default_response(1)
         skip.grab_focus()
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         return {1: "skip", 2: "all"}.get(r, "cancel")
 
@@ -7887,28 +9709,28 @@ class WelcomeDialog(Gtk.Dialog):
         self.add_button("_Continue", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         box = self.get_content_area()
-        box.set_border_width(18)
+        set_margins(box, 18)
         box.set_spacing(10)
         head = Gtk.Label(xalign=0)
         head.set_markup("<span size='x-large' weight='bold'>Choose how Shotrover looks</span>")
-        box.pack_start(head, False, False, 0)
+        put(box, head, False, False, 0)
         sub = Gtk.Label(label="You can change both later in Preferences → View.", xalign=0)
-        sub.get_style_context().add_class("dim-label")
-        box.pack_start(sub, False, False, 0)
+        css_class(sub, "dim-label")
+        put(box, sub, False, False, 0)
 
         lab = Gtk.Label(xalign=0, margin_top=8)
         lab.set_markup("<b>Icons</b>")
-        box.pack_start(lab, False, False, 0)
+        put(box, lab, False, False, 0)
         self.icon_radios = {}
         group = None
         for value, title, note in (("shotrover", "Shotrover icons", "Yellow folders and a clear picture for every production file type"),
                                    ("system", "System icons", "The icon theme your desktop already uses")):
-            rb = Gtk.RadioButton.new_from_widget(group)
+            rb = radio_button(group)
             group = group or rb
-            card = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+            card = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), 8)
             t = Gtk.Label(xalign=0)
             t.set_markup(f"<b>{title}</b>\n<small>{GLib.markup_escape_text(note)}</small>")
-            card.pack_start(t, False, False, 0)
+            put(card, t, False, False, 0)
             row = Gtk.Box(spacing=10)
             for name, fname in self.SAMPLES:
                 ent = None
@@ -7916,29 +9738,29 @@ class WelcomeDialog(Gtk.Dialog):
                     ent = Entry()
                     ent.name = fname
                 pb = ICONS.pixbuf(Gio.ThemedIcon.new_with_default_fallbacks(name), 48, ent, mode=value)
-                row.pack_start(Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_icon_name(name, Gtk.IconSize.DIALOG), False, False, 0)
-            card.pack_start(row, False, False, 0)
-            rb.add(card)
+                put(row, image_from_pixbuf(pb) if pb is not None else icon_image(name, "dialog"), False, False, 0)
+            put(card, row, False, False, 0)
+            set_child(rb, card)
             rb.set_active(cfg.get("icons", "shotrover") == value)
-            box.pack_start(rb, False, False, 0)
+            put(box, rb, False, False, 0)
             self.icon_radios[value] = rb
 
         lab = Gtk.Label(xalign=0, margin_top=8)
         lab.set_markup("<b>Colours</b>")
-        box.pack_start(lab, False, False, 0)
+        put(box, lab, False, False, 0)
         trow = Gtk.Box(spacing=18)
         self.theme_radios = {}
         group = None
         for value, title in (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")):
-            rb = Gtk.RadioButton.new_with_label_from_widget(group, title)
+            rb = radio_button(group, title)
             group = group or rb
             rb.set_active(cfg.get("theme", "system") == value)
             rb.connect("toggled", lambda b, v=value: b.get_active() and apply_theme_mode(v))     # live, so the choice is seen
-            trow.pack_start(rb, False, False, 0)
+            put(trow, rb, False, False, 0)
             self.theme_radios[value] = rb
-        box.pack_start(trow, False, False, 0)
+        put(box, trow, False, False, 0)
         self.connect("response", self._response)
-        self.show_all()
+        show_all(self)
 
     def _response(self, d, r):
         # closing the window any other way keeps what is selected too: the question is asked once
@@ -7982,7 +9804,7 @@ def clip_width(widget: Gtk.Widget) -> Gtk.Widget:
     sw = Gtk.ScrolledWindow()
     sw.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
     sw.set_propagate_natural_height(True)
-    sw.add(widget)
+    set_child(sw, widget)
     return sw
 
 
@@ -7996,7 +9818,7 @@ class FitImage(Gtk.DrawingArea):
         self.pixbuf = None
         self.max_size = max_size              # 0 = natural size cap is the pixbuf itself
         self.set_size_request(1, 1)
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
         # animated GIF / WebP: a GdkPixbufAnimation iterator advanced on its own frame delays
         self._anim_iter = None
         self._anim_timer = 0
@@ -8014,10 +9836,10 @@ class FitImage(Gtk.DrawingArea):
         Frames advance only while the widget is mapped and the window is active."""
         self._anim_stop()
         if anim is None:
-            self.set_from_pixbuf(None)
+            image_set_pixbuf(self, None)
             return
         if anim.is_static_image():
-            self.set_from_pixbuf(anim.get_static_image())
+            image_set_pixbuf(self, anim.get_static_image())
             return
         self._anim_iter = anim.get_iter(None)
         self.anim_paused = False
@@ -8061,7 +9883,7 @@ class FitImage(Gtk.DrawingArea):
         it = self._anim_iter
         if it is None:
             return False
-        top = self.get_toplevel()
+        top = toplevel(self)
         if isinstance(top, Gtk.Window) and not top.is_active():
             self._anim_timer = GLib.timeout_add(250, self._anim_tick)     # window in the background: idle
             return False
@@ -8102,7 +9924,7 @@ def cairo_filter_good():
 def enable_row_hover(tv: Gtk.TreeView):
     """Track the row under the pointer in tv.hover_path and repaint; cell data funcs read it via hover_bg()."""
     tv.hover_path = None
-    tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+    add_event_mask(tv, EVMASK.POINTER_MOTION_MASK | EVMASK.LEAVE_NOTIFY_MASK)
 
     def motion(w, event):
         hit = w.get_path_at_pos(int(event.x), int(event.y))
@@ -8118,24 +9940,29 @@ def enable_row_hover(tv: Gtk.TreeView):
             w.hover_path = None
             w.queue_draw()
         return False
-    tv.connect("motion-notify-event", motion)
-    tv.connect("leave-notify-event", leave)
+    on_event(tv, "motion-notify-event", motion)
+    on_event(tv, "leave-notify-event", leave)
 
 
 def hover_bg(tv: Gtk.TreeView, cell, path_or_iter_model, it):
-    """Apply/clear the subtle hover background on a renderer for the row being drawn."""
+    """Apply/clear the subtle hover background on a renderer for the row being drawn.
+    Runs for every visible cell of every frame, so it talks to GTK only when the renderer's state changes."""
     hp = getattr(tv, "hover_path", None)
     on = hp is not None and path_or_iter_model.get_path(it).compare(hp) == 0 and not tv.get_selection().iter_is_selected(it)
     if on:
-        fg = tv.get_style_context().get_color(Gtk.StateFlags.NORMAL)
-        cell.set_property("cell-background-rgba", Gdk.RGBA(fg.red, fg.green, fg.blue, 0.07))
-    cell.set_property("cell-background-set", on)
+        fg = style_fg(tv.get_style_context(), Gtk.StateFlags.NORMAL)
+        cell.set_property("cell-background-rgba", rgba(fg.red, fg.green, fg.blue, 0.07))
+    if on or getattr(cell, "_sr_hover", True):
+        cell.set_property("cell-background-set", on)
+        cell._sr_hover = on
 
 
 # --------------------------------------------------------------------------- soft grid lines for tree views
 def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
     """Draw our own separators after the rows: faint horizontal rules, and (optionally) vertical rules that
     fade out as they approach each horizontal rule so the crossings never form a visible '+'."""
+    # GTK 4: nothing can be painted over a tree view (on_draw_over does nothing there), and GTK's own grid
+    # lines make every row a pixel taller than under GTK 3, so the lists go without these faint rules.
     tv.set_grid_lines(Gtk.TreeViewGridLines.NONE)
 
     def draw(w, cr):
@@ -8149,7 +9976,7 @@ def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
         cols = [c for c in w.get_columns() if c.get_visible()]
         if not cols:
             return False
-        fg = w.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(w.get_style_context(), Gtk.StateFlags.NORMAL)
         alloc = w.get_allocation()
         rows = []
         it = model.get_iter(start)
@@ -8179,19 +10006,28 @@ def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
                 x, _ = w.convert_bin_window_to_widget_coords(r.x + r.width, 0)
                 xs.append(x - 0.5)
             fade = 7
-            for x in xs:
-                for y, h in rows:
-                    y0, y1 = y, y + h - 1
-                    if h <= 2 * fade + 2:
-                        continue
-                    pat = cairo_linear(x, y0, x, y1, fg, fade / h)
-                    cr.set_source(pat)
-                    cr.move_to(x, y0)
-                    cr.line_to(x, y1)
-                    cr.stroke()
+            # Rows of one height that follow each other share one repeating gradient and one stroke per
+            # column, instead of a gradient and a stroke for every cell on every frame.
+            runs = []
+            for y, h in rows:
+                if runs and runs[-1][1] == h and runs[-1][0] + runs[-1][1] * runs[-1][2] == y:
+                    runs[-1][2] += 1
+                else:
+                    runs.append([y, h, 1])
+            import cairo
+            for y, h, n in runs:
+                if h <= 2 * fade + 2:
+                    continue
+                pat = cairo_linear(0, y, 0, y + h, fg, fade / h)
+                pat.set_extend(cairo.EXTEND_REPEAT)
+                cr.set_source(pat)
+                for x in xs:
+                    cr.move_to(x, y)
+                    cr.line_to(x, y + h * n)
+                cr.stroke()
         cr.restore()
         return False
-    tv.connect_after("draw", draw)
+    on_draw_over(tv, draw)
 
 
 def cairo_linear(x0, y0, x1, y1, fg, frac):
@@ -8205,7 +10041,7 @@ def cairo_linear(x0, y0, x1, y1, fg, frac):
 
 
 # --------------------------------------------------------------------------- virtualized icon grid
-class IconGrid(Gtk.Layout):
+class IconGrid(ScrollCanvas):
     """A Nautilus-style icon view: only the tiles inside the viewport are laid out and painted, so a
     folder with 100k entries costs the same per frame as one with 100. Reads rows straight from the
     FolderView ListStore (col 0 Entry, col 2 pixbuf, col 3 markup). API mirrors the bits of
@@ -8220,10 +10056,10 @@ class IconGrid(Gtk.Layout):
         super().__init__()
         self.model: Optional[Gtk.ListStore] = None
         self.set_can_focus(True)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
-                        Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.KEY_PRESS_MASK |
-                        Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
-        self.get_style_context().add_class("icongrid")
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
+                        EVMASK.POINTER_MOTION_MASK | EVMASK.KEY_PRESS_MASK |
+                        EVMASK.SCROLL_MASK | EVMASK.LEAVE_NOTIFY_MASK)
+        css_class(self, "icongrid")
         # geometry
         self.icon_size = 48
         self.horizontal = False
@@ -8247,19 +10083,32 @@ class IconGrid(Gtk.Layout):
         self.provider: Optional[Callable] = None     # entry -> (pixbuf, markup); used when model cols 2/3 are None
         self.muted = False                           # inactive split pane: grey icons, dimmer text
         self._cache: Dict[int, Tuple[object, str]] = {}
-        self._layout_cache: Dict[int, Pango.Layout] = {}
-        self.connect("draw", self._draw)
-        self.connect("size-allocate", lambda w, a: self._relayout())
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", self._release)
-        self.connect("motion-notify-event", self._motion)
-        self.connect("leave-notify-event", lambda w, e: self._set_prelight(-1))
-        self.connect("key-press-event", self._key)
-        self.connect("focus-in-event", lambda w, e: self.queue_draw() or False)
-        self.connect("focus-out-event", lambda w, e: self.queue_draw() or False)
-        self.connect("drag-begin", self._drag_begin)
-        self.connect("grab-broken-event", lambda w, e: self._reset_press())
-        self.connect("grab-notify", lambda w, was_grabbed: None if was_grabbed else self._reset_press())
+        # Shaped text and converted icons are kept between frames: while the window is being resized the same
+        # tiles are redrawn on every frame, and wrapping each name and converting each pixbuf again took
+        # more than half of the frame.
+        self._layout_cache: dict = {}
+        self._surf_cache: dict = {}
+        self._surf_bytes = 0
+        if GTK4:
+            self.set_draw_func(lambda a, cr, w, h, *_: self._draw(a, cr))
+            for prop in ("gtk-font-name", "gtk-theme-name", "gtk-xft-dpi"):      # shaped text is cached
+                Gtk.Settings.get_default().connect("notify::" + prop, lambda *a: self.invalidate())
+        else:
+            self.connect("style-updated", lambda w: self._layout_cache.clear())      # font or theme changed
+            self.connect("draw", self._draw)
+        on_resize(self, self._relayout)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", self._release)
+        on_event(self, "motion-notify-event", self._motion)
+        on_event(self, "leave-notify-event", lambda w, e: self._set_prelight(-1))
+        on_event(self, "key-press-event", self._key)
+        on_event(self, "focus-in-event", lambda w, e: self.queue_draw() or False)
+        on_event(self, "focus-out-event", lambda w, e: self.queue_draw() or False)
+        if not GTK4:                       # GTK 4: file_drag_source() puts a Gtk.DragSource on the grid instead
+            self.connect("drag-begin", self._drag_begin)
+        if not GTK4:
+            on_event(self, "grab-broken-event", lambda w, e: self._reset_press())
+            self.connect("grab-notify", lambda w, was_grabbed: None if was_grabbed else self._reset_press())
         self.set_model(model)
 
     def _reset_press(self):
@@ -8306,7 +10155,23 @@ class IconGrid(Gtk.Layout):
         self._cache.pop(p.get_indices()[0], None)
         self.queue_draw()
 
+    def _drop_surfaces(self):
+        self._surf_cache.clear()
+        self._surf_bytes = 0
+
+    def _icon_surface(self, pb):
+        surf = self._surf_cache.get(pb)
+        if surf is None:
+            size = pb.get_width() * pb.get_height() * 4
+            if self._surf_bytes + size > (48 << 20):
+                self._drop_surfaces()
+            surf = pixbuf_surface(pb)
+            self._surf_cache[pb] = surf
+            self._surf_bytes += size
+        return surf
+
     def invalidate(self):
+        self._drop_surfaces()
         self._cache.clear()
         self.queue_draw()
 
@@ -8329,6 +10194,7 @@ class IconGrid(Gtk.Layout):
         self.selected = {i for i in self.selected if i < n}
         if self.cursor >= n:
             self.cursor = n - 1
+        self._drop_surfaces()
         self._cache.clear()
         self._relayout()
 
@@ -8338,6 +10204,7 @@ class IconGrid(Gtk.Layout):
         self.icon_size, self.horizontal, self.single_click = icon_size, horizontal, single_click
         probe = self.create_pango_layout("Xg")
         line = probe.get_pixel_size()[1] + 1
+        self.line_h, self.extra_lines = line, extra_lines
         if horizontal:
             self.text_lines = (3 + extra_lines) if icon_size >= 48 else 1
             self.tile_w = item_width
@@ -8347,6 +10214,7 @@ class IconGrid(Gtk.Layout):
             self.tile_w = max(90, item_width)
             self.tile_h = icon_size + 10 + self.text_lines * line + 10
         self._layout_cache.clear()
+        self._drop_surfaces()
         self._cache.clear()
         self._relayout()
 
@@ -8399,11 +10267,11 @@ class IconGrid(Gtk.Layout):
     def _draw_tiles(self, cr):
         n = self._n()
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         ok, sel = sc.lookup_color("theme_selected_bg_color")
-        sel = sel if ok else Gdk.RGBA(0.2, 0.5, 0.9, 1)
+        sel = sel if ok else rgba(0.2, 0.5, 0.9, 1)
         ok, selfg = sc.lookup_color("theme_selected_fg_color")
-        selfg = selfg if ok else Gdk.RGBA(1, 1, 1, 1)
+        selfg = selfg if ok else rgba(1, 1, 1, 1)
         focused = self.has_focus()
         a, b = self._visible_range()
         pad = 6
@@ -8449,7 +10317,7 @@ class IconGrid(Gtk.Layout):
                 if self.muted:
                     pb = ICONS.desaturated(pb)
                 ox, oy = (size - pb.get_width()) // 2, (size - pb.get_height()) // 2
-                Gdk.cairo_set_source_pixbuf(cr, pb, ix + ox, iy + oy)
+                cr.set_source_surface(self._icon_surface(pb), ix + ox, iy + oy)
                 cr.paint()
             lay = self._text_layout(cr, i, markup, tw_text)
             if is_sel:
@@ -8477,13 +10345,25 @@ class IconGrid(Gtk.Layout):
         return False
 
     def _text_layout(self, cr, i, markup, width):
+        key = (markup, width, self.text_lines, self.horizontal)
+        lay = self._layout_cache.get(key)
+        if lay is not None:
+            return lay
+        if len(self._layout_cache) > 4000:
+            self._layout_cache.clear()
         lay = self.create_pango_layout("")        # widget's own Pango context: same font as the rest of the UI
         lay.set_markup(markup or "", -1)
         lay.set_width(max(10, int(width * Pango.SCALE)))
         lay.set_wrap(Pango.WrapMode.WORD_CHAR)
         lay.set_ellipsize(Pango.EllipsizeMode.END)
-        lay.set_height(-self.text_lines)
+        # A negative height is a line limit for EACH paragraph, and a tile with a second paragraph (where the
+        # file is) would get twice the lines the tile has room for and run into the tile below. So: the name
+        # keeps its usual lines, and if the whole text is still too tall, cut it at the tile's text height.
+        lay.set_height(-max(1, self.text_lines - getattr(self, "extra_lines", 0)))
+        if lay.get_line_count() > self.text_lines:
+            lay.set_height(self.text_lines * getattr(self, "line_h", 18) * Pango.SCALE)
         lay.set_alignment(Pango.Alignment.LEFT if self.horizontal else Pango.Alignment.CENTER)
+        self._layout_cache[key] = lay
         return lay
 
     # ---- selection API (Gtk.IconView-compatible subset)
@@ -8577,7 +10457,7 @@ class IconGrid(Gtk.Layout):
         if DEBUG_INPUT:
             input_log(f"grid: {event.type.value_nick} button={event.button} item={i} shift={shift} ctrl={ctrl} "
                       f"anchor={self.anchor} cursor={self.cursor} selected={len(self.selected)} t={event.time}")
-        if event.type != Gdk.EventType.BUTTON_PRESS:
+        if event.type != EV_PRESS:
             # GDK's own 2/3-click events are ignored: GDK keeps counting clicks across a folder change, so the
             # first click of a quick double-click right after opening a folder became the THIRD click of the
             # double-click that opened it, and the real double-click was lost. We pair clicks ourselves below.
@@ -8730,7 +10610,7 @@ def _rounded(cr, x, y, w, h, r):
 def draw_capacity_bar(cr, sc: Gtk.StyleContext, x: float, y: float, w: float, h: float, frac: Optional[float]):
     """A used-space pill: faint track, fill in the theme's accent (the danger colour past 90 %). The fill is
     never narrower than the bar is tall, so a nearly empty drive shows a round dot rather than a sliver."""
-    fg = sc.get_color(Gtk.StateFlags.NORMAL)
+    fg = style_fg(sc, Gtk.StateFlags.NORMAL)
     r = h / 2.0
     _rounded(cr, x, y, w, h, r)
     cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.14)
@@ -8777,10 +10657,19 @@ class UsageRenderer(Gtk.CellRenderer):
         lay = widget.create_pango_layout(self.text or "")
         tw, th = lay.get_pixel_size()
         if cell_area.width - bar_w - 3 * pad >= tw:
-            fg = sc.get_color(Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
+            fg = style_fg(sc, Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
             cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.75)
             cr.move_to(cell_area.x + pad + bar_w + pad + 2, cell_area.y + (cell_area.height - th) / 2.0)
             PangoCairo.show_layout(cr, lay)
+
+
+    def do_snapshot(self, snapshot, widget, background_area, cell_area, flags):
+        """GTK 4 draws cells through a snapshot, not a cairo context: paint the same picture into a cairo
+        node covering the cell."""
+        from gi.repository import Graphene
+        r = Graphene.Rect()
+        r.init(cell_area.x, cell_area.y, cell_area.width, cell_area.height)
+        self.do_render(snapshot.append_cairo(r), widget, background_area, cell_area, flags)
 
 
 # --------------------------------------------------------------------------- This PC: Windows-style tile view
@@ -8791,7 +10680,7 @@ class DriveBar(Gtk.DrawingArea):
         super().__init__()
         self.frac = None
         self.set_size_request(120, 10)
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
 
     def set_fraction(self, frac):
         self.frac = frac
@@ -8817,8 +10706,8 @@ class PCView(Gtk.ScrolledWindow):
     def __init__(self):
         super().__init__(hexpand=True, vexpand=True)
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=12)
-        self.add(self.box)
+        self.box = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 12)
+        set_child(self, self.box)
         self.flows: List[Gtk.FlowBox] = []
         self.tiles: Dict[int, Tuple[Gtk.FlowBoxChild, Entry, Optional[DriveBar], Optional[Gtk.Label]]] = {}
         self.single_click = False
@@ -8828,8 +10717,8 @@ class PCView(Gtk.ScrolledWindow):
     # ---- build
     def set_entries(self, ents: List[Entry], single_click: bool):
         self.single_click = single_click
-        for c in self.box.get_children():
-            self.box.remove(c)
+        for c in child_widgets(self.box):
+            take_out(self.box, c)
         self.flows, self.tiles = [], {}
         sections: List[Tuple[str, List[Entry]]] = []
         for e in ents:
@@ -8848,44 +10737,44 @@ class PCView(Gtk.ScrolledWindow):
             fb.set_activate_on_single_click(single_click)
             fb.connect("selected-children-changed", self._sel_changed)
             fb.connect("child-activated", lambda f, ch: self.emit("item-activated", self.tiles[id(ch)][1]))
-            fb.connect("button-press-event", self._press)
+            on_event(fb, "button-press-event", self._press)
             for e in items:
                 ch = Gtk.FlowBoxChild()
                 tile, bar, info = self._make_tile(e)
-                ch.add(tile)
-                fb.add(ch)
+                set_child(ch, tile)
+                fb.insert(ch, -1)
                 self.tiles[id(ch)] = (ch, e, bar, info)
-            exp.add(fb)
+            set_child(exp, fb)
             self.flows.append(fb)
-            self.box.pack_start(exp, False, False, 0)
+            put(self.box, exp, False, False, 0)
             sep = Gtk.Separator()
-            self.box.pack_start(sep, False, False, 2)
-        self.box.show_all()
+            put(self.box, sep, False, False, 2)
+        show_all(self.box)
         self.refresh()
 
     def _make_tile(self, e: Entry):
         is_drive = e.section not in ("Folders",) and (getattr(e, "drive_kind", "") or e.usage is not None)
-        h = Gtk.Box(spacing=10, margin=6)
-        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
+        h = with_margins(Gtk.Box(spacing=10), 6)
+        img = image_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else icon_image("folder", "dialog")
         img.set_valign(Gtk.Align.START)
-        h.pack_start(img, False, False, 0)
+        put(h, img, False, False, 0)
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         name = Gtk.Label(label=e.name, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=26)
-        v.pack_start(name, False, False, 0)
+        put(v, name, False, False, 0)
         bar = info = None
         if is_drive:
             bar = DriveBar()
-            v.pack_start(bar, False, False, 2)
+            put(v, bar, False, False, 2)
             info = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=28)
-            info.get_style_context().add_class("dim-label")
-            v.pack_start(info, False, False, 0)
+            css_class(info, "dim-label")
+            put(v, info, False, False, 0)
             h.set_size_request(250, -1)
         else:
             sub = Gtk.Label(label=pretty_path(e.location or ""), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
-            sub.get_style_context().add_class("dim-label")
-            v.pack_start(sub, False, False, 0)
+            css_class(sub, "dim-label")
+            put(v, sub, False, False, 0)
             h.set_size_request(200, -1)
-        h.pack_start(v, True, True, 0)
+        put(h, v, True, True, 0)
         if getattr(e, "drive_kind", "") == "unmounted":
             h.set_opacity(0.55)
         return h, bar, info
@@ -8905,7 +10794,7 @@ class PCView(Gtk.ScrolledWindow):
             return
         self._suppress = True
         for other in self.flows:            # one selection across all sections (plain click only)
-            if other is not fb and not (Gtk.get_current_event_state()[1] & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)):
+            if other is not fb and not (current_modifiers() & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)):
                 other.unselect_all()
         self._suppress = False
         self.emit("selection-changed")
@@ -8935,7 +10824,7 @@ class PCView(Gtk.ScrolledWindow):
         self._suppress = True
         for fb in self.flows:
             fb.unselect_all()
-            for ch in fb.get_children():
+            for ch in child_widgets(fb):
                 if self.tiles[id(ch)][1].name in names:
                     fb.select_child(ch)
         self._suppress = False
@@ -8976,10 +10865,11 @@ class FileClipboard:
     MAX_IMAGE = 40 << 20             # bigger pictures are offered as files only
 
     def __init__(self):
-        self.w = Gtk.Invisible()
-        self.w.connect("selection-get", self._get)
-        self.w.connect("selection-clear-event", self._lost)
-        self.sel = Gdk.SELECTION_CLIPBOARD
+        if not GTK4:                       # GTK 3 owns the selection through an invisible widget
+            self.w = Gtk.Invisible()
+            self.w.connect("selection-get", self._get)
+            on_event(self.w, "selection-clear-event", self._lost)
+            self.sel = Gdk.SELECTION_CLIPBOARD
         self.mode, self.paths, self.uris = "copy", [], []
         self.image_path: Optional[str] = None
         self._png: Optional[bytes] = None
@@ -9006,6 +10896,14 @@ class FileClipboard:
         self.uris = [Gio.File.new_for_path(p).get_uri() for p in paths]
         self._png = None
         targets = self.targets_for(paths)
+        if GTK4:                           # one content provider per format, offered together
+            try:
+                provs = [Gdk.ContentProvider.new_for_bytes(t, GLib.Bytes.new(self.payload(t) or b"")) for t in targets]
+                Gdk.Display.get_default().get_clipboard().set_content(Gdk.ContentProvider.new_union(provs))
+                return True
+            except Exception as ex:
+                bench(f"clipboard: offering the files failed: {ex}")
+                return False
         try:
             Gtk.selection_clear_targets(self.w, self.sel)
             for i, t in enumerate(targets):
@@ -9064,6 +10962,439 @@ def file_clipboard() -> FileClipboard:
     if _FILE_CLIPBOARD is None:
         _FILE_CLIPBOARD = FileClipboard()
     return _FILE_CLIPBOARD
+
+
+# --------------------------------------------------------------------------- the Details list under GTK 4
+# Gtk.TreeView repaints every visible cell from scratch on every frame, through a Python call per cell, and
+# builds a new text layout each time: about twice the cost of Gtk.ColumnView, which keeps one small widget per
+# visible cell and only fills it in when a row scrolls into view. DetailsList wraps a ColumnView and answers
+# the handful of TreeView calls FolderView makes (selection, cursor, row under a point, columns), in tree
+# paths, so the folder view is the same code under both toolkits. It mirrors the rows of the Gtk.ListStore
+# the icon layouts also read.
+if GTK4:
+    class _DRow(GObject.Object):
+        """One row: an Entry, or the text of a group heading."""
+
+        def __init__(self, v):
+            super().__init__()
+            self.v = v
+
+    def _tpath(i: int):
+        return Gtk.TreePath.new_from_indices([i])
+
+    class _DSelection:
+        """The part of Gtk.TreeSelection the folder view uses, over the list's Gtk.MultiSelection."""
+
+        def __init__(self, owner):
+            self.o = owner
+            self._cbs: dict = {}
+            self._next = 1
+
+        def set_mode(self, mode):
+            pass
+
+        def connect(self, name, cb, *args):
+            self._next += 1
+            self._cbs[self._next] = (cb, args)
+            return self._next
+
+        def disconnect(self, hid):
+            self._cbs.pop(hid, None)
+
+        def handler_is_connected(self, hid) -> bool:
+            return hid in self._cbs
+
+        def changed(self):
+            for cb, args in list(self._cbs.values()):
+                cb(self, *args)
+
+        def select_path(self, path):
+            i = path.get_indices()[0]
+            if self.o.is_entry(i):                       # group headings are never selected
+                self.o.sel.select_item(i, False)
+
+        def unselect_path(self, path):
+            self.o.sel.unselect_item(path.get_indices()[0])
+
+        def path_is_selected(self, path) -> bool:
+            return self.o.sel.is_selected(path.get_indices()[0])
+
+        def select_all(self):
+            o = self.o
+            o.sel.select_all()
+            if o._heads:                                 # group headings stay out of it
+                for i in range(o.rows.get_n_items()):
+                    if not isinstance(o.rows.get_item(i).v, Entry):
+                        o.sel.unselect_item(i)
+
+        def unselect_all(self):
+            self.o.sel.unselect_all()
+
+        def get_selected_rows(self):
+            return self.o.store, [_tpath(i) for i in self.o.selected_indices()]
+
+        def count_selected_rows(self) -> int:
+            return len(self.o.selected_indices())
+
+    class DetailsList:
+        """See the comment above. `fv` is the FolderView: it makes and fills the cells (_cell_make4,
+        _cell_fill4), because what a cell shows is the folder view's business."""
+
+        def __init__(self, fv):
+            self.cv = None                               # first: __getattr__ falls back on it
+            self.fv = fv
+            self.rows = Gio.ListStore(item_type=_DRow)
+            self.sel = Gtk.MultiSelection(model=self.rows)
+            self.cv = Gtk.ColumnView(model=self.sel)
+            self.cv.set_enable_rubberband(True)
+            css_class(self.cv, "sr-details")
+            self.selection = _DSelection(self)
+            self.store = None                            # the Gtk.ListStore being mirrored, None while detached
+            self._store_ids: list = []
+            self.active = True                           # False while an icon layout shows: nothing is mirrored
+            self._stale = False
+            self._cells: dict = {}                       # cell -> column key, for the cells showing a row right now
+            self._of_child: dict = {}                    # a cell's widget -> the cell (to find the row under a point)
+            self._columns: list = []
+            self._cursor: Optional[int] = None
+            self._on_activate: list = []
+            self._last_act = (None, 0.0)
+            self._refresh_id = None
+            self._sorting = False
+            self._sort_key = None
+            self._typed = ("", 0.0)
+            self._heads = False                          # some rows are group headings
+            self._specs = None                           # what set_columns was last asked for
+            self._columns_id = None
+            self.sel.connect("selection-changed", self._sel_changed)
+            self.cv.connect("activate", lambda v, pos: self._activated(pos))
+            rows = Gtk.SignalListItemFactory()
+            rows.connect("bind", self._row_bind)
+            self.cv.set_row_factory(rows)
+            self.cv.get_sorter().connect("changed", self._sorter_changed)
+
+        def __getattr__(self, name):                     # everything else is the widget's own
+            cv = self.__dict__.get("cv")
+            if cv is None:
+                raise AttributeError(name)
+            return getattr(cv, name)
+
+        # ---- controllers: ours must see a click or a key before the rows do. A row takes Space and Enter for
+        # itself and selects on any press; the folder view decides first (quick look, the context menu, its own
+        # pairing of double clicks) and lets the rest through.
+        def add_controller(self, controller):
+            # (the drag source too: a row claims the press, and a claimed press never reaches a later phase)
+            if isinstance(controller, (Gtk.GestureClick, Gtk.EventControllerKey, Gtk.DragSource)):
+                controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            self.cv.add_controller(controller)
+
+        # ---- rows
+        def is_entry(self, i: int) -> bool:
+            row = self.rows.get_item(i) if 0 <= i < self.rows.get_n_items() else None
+            return row is not None and isinstance(row.v, Entry)
+
+        def _row_bind(self, factory, row):
+            item = row.get_item()
+            real = item is not None and isinstance(item.v, Entry)
+            row.set_selectable(real)
+            row.set_activatable(real)
+
+        def get_model(self):
+            return self.store
+
+        def set_model(self, store):
+            if self.store is not None:
+                for h in self._store_ids:
+                    self.store.disconnect(h)
+            self._store_ids = []
+            self.store = store
+            if store is None:
+                return                                   # what is shown stays until the new rows are attached
+            self._store_ids = [store.connect("row-inserted", self._inserted)]
+            self._resync()
+
+        def set_active(self, on: bool):
+            was, self.active = self.active, bool(on)
+            if self.active and not was and self._stale and self.store is not None:
+                self._resync()
+
+        def _resync(self):
+            if not self.active:
+                self._stale = True
+                return
+            self._stale = False
+            store, items = self.store, []
+            it = store.get_iter_first()
+            while it is not None:
+                items.append(_DRow(store.get_value(it, 0)))
+                it = store.iter_next(it)
+            self._heads = any(not isinstance(r.v, Entry) for r in items)
+            had = self.sel.get_selection().get_size() > 0
+            self.rows.splice(0, self.rows.get_n_items(), items)
+            self._cursor = None
+            if had:
+                self.selection.changed()
+
+        def _inserted(self, store, path, it):
+            if not self.active:
+                self._stale = True
+                return
+            row = _DRow(store.get_value(it, 0))
+            if not isinstance(row.v, Entry):
+                self._heads = True
+            self.rows.insert(path.get_indices()[0], row)
+
+        # ---- selection and cursor
+        def get_selection(self):
+            return self.selection
+
+        def selected_indices(self) -> List[int]:
+            bits = self.sel.get_selection()
+            out = []
+            for k in range(bits.get_size()):
+                i = bits.get_nth(k)
+                if self.is_entry(i):
+                    out.append(i)
+            return out
+
+        @property
+        def selected(self):                              # what file_drag_source asks a list for
+            return set(self.selected_indices())
+
+        def _sel_changed(self, model, position, n_items):
+            self.selection.changed()
+            if any(key == "_chk" for key in self._cells.values()):
+                self.refresh()
+
+        def _has_focus(self) -> bool:
+            root = self.cv.get_root()
+            f = root.get_focus() if root is not None else None
+            return f is not None and (f is self.cv or f.is_ancestor(self.cv))
+
+        def contains(self, widget) -> bool:
+            return widget is not None and (widget is self.cv or widget.is_ancestor(self.cv))
+
+        def set_cursor(self, path, column=None, start_editing=False):
+            """Like the tree view: the row becomes the only selected one and is scrolled into view."""
+            i = path.get_indices()[0]
+            if not 0 <= i < self.rows.get_n_items():
+                return
+            self._cursor = i
+            flags = Gtk.ListScrollFlags.SELECT
+            if self._has_focus():                        # never take the keyboard from the address bar or a dialog
+                flags |= Gtk.ListScrollFlags.FOCUS
+            self.cv.scroll_to(i, None, flags, None)
+
+        def get_cursor(self):
+            root = self.cv.get_root()
+            f = root.get_focus() if root is not None else None
+            if f is not None and f is not self.cv and f.is_ancestor(self.cv):
+                pos = self._pos_of(f)
+                if pos is not None:
+                    self._cursor = pos
+            ok = self._cursor is not None and 0 <= self._cursor < self.rows.get_n_items()
+            return (_tpath(self._cursor) if ok else None), None
+
+        def scroll_to_cell(self, path, *a):
+            i = path.get_indices()[0]
+            if 0 <= i < self.rows.get_n_items():
+                self.cv.scroll_to(i, None, Gtk.ListScrollFlags.NONE, None)
+
+        def grab_focus(self):
+            if self._cursor is not None and 0 <= self._cursor < self.rows.get_n_items():
+                self.cv.scroll_to(self._cursor, None, Gtk.ListScrollFlags.FOCUS, None)
+                return True
+            return self.cv.grab_focus()
+
+        # ---- the row under a point (coordinates relative to the list widget, header included)
+        def _pos_of(self, widget) -> Optional[int]:
+            w = widget
+            while w is not None and w is not self.cv:
+                for cand in (w, w.get_first_child()):
+                    if cand is None:
+                        continue
+                    cell = self._of_child.get(cand)
+                    if cell is None and cand is not w:
+                        inner = cand.get_first_child()
+                        cell = self._of_child.get(inner) if inner is not None else None
+                    if cell is not None:
+                        pos = cell.get_position()
+                        return pos if 0 <= pos < self.rows.get_n_items() else None
+                w = w.get_parent()
+            return None
+
+        def _index_at(self, x, y) -> Optional[int]:
+            hit = self.cv.pick(x, y, Gtk.PickFlags.DEFAULT)
+            return self._pos_of(hit) if hit is not None else None
+
+        def get_path_at_pos(self, x, y):
+            i = self._index_at(x, y)
+            if i is None:
+                return None
+            self._cursor = i
+            return _tpath(i), None, 0, 0
+
+        def get_dest_row_at_pos(self, x, y):
+            i = self._index_at(x, y)
+            return (_tpath(i), None) if i is not None else None
+
+        # ---- activation (double click, Enter)
+        def connect(self, name, cb, *args):
+            if name == "row-activated":
+                self._on_activate.append((cb, args))
+                return 0
+            return self.cv.connect(name, cb, *args)
+
+        def set_activate_on_single_click(self, on):
+            self.cv.set_single_click_activate(bool(on))
+
+        def row_activated(self, path, column=None):
+            self._activated(path.get_indices()[0])
+
+        def _activated(self, pos: int):
+            now = time.monotonic()
+            if self._last_act[0] == pos and now - self._last_act[1] < 0.15:
+                return                                   # the list's own double click on top of ours
+            self._last_act = (pos, now)
+            self._cursor = pos
+
+            def run():                                   # not inside the click or key that asked for it: opening
+                for cb, args in self._on_activate:       # a folder can rebuild the columns, and GTK hangs when a
+                    cb(self, _tpath(pos), None, *args)   # column is removed while one of its cells handles an event
+                return False
+            GLib.idle_add(run)
+
+        # ---- columns
+        def get_columns(self):
+            return list(self._columns)
+
+        def set_columns(self, specs, sort_key, sort_desc):
+            """specs: [(key, title, width or 0, expand, clickable)]. Replaces every column, unless they are
+            the ones already there (nearly every folder change): widths the user set then stay too.
+            Columns that exist are replaced a moment later, never inside the caller: GTK hangs when a column
+            is removed while one of its cells is handling the click or key that led here."""
+            want = (tuple(specs), sort_key, bool(sort_desc))
+            if want == self._specs:
+                return
+            self._specs = want
+            if not self._columns:
+                self._apply_columns()
+            elif self._columns_id is None:
+                self._columns_id = GLib.idle_add(self._apply_columns, priority=GLib.PRIORITY_HIGH)
+
+        def _apply_columns(self):
+            self._columns_id = None
+            specs, sort_key, sort_desc = self._specs
+            self._sorting = True
+            try:
+                for c in self._columns:
+                    self.cv.remove_column(c)
+                self._columns = []
+                marked = None
+                for key, title, width, expand, clickable in specs:
+                    fac = Gtk.SignalListItemFactory()
+                    fac.connect("setup", self._cell_setup, key)
+                    fac.connect("bind", self._cell_bind, key)
+                    fac.connect("unbind", self._cell_unbind)
+                    fac.connect("teardown", self._cell_teardown)
+                    col = Gtk.ColumnViewColumn(title=title, factory=fac)
+                    col.key = key
+                    col.set_resizable(key != "_chk")
+                    col.set_expand(bool(expand))
+                    if width and not expand:
+                        col.set_fixed_width(width)
+                    if clickable:
+                        col.set_sorter(Gtk.StringSorter.new(None))      # sorts nothing: it makes the header a button
+                        if key == sort_key:
+                            marked = col
+                    self.cv.append_column(col)
+                    self._columns.append(col)
+                self._sort_key = sort_key if marked is not None else None
+                self.cv.sort_by_column(marked, Gtk.SortType.DESCENDING if sort_desc else Gtk.SortType.ASCENDING)
+            finally:
+                self._sorting = False
+            return False
+
+        def _sorter_changed(self, sorter, change):
+            """A header was clicked. The folder view sorts (off the main thread) and rebuilds the columns, which
+            puts the arrow where it belongs; that must not happen inside the click."""
+            if self._sorting:
+                return
+            col = sorter.get_primary_sort_column()
+            key = getattr(col, "key", None) if col is not None else self._sort_key
+            if key:
+                GLib.idle_add(lambda: (self.fv.win.sort_by(key), False)[1])
+
+        def fit_columns(self):
+            for c in self._columns:
+                if not c.get_expand() and c.key != "_chk":
+                    c.set_fixed_width(-1)
+
+        # ---- cells
+        def _cell_setup(self, factory, cell, key):
+            child = self.fv._cell_make4(key)
+            cell.set_child(child)
+            self._of_child[child] = cell
+
+        def _cell_bind(self, factory, cell, key):
+            self._cells[cell] = key
+            self.fv._cell_fill4(cell, key)
+
+        def _cell_unbind(self, factory, cell):
+            self._cells.pop(cell, None)
+
+        def _cell_teardown(self, factory, cell):
+            self._cells.pop(cell, None)
+            child = cell.get_child()
+            if child is not None:
+                self._of_child.pop(child, None)
+
+        def cell_of(self, child):
+            return self._of_child.get(child)
+
+        def refresh(self):
+            """Fill in every visible cell again, once, after whatever is going on (the tree view's queue_draw)."""
+            if self._refresh_id is None:
+                def run():
+                    self._refresh_id = None
+                    for cell, key in list(self._cells.items()):
+                        self.fv._cell_fill4(cell, key)
+                    return False
+                self._refresh_id = GLib.idle_add(run)
+
+        def queue_draw(self):
+            self.refresh()
+
+        # ---- renaming in place
+        def edit_name(self, path, text: str, select_len: int, on_done, retry: bool = True):
+            i = path.get_indices()[0]
+            for cell, key in self._cells.items():
+                if key == "name" and cell.get_position() == i:
+                    label = cell.get_child().get_last_child()
+                    ok, r = label.compute_bounds(self.cv)
+                    if ok:
+                        return edit_over4(self.cv, r.get_x(), r.get_y(), r.get_width(), r.get_height(), text, select_len,
+                                          on_done, self.selection)
+            if retry:                                    # the row is not on screen: bring it there, then once more
+                self.scroll_to_cell(path)
+                GLib.timeout_add(60, lambda: (self.edit_name(path, text, select_len, on_done, False), False)[1])
+            else:
+                on_done(None)
+
+        # ---- typing a name jumps to it (the tree view's interactive search)
+        def typeahead(self, ch: str):
+            now = time.monotonic()
+            text = (self._typed[0] if now - self._typed[1] < 1.0 else "") + ch.lower()
+            self._typed = (text, now)
+            n = self.rows.get_n_items()
+            start = (self._cursor or 0) + (1 if len(text) == 1 else 0)
+            for k in range(n):
+                i = (start + k) % n
+                v = self.rows.get_item(i).v
+                if isinstance(v, Entry) and v.name.lower().startswith(text):
+                    self.set_cursor(_tpath(i))
+                    return
+
 
 
 # --------------------------------------------------------------------------- lightweight 3D model preview
@@ -9896,13 +12227,13 @@ class ModelNav:
         self.thin = False
         self.drag = None            # (x, y, mode) mode: orbit | pan | zoom
         self.set_can_focus(True)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
-                        Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.KEY_PRESS_MASK)
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", lambda w, e: (setattr(self, "drag", None), self.queue_draw()) and False)
-        self.connect("motion-notify-event", self._motion)
-        self.connect("scroll-event", self._scroll)
-        self.connect("key-press-event", self._key)
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
+                        EVMASK.POINTER_MOTION_MASK | EVMASK.SCROLL_MASK | EVMASK.KEY_PRESS_MASK)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", lambda w, e: (setattr(self, "drag", None), self.queue_draw()) and False)
+        on_event(self, "motion-notify-event", self._motion)
+        on_event(self, "scroll-event", self._scroll)
+        on_event(self, "key-press-event", self._key)
 
     def _reset_view(self):
         self.yaw, self.pitch, self.zoom = 0.6, 0.35, 1.0
@@ -9911,13 +12242,13 @@ class ModelNav:
     def _press(self, w, event):
         """Maya-style navigation: LMB (or Alt+LMB) orbit, MMB (or Alt+MMB) pan, Alt+RMB zoom-drag."""
         self.grab_focus()
-        if event.type == Gdk.EventType._2BUTTON_PRESS and event.button == 1:
+        if event.type == EV_PRESS2 and event.button == 1:
             self._reset_view()
             self.queue_draw()
             return True
-        if event.type != Gdk.EventType.BUTTON_PRESS:
+        if event.type != EV_PRESS:
             return True
-        alt = bool(event.state & Gdk.ModifierType.MOD1_MASK)
+        alt = bool(event.state & ALT_MASK)
         if event.button == 2:
             mode = "pan"
         elif event.button == 3 and alt:
@@ -9984,7 +12315,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
         self._want = None
         self.on_first_frame = None       # one-shot: the window fades the pane in when the first frame lands
         self._V = self._F = self._N = self._VN = None
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
         # (the render process is shared and lives for the whole session; nothing to tear down per view)
 
     def set_model(self, model: Optional[dict], keep_view: bool = False):
@@ -10017,7 +12348,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
         Until the new frame lands the previous one stays on screen, so orbiting is never blocked."""
         a = self.get_allocation()
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.04)
         cr.rectangle(0, 0, a.width, a.height)
         cr.fill()
@@ -10049,7 +12380,7 @@ class ModelView(ModelNav, Gtk.DrawingArea):
 
     def _params(self, w: int, h: int):
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         return (w, h, round(self.yaw, 4), round(self.pitch, 4), round(self.zoom, 4),
                 round(self.pan[0]), round(self.pan[1]), self.smooth, self.wire,
                 self._bg_rgb(fg), (fg.red, fg.green, fg.blue))
@@ -10610,28 +12941,153 @@ class GLScene:
         return 2.5 / max(ref, 1e-6)
 
 
-class GLModelView(ModelNav, Gtk.GLArea):
+_GL_HOST = None
+
+
+def gl_host_window():
+    """A toplevel GdkWindow that is never shown and exists only to own the 3D preview's GL contexts.
+
+    A Gtk.GLArea makes GDK create a GL paint context for the toplevel it sits in, and from then on EVERY frame
+    of that window is composited through GL: resizing the main window went from about 6 ms to about 25 ms a
+    frame after the first 3D preview, and stayed there even after the GLArea was destroyed. Contexts made on
+    this window leave the real windows on the plain (cairo) paint path."""
+    global _GL_HOST
+    if _GL_HOST is None and GTK4:
+        _GL_HOST = Gdk.Surface.new_toplevel(Gdk.Display.get_default())
+    if _GL_HOST is None:
+        attr = Gdk.WindowAttr()
+        attr.window_type = Gdk.WindowType.TOPLEVEL
+        attr.wclass = Gdk.WindowWindowClass.INPUT_OUTPUT
+        attr.width = attr.height = 16
+        _GL_HOST = Gdk.Window.new(None, attr, 0)
+    return _GL_HOST
+
+
+class GLOffscreen:
+    """A GL context on the hidden host window, a colour + depth framebuffer the size of a widget, and
+    read-back of the finished frame as a cairo surface. Used by GLModelView and GLSLView."""
+
+    def __init__(self):
+        self.log: list = []
+        self.ctx, self.flavour = gl_try_contexts(gl_host_window(), self.log)     # best flavour the driver gives
+        if self.ctx is None:
+            raise RuntimeError(" | ".join(self.log) + "   (run: python3 shotrover.py --probe-gl)")
+        self.fbo = self.tex = self.rb = None
+        self.size = (0, 0)
+        self.buf = None                       # pixel memory of the last surface handed out
+        self.ctx.make_current()
+
+    def make_current(self):
+        self.ctx.make_current()
+
+    def info(self) -> str:
+        ver = self.ctx.get_version()
+        text = f"GL {ver[0]}.{ver[1]}" + (" ES" if self.ctx.get_use_es() else "")
+        try:
+            text += " — " + _GL.glGetString(_GL.GL_RENDERER).decode(errors="replace")
+        except Exception:
+            pass
+        return text + f" [{self.flavour}]"
+
+    def _free_target(self):
+        try:
+            if self.fbo:
+                _GL.glDeleteFramebuffers(1, [self.fbo])
+            if self.tex:
+                _GL.glDeleteTextures(1, [self.tex])
+            if self.rb:
+                _GL.glDeleteRenderbuffers(1, [self.rb])
+        except Exception:
+            pass
+        self.fbo = self.tex = self.rb = None
+        self.size = (0, 0)
+
+    def free(self):
+        try:
+            self.ctx.make_current()
+            self._free_target()
+            Gdk.GLContext.clear_current()
+        except Exception:
+            pass
+        self.buf = None
+
+    def target(self, W: int, H: int) -> int:
+        """The framebuffer to finish a W×H frame in."""
+        if self.fbo and self.size == (W, H):
+            return self.fbo
+        self._free_target()
+        self.tex = _GL.glGenTextures(1)
+        _GL.glBindTexture(_GL.GL_TEXTURE_2D, self.tex)
+        _GL.glTexParameteri(_GL.GL_TEXTURE_2D, _GL.GL_TEXTURE_MIN_FILTER, _GL.GL_NEAREST)
+        _GL.glTexParameteri(_GL.GL_TEXTURE_2D, _GL.GL_TEXTURE_MAG_FILTER, _GL.GL_NEAREST)
+        _GL.glTexImage2D(_GL.GL_TEXTURE_2D, 0, _GL.GL_RGBA8, W, H, 0, _GL.GL_RGBA, _GL.GL_UNSIGNED_BYTE, None)
+        _GL.glBindTexture(_GL.GL_TEXTURE_2D, 0)
+        self.rb = _GL.glGenRenderbuffers(1)
+        _GL.glBindRenderbuffer(_GL.GL_RENDERBUFFER, self.rb)
+        _GL.glRenderbufferStorage(_GL.GL_RENDERBUFFER, _GL.GL_DEPTH_COMPONENT24, W, H)
+        self.fbo = _GL.glGenFramebuffers(1)
+        _GL.glBindFramebuffer(_GL.GL_FRAMEBUFFER, self.fbo)
+        _GL.glFramebufferTexture2D(_GL.GL_FRAMEBUFFER, _GL.GL_COLOR_ATTACHMENT0, _GL.GL_TEXTURE_2D, self.tex, 0)
+        _GL.glFramebufferRenderbuffer(_GL.GL_FRAMEBUFFER, _GL.GL_DEPTH_ATTACHMENT, _GL.GL_RENDERBUFFER, self.rb)
+        if _GL.glCheckFramebufferStatus(_GL.GL_FRAMEBUFFER) != _GL.GL_FRAMEBUFFER_COMPLETE:
+            raise RuntimeError("offscreen render target not supported")
+        self.size = (W, H)
+        return self.fbo
+
+    def read(self, lw: int, lh: int):
+        """The frame in the target as a cairo surface lw×lh logical pixels in size. cairo's RGB24 is B, G, R, x
+        in memory with its first row at the top; GL hands rows bottom-up."""
+        import cairo
+        W, H = self.size
+        _GL.glBindFramebuffer(_GL.GL_FRAMEBUFFER, self.fbo)
+        _GL.glReadBuffer(_GL.GL_COLOR_ATTACHMENT0)
+        _GL.glPixelStorei(_GL.GL_PACK_ALIGNMENT, 4)
+        es = self.ctx.get_use_es()                    # GLES only promises RGBA read-back
+        raw = _GL.glReadPixels(0, 0, W, H, _GL.GL_RGBA if es else _GL.GL_BGRA, _GL.GL_UNSIGNED_BYTE)
+        px = np.frombuffer(raw, dtype=np.uint8) if isinstance(raw, (bytes, bytearray)) else np.asarray(raw, dtype=np.uint8)
+        px = px.reshape(H, W, 4)[::-1]
+        if es:
+            px = px[:, :, [2, 1, 0, 3]]
+        # Always a fresh copy: cairo needs writable memory and read-back bytes are read-only. ascontiguousarray
+        # is not enough: for a frame one row high the flipped view already counts as contiguous, so nothing was
+        # copied and cairo refused it ("underlying buffer is not writable") on the widget's first 1-pixel draw.
+        self.buf = np.array(px, dtype=np.uint8, order="C", copy=True)
+        surf = cairo.ImageSurface.create_for_data(memoryview(self.buf), cairo.FORMAT_RGB24, W, H, W * 4)
+        surf.set_device_scale(W / float(lw), H / float(lh))
+        return surf
+
+
+class GLModelView(ModelNav, Gtk.DrawingArea):
     """Hardware-accelerated previewer: geometry is uploaded to the GPU once and every frame is a few draw
     calls, so a 5M-triangle mesh or a million-voxel volume orbits at the display's refresh rate. Same camera
     maths as the software path (yaw → pitch → distance 2.6, pan in pixels), same shading, same keys.
-    Drawing lives in GLScene."""
+    Drawing lives in GLScene.
+
+    The scene is rendered into an offscreen framebuffer with a context of its own (see gl_host_window), read
+    back and painted with cairo like any picture; it is rendered again only when the camera, the model or
+    the size changes. While only the size is changing (a pane divider or the window being dragged) and a
+    render costs more than a few milliseconds, the last picture is stretched instead and the scene is
+    rendered once the size has settled: a heavy cache no longer makes every step of the drag slow."""
 
     def __init__(self):
         super().__init__()
         self._nav_init()
-        self.set_has_depth_buffer(True)
-        self.set_auto_render(True)
-        self.gl_flavour = ""
-        self.connect("create-context", self._create_context)
+        self.gl: Optional[GLOffscreen] = None
         self.scene: Optional[GLScene] = None
         self._dirty = False
+        self._stale = True                    # the picture no longer matches the camera / model
+        self._frame = None                    # cairo surface of the last rendered frame
+        self._frame_lsize = (1, 1)            # its size in logical pixels
+        self._cost = 0.0                      # seconds the last render took, read-back included
+        self._settle = None                   # timer: render at the new size once it stops changing
+        self._settled = False
         self.gl_info = ""
         self.gl_error: Optional[str] = None
         self.on_error = None                  # callable(msg) set by the window: shown in the UI, triggers fallback
         self.on_cache_failed = None           # callable(model, msg): particles/volumes failed, use software for them
         self.connect("realize", self._on_realize)
         self.connect("unrealize", self._on_unrealize)
-        self.connect("render", self._on_render)
+        on_draw(self, self._on_draw)
 
     def _fail(self, where: str, ex) -> None:
         """Record the first OpenGL failure (later ones are noise), log it, and tell the window."""
@@ -10644,44 +13100,37 @@ class GLModelView(ModelNav, Gtk.GLArea):
         if self.on_error:
             GLib.idle_add(lambda: (self.on_error(msg), False)[1])
 
-    def _create_context(self, area):
-        """GLArea asks us for a context: negotiate the best flavour the driver/compositor will give us."""
-        log: list = []
-        ctx, label = gl_try_contexts(self.get_window(), log)
-        if ctx is None:
-            self._fail("context", " | ".join(log) + "   (run: python3 shotrover.py --probe-gl)")
-            return None
-        self.gl_flavour = label
-        return ctx
-
     # ---- lifecycle
     def _on_realize(self, w):
         try:
-            self.make_current()
-            err = self.get_error()
-            if err is not None:
-                if not self.gl_error:
-                    self._fail("context", err.message if hasattr(err, "message") else err)
-                return
-            ctx = self.get_context()
-            ver = ctx.get_version() if ctx else (0, 0)
-            self.gl_info = f"GL {ver[0]}.{ver[1]}" + (" ES" if ctx and ctx.get_use_es() else "")
             try:
-                self.gl_info += " — " + _GL.glGetString(_GL.GL_RENDERER).decode(errors="replace")
-            except Exception:
-                pass
-            self.gl_info += f" [{self.gl_flavour}]"
-            self.scene = GLScene(_gl_header(ctx))
+                self.gl = GLOffscreen()
+            except Exception as ex:
+                self._fail("context", ex)
+                return
+            self.gl_info = self.gl.info()
+            self.scene = GLScene(_gl_header(self.gl.ctx))
             self._dirty = self.model is not None
+            self._stale = True
             GL_STATUS[:] = [f"OpenGL OK: {self.gl_info}"]
         except Exception as ex:
             self._fail("init", ex)
 
     def _on_unrealize(self, w):
-        self.make_current()
-        if self.scene:
-            self.scene.free()
+        if self.gl is not None:
+            try:
+                self.gl.make_current()
+                if self.scene:
+                    self.scene.free()
+            except Exception:
+                pass
+            self.gl.free()
         self.scene = None
+        self.gl = None
+        self._frame = None
+        if self._settle is not None:
+            GLib.source_remove(self._settle)
+            self._settle = None
 
     def set_model(self, model: Optional[dict], keep_view: bool = False):
         """keep_view: next frame of a sequence — same camera, same smoke exposure (no brightness pumping)."""
@@ -10689,10 +13138,11 @@ class GLModelView(ModelNav, Gtk.GLArea):
         if not keep_view:
             self._reset_view()
         self._dirty = "keep" if keep_view else True
-        self.queue_render()
+        self.queue_draw()
 
-    def queue_draw(self):             # ModelNav calls queue_draw(); GLArea wants queue_render()
-        self.queue_render()
+    def queue_draw(self):             # every change of camera or model comes through here (ModelNav, set_model)
+        self._stale = True
+        Gtk.DrawingArea.queue_draw(self)
 
     def _cache_failed(self, ex):
         """Particles / volumes need features this driver lacks: hand this model to the software renderer
@@ -10706,38 +13156,78 @@ class GLModelView(ModelNav, Gtk.GLArea):
             GLib.idle_add(lambda: (self.on_cache_failed(m, msg), False)[1])
 
     # ---- render
-    def _on_render(self, area, ctx):
-        try:
-            self._render()
-        except Exception as ex:
-            if self.model is not None and any(k in self.model for k in ("points", "vpts")):
-                self._cache_failed(ex)
-            else:
-                self._fail("render", ex)
-        return True
-
-    def _render(self):
+    def _colours(self):
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         try:
             ok, bgc = sc.lookup_color("theme_bg_color")
             r, g, b = (bgc.red, bgc.green, bgc.blue) if ok else ((0.13,) * 3 if fg.red > 0.5 else (0.98,) * 3)
         except Exception:
             r, g, b = (0.13,) * 3
-        bg = (r * 0.96 + fg.red * 0.04, g * 0.96 + fg.green * 0.04, b * 0.96 + fg.blue * 0.04)
-        target = int(np.asarray(_GL.glGetIntegerv(_GL.GL_DRAW_FRAMEBUFFER_BINDING)).reshape(-1)[0])
-        if self.gl_error or not self.scene:
-            _GL.glClearColor(bg[0], bg[1], bg[2], 1.0)
-            _GL.glClear(_GL.GL_COLOR_BUFFER_BIT | _GL.GL_DEPTH_BUFFER_BIT)
-            return
+        return (r * 0.96 + fg.red * 0.04, g * 0.96 + fg.green * 0.04, b * 0.96 + fg.blue * 0.04), fg
+
+    def _on_draw(self, w, cr):
+        bg, fg = self._colours()
+        lw, lh = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
+        scale = self.get_scale_factor()
+        W, H = lw * scale, lh * scale
+        if not self.gl_error and self.scene and self.gl is not None and (
+                self._stale or self._frame is None or self.gl.size != (W, H)):
+            if not self._stale and self._frame is not None and self._cost > 0.004 and not self._settled:
+                self._draw_stretched(cr, lw, lh, bg)          # only the size changed and rendering is slow
+                return True
+            self._settled = False
+            try:
+                t0 = time.perf_counter()
+                self._render(W, H, lw, lh, bg, fg)
+                self._cost = time.perf_counter() - t0
+                self._stale = False
+            except Exception as ex:
+                self._frame = None
+                if self.model is not None and any(k in self.model for k in ("points", "vpts")):
+                    self._cache_failed(ex)
+                else:
+                    self._fail("render", ex)
+        if self._frame is None or self.gl_error:
+            cr.set_source_rgb(*bg)
+            cr.paint()
+            return True
+        cr.set_source_surface(self._frame, 0, 0)
+        cr.paint()
+        return True
+
+    def _draw_stretched(self, cr, lw: int, lh: int, bg):
+        """The last frame, scaled as the camera would scale the scene (by the shorter side, about the centre),
+        and a render at the real size once no new size has come for a moment."""
+        fw, fh = self._frame_lsize
+        k = min(lw, lh) / float(max(1, min(fw, fh)))
+        cr.set_source_rgb(*bg)
+        cr.paint()
+        cr.translate(lw / 2.0, lh / 2.0)
+        cr.scale(k, k)
+        cr.set_source_surface(self._frame, -fw / 2.0, -fh / 2.0)
+        cr.paint()
+        if self._settle is not None:
+            GLib.source_remove(self._settle)
+
+        def settle():
+            self._settle = None
+            self._settled = True
+            Gtk.DrawingArea.queue_draw(self)          # not self.queue_draw(): the camera has not changed
+            return False
+        self._settle = GLib.timeout_add(120, settle)
+
+    def _render(self, W: int, H: int, lw: int, lh: int, bg, fg):
+        self._frame_lsize = (lw, lh)
+        self.gl.make_current()
+        fbo = self.gl.target(W, H)
         if self._dirty:
             keep = self._dirty == "keep"
             self._dirty = False
             self.scene.upload(self.model, keep_exposure=keep)
-        scale = self.get_scale_factor()
-        w, h = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
-        self.scene.render(w * scale, h * scale, w, h, (self.yaw, self.pitch, self.zoom, self.pan), bg,
-                          (fg.red, fg.green, fg.blue), self.smooth, self.wire, target)
+        self.scene.render(W, H, lw, lh, (self.yaw, self.pitch, self.zoom, self.pan), bg,
+                          (fg.red, fg.green, fg.blue), self.smooth, self.wire, fbo)
+        self._frame = self.gl.read(lw, lh)
 
 
 # --------------------------------------------------------------------------- video / audio playback (GStreamer)
@@ -10756,6 +13246,8 @@ except Exception as _ex:                 # typelib missing (gstreamer1 / python3
 def gst_sink_available(refresh: bool = False) -> bool:
     """gtksink is packaged separately on most distros (gstreamer1-plugins-good-gtk, gstreamer1.0-gtk3, gst-plugin-gtk); without it we can't embed video in the pane.
     refresh=True re-scans the plugin registry so a package installed while Shotrover runs is picked up."""
+    if GTK4:                # frames come through an appsink and are painted by VideoArea: see video_sink()
+        return Gst is not None and Gst.ElementFactory.find("appsink") is not None
     if not HAVE_GST:
         return False
     if refresh:
@@ -10800,6 +13292,133 @@ def gst_h264_status() -> Tuple[Optional[str], str]:
     return None, f"libav plugin loaded {len(feats)} elements but no H.264 decoder among them"
 
 
+class VideoArea(Gtk.DrawingArea):
+    """GTK 4 only: shows the frames an appsink hands over, scaled to fit, on black. (gtksink, which GTK 3
+    uses, is a GTK 3 widget: creating it in a GTK 4 process loads GTK 3 as well and hangs.)
+
+    cairo's good downscaling reads every pixel of the frame: 30 to 50 ms for a 4K clip, which made every step
+    of a pane or window resize that slow. So a draw never does it. A new frame is painted with the cheap
+    filter (cost follows the widget's size, not the frame's); once neither a frame nor a new size has come
+    for a moment, a well-scaled copy the size of the widget is made once, and draws stretch that."""
+
+    def __init__(self):
+        super().__init__()
+        self._frame = None                    # (cairo surface, its pixel buffer, width, height)
+        self._fit = None                      # (well-scaled copy of _frame, its width, its height)
+        self._refine = None                   # timer that makes _fit
+        on_draw(self, self._draw)
+        self.connect("unrealize", lambda w: self._cancel_refine())
+
+    def push(self, data: bytes, width: int, height: int):
+        """A decoded frame (BGRx, 4 bytes a pixel) from the streaming thread; shown on the GTK thread."""
+        def show():
+            import cairo
+            buf = bytearray(data)
+            try:
+                surf = cairo.ImageSurface.create_for_data(buf, cairo.FORMAT_RGB24, width, height, width * 4)
+            except Exception:
+                return False
+            self._frame = (surf, buf, width, height)
+            self._fit = None
+            self.queue_draw()
+            return False
+        GLib.idle_add(show)
+
+    def _cancel_refine(self):
+        if self._refine is not None:
+            GLib.source_remove(self._refine)
+            self._refine = None
+
+    def _want_refine(self):
+        self._cancel_refine()
+        self._refine = GLib.timeout_add(150, self._make_fit)
+
+    def _fit_size(self):
+        """Size in device pixels of the picture inside the widget."""
+        _surf, _buf, fw, fh = self._frame
+        scale = self.get_scale_factor()
+        aw, ah = max(1, self.get_width()) * scale, max(1, self.get_height()) * scale
+        k = min(aw / float(fw), ah / float(fh))
+        return max(1, int(round(fw * k))), max(1, int(round(fh * k)))
+
+    def _make_fit(self):
+        self._refine = None
+        if self._frame is None or not self.get_mapped():
+            return False
+        import cairo
+        surf, _buf, fw, fh = self._frame
+        tw, th = self._fit_size()
+        if tw >= fw:                          # shown at full size or enlarged: nothing to gain
+            return False
+        try:
+            fit = cairo.ImageSurface(cairo.FORMAT_RGB24, tw, th)
+            cr = cairo.Context(fit)
+            cr.scale(tw / float(fw), th / float(fh))
+            cr.set_source_surface(surf, 0, 0)
+            cr.paint()
+        except Exception:
+            return False
+        self._fit = (fit, tw, th)
+        self.queue_draw()
+        return False
+
+    def _draw(self, w, cr):
+        import cairo
+        aw, ah = max(1, self.get_width()), max(1, self.get_height())
+        cr.set_source_rgb(0, 0, 0)
+        cr.paint()
+        if self._frame is None:
+            return False
+        surf, _buf, fw, fh = self._frame
+        k = min(aw / float(fw), ah / float(fh))
+        cr.translate((aw - fw * k) / 2.0, (ah - fh * k) / 2.0)
+        if self._fit is not None:
+            surf, sw, sh = self._fit
+            if (sw, sh) != self._fit_size():
+                self._want_refine()           # stretched for now, redone when the size settles
+            cr.scale(fw * k / float(sw), fh * k / float(sh))
+        else:
+            cr.scale(k, k)
+            self._want_refine()
+        cr.set_source_surface(surf, 0, 0)
+        cr.get_source().set_filter(cairo.FILTER_BILINEAR)
+        cr.paint()
+        return False
+
+
+def video_sink():
+    """(GStreamer video sink element, the widget that shows its picture)."""
+    if not GTK4:
+        sink = Gst.ElementFactory.make("gtksink", None)
+        return sink, sink.get_property("widget")
+    area = VideoArea()
+    sink = Gst.ElementFactory.make("appsink", None)
+    sink.set_property("caps", Gst.Caps.from_string("video/x-raw,format=BGRx"))
+    sink.set_property("emit-signals", True)
+    sink.set_property("max-buffers", 2)
+    sink.set_property("drop", True)
+
+    def frame(appsink, signal_name):
+        sample = appsink.emit(signal_name)
+        if sample is None:
+            return Gst.FlowReturn.OK
+        st = sample.get_caps().get_structure(0)
+        width, height = st.get_value("width"), st.get_value("height")
+        buf = sample.get_buffer()
+        ok, info = buf.map(Gst.MapFlags.READ)
+        if ok:
+            try:
+                data = bytes(info.data)
+            finally:
+                buf.unmap(info)
+            if len(data) >= width * height * 4:
+                area.push(data, width, height)
+        return Gst.FlowReturn.OK
+    sink.connect("new-sample", lambda a: frame(a, "pull-sample"))
+    sink.connect("new-preroll", lambda a: frame(a, "pull-preroll"))      # the first frame, shown while paused
+    return sink, area
+
+
 class VideoPreview(Gtk.Box):
     """In-pane player for the preview area: playbin → gtksink widget, with play/pause, a seek bar, time
     readout and mute. Opens paused on the first frame (no autoplay noise), Space toggles playback.
@@ -10809,24 +13428,24 @@ class VideoPreview(Gtk.Box):
     def __init__(self):
         super().__init__(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.player = Gst.ElementFactory.make("playbin", "shotrover-player")
-        sink = Gst.ElementFactory.make("gtksink", None)
+        sink, self.sink_widget = video_sink()
         self.player.set_property("video-sink", sink)
-        self.sink_widget = sink.get_property("widget")
         self.sink_widget.set_size_request(-1, 160)
         # The sink widget keeps showing the LAST frame it ever drew — through a stop, and even on an audio-only
         # file where it never draws a new one. So it lives in a stack behind a blank and an audio card, and is
         # only shown once the new file has prerolled a video frame.
         self.screen = Gtk.Stack()
-        self.screen.set_homogeneous(False)
+        self.screen.set_hhomogeneous(False)
+        self.screen.set_vhomogeneous(False)
         blank = Gtk.DrawingArea()
-        blank.connect("draw", lambda w, cr: (cr.set_source_rgb(0, 0, 0), cr.paint(), False)[2])
+        on_draw(blank, lambda w, cr: (cr.set_source_rgb(0, 0, 0), cr.paint(), False)[2])
         self.screen.add_named(blank, "blank")
         self.screen.add_named(self.sink_widget, "video")
         audio = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, valign=Gtk.Align.CENTER)
-        audio.pack_start(Gtk.Image.new_from_icon_name("audio-x-generic-symbolic", Gtk.IconSize.DIALOG), False, False, 0)
+        put(audio, icon_image("audio-x-generic-symbolic", "dialog"), False, False, 0)
         self.audio_label = Gtk.Label(ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.audio_label.get_style_context().add_class("dim-label")
-        audio.pack_start(self.audio_label, False, False, 0)
+        css_class(self.audio_label, "dim-label")
+        put(audio, self.audio_label, False, False, 0)
         self.screen.add_named(audio, "audio")
         self.screen.set_visible_child_name("blank")
         # The sink widget's NATURAL size is the video's pixel size (1920×1080 for HD). Let that propagate and
@@ -10835,34 +13454,34 @@ class VideoPreview(Gtk.Box):
         # pane gives it and the sink scales the picture inside.
         holder = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         holder.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.EXTERNAL)
-        holder.add(self.screen)
-        self.pack_start(holder, True, True, 0)
+        set_child(holder, self.screen)
+        put(self, holder, True, True, 0)
         bar = Gtk.Box(spacing=4)
-        self.play_btn = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
-        self.play_btn.set_relief(Gtk.ReliefStyle.NONE)
+        self.play_btn = icon_button("media-playback-start-symbolic", "button")
+        flat_button(self.play_btn)
         self.play_btn.connect("clicked", lambda b: self.toggle())
-        bar.pack_start(self.play_btn, False, False, 0)
+        put(bar, self.play_btn, False, False, 0)
         self.scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1000, 1)
         self.scale.set_draw_value(False)
         self.scale.set_hexpand(True)
         self._seeking = False
-        self.scale.connect("button-press-event", lambda w, e: setattr(self, "_seeking", True) and False)
-        self.scale.connect("button-release-event", self._seek_release)
+        on_event(self.scale, "button-press-event", lambda w, e: setattr(self, "_seeking", True) and False)
+        on_event(self.scale, "button-release-event", self._seek_release)
         self.scale.connect("change-value", self._seek_change)
-        bar.pack_start(self.scale, True, True, 0)
+        put(bar, self.scale, True, True, 0)
         self.time_lab = Gtk.Label(label="0:00 / 0:00")
-        self.time_lab.get_style_context().add_class("dim-label")
-        bar.pack_start(self.time_lab, False, False, 4)
+        css_class(self.time_lab, "dim-label")
+        put(bar, self.time_lab, False, False, 4)
         self.mute_btn = Gtk.ToggleButton()
-        self.mute_btn.set_image(Gtk.Image.new_from_icon_name("audio-volume-high-symbolic", Gtk.IconSize.BUTTON))
-        self.mute_btn.set_relief(Gtk.ReliefStyle.NONE)
+        button_image(self.mute_btn, icon_image("audio-volume-high-symbolic", "button"))
+        flat_button(self.mute_btn)
         self.mute_btn.set_tooltip_text("Mute")
         self.mute_btn.connect("toggled", self._mute)
-        bar.pack_start(self.mute_btn, False, False, 0)
-        self.pack_start(clip_width(bar), False, False, 0)
+        put(bar, self.mute_btn, False, False, 0)
+        put(self, clip_width(bar), False, False, 0)
         self.err_lab = Gtk.Label(xalign=0, wrap=True)
-        self.err_lab.get_style_context().add_class("dim-label")
-        self.pack_start(self.err_lab, False, False, 0)
+        css_class(self.err_lab, "dim-label")
+        put(self, self.err_lab, False, False, 0)
         bus = self.player.get_bus()
         bus.add_signal_watch()
         bus.connect("message::error", self._on_error)
@@ -10879,7 +13498,7 @@ class VideoPreview(Gtk.Box):
         self._ops: "queue.Queue" = queue.Queue()
         threading.Thread(target=self._op_loop, daemon=True, name="shotrover-video-state").start()
         self.set_can_focus(True)
-        self.connect("key-press-event", self._key)
+        on_event(self, "key-press-event", self._key)
 
     def _op_loop(self):
         while True:
@@ -10926,12 +13545,12 @@ class VideoPreview(Gtk.Box):
         self._set_icon(self.playing)
 
     def _set_icon(self, playing: bool):
-        self.play_btn.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic", Gtk.IconSize.BUTTON))
+        button_image(self.play_btn, icon_image("media-playback-pause-symbolic" if playing else "media-playback-start-symbolic", "button"))
 
     def _mute(self, b):
         player, on = self.player, b.get_active()
         self._ops.put(lambda: player.set_property("mute", on))
-        b.set_image(Gtk.Image.new_from_icon_name("audio-volume-muted-symbolic" if b.get_active() else "audio-volume-high-symbolic", Gtk.IconSize.BUTTON))
+        button_image(b, icon_image("audio-volume-muted-symbolic" if b.get_active() else "audio-volume-high-symbolic", "button"))
 
     def _key(self, w, event):
         if event.keyval == Gdk.KEY_space:
@@ -11756,6 +14375,38 @@ def pkg_exists(dnf: str, apt: str = "", pacman: str = "") -> Optional[bool]:
     return False if missing in (r.stdout + r.stderr) else None
 
 
+def pkgs_unavailable(names: List[Tuple[str, str, str]]) -> set:
+    """Which of these packages, each given as (dnf, apt, pacman) names, this distro's repositories do not
+    have: the set of indexes into `names`. Like pkg_exists, only a clear answer counts, so no network or an
+    unknown package manager gives an empty set. dnf is asked once for all of them (it takes most of a
+    second per call); on the RHEL family nothing is asked before EPEL is enabled, because most add-ons live
+    there and the install script enables it first."""
+    pm = pkg_manager()
+    col = {"dnf": 0, "apt": 1, "pacman": 2}.get(pm)
+    if col is None:
+        return set()
+    want = {i: n[col] for i, n in enumerate(names) if n[col]}
+    if not want:
+        return set()
+    if pm != "dnf":
+        return {i for i, n in want.items() if pkg_exists(*[n if c == col else "" for c in range(3)]) is False}
+    if os_release().get("ID") != "fedora":
+        try:
+            if subprocess.run(["rpm", "-q", "epel-release"], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8).returncode != 0:
+                return set()
+        except Exception:
+            return set()
+    try:
+        r = subprocess.run(["dnf", "-q", "list"] + sorted(set(want.values())), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                           universal_newlines=True, timeout=20, env=dict(os.environ, LC_ALL="C"))
+    except Exception:
+        return set()
+    if r.returncode != 0 and "No matching Packages" not in (r.stdout + r.stderr):
+        return set()
+    have = {ln.split()[0].rsplit(".", 1)[0] for ln in r.stdout.splitlines() if ln and not ln[0].isspace() and "." in ln.split()[0]}
+    return {i for i, n in want.items() if n not in have}
+
+
 def pkg_hint(dnf: str, apt: str = "", pacman: str = "", zypper: str = "") -> str:
     """Short form for error messages: 'sudo apt install python3-numpy' / 'install python3-numpy'."""
     pm = pkg_manager()
@@ -11779,40 +14430,44 @@ def optional_deps() -> List[dict]:
     flatpak = shutil.which("flatpak")
     pm = pkg_manager()
     vdb_py = "importable" if (_has_py_module("pyopenvdb") or _has_py_module("openvdb")) else None
-    vdb_gone = None
-    if vdb_py is None and pkg_exists("python3-openvdb", "python3-openvdb", "openvdb") is False:
-        vdb_gone = "Your distribution has no package for it. VDB files still preview with the built-in reader."
     deps = [
         dict(key="blender", name="Blender", gives="Alembic, USD, FBX, glTF, Collada, .blend model previews",
              found=bl[0] if bl else None,
              cmd=("flatpak install -y flathub org.blender.Blender" if flatpak else
                   pkg_install("flatpak", "flatpak", "flatpak", "flatpak") + " && flatpak remote-add --if-not-exists flathub https://dl.flathub.org/repo/flathub.flatpakrepo && "
                   "flatpak install -y flathub org.blender.Blender")),
-        dict(key="assimp", name="assimp", gives="FBX, DAE, glTF, 3DS, X3D model previews",
+        dict(key="assimp", name="assimp", pkgs=('assimp', 'assimp-utils', 'assimp'), gives="FBX, DAE, glTF, 3DS, X3D model previews",
              found=shutil.which("assimp"), cmd=pkg_install("assimp", "assimp-utils", "assimp", "assimp")),
-        dict(key="oiiotool", name="OpenImageIO tools", gives="EXR (all codecs), DPX, TIFF, 16-bit IFF, .tx previews",
+        dict(key="oiiotool", name="OpenImageIO tools", pkgs=('OpenImageIO-utils', 'openimageio-tools', 'openimageio'), gives="EXR (all codecs), DPX, TIFF, 16-bit IFF, .tx previews",
              found=shutil.which("oiiotool"), cmd=pkg_install("OpenImageIO-utils", "openimageio-tools", "openimageio", "OpenImageIO")),
-        dict(key="magick", name="ImageMagick", gives="DDS, XCF, TGA, SVG and other image formats",
+        dict(key="magick", name="ImageMagick", pkgs=('ImageMagick', 'imagemagick', 'imagemagick'), gives="DDS, XCF, TGA, SVG and other image formats",
              found=shutil.which("magick") or shutil.which("convert"), cmd=pkg_install("ImageMagick", "imagemagick", "imagemagick", "ImageMagick")),
-        dict(key="ffmpeg", name="ffmpeg", gives="video frame thumbnails and media info",
+        dict(key="ffmpeg", name="ffmpeg", pkgs=('ffmpeg-free', 'ffmpeg', 'ffmpeg'), gives="video frame thumbnails and media info",
              found=shutil.which("ffmpeg"), cmd=pkg_install("ffmpeg-free", "ffmpeg", "ffmpeg", "ffmpeg")),
-        dict(key="pdftoppm", name="poppler-utils", gives="PDF page previews and thumbnails",
+        dict(key="pdftoppm", name="poppler-utils", pkgs=('poppler-utils', 'poppler-utils', 'poppler'), gives="PDF page previews and thumbnails",
              found=shutil.which("pdftoppm"), cmd=pkg_install("poppler-utils", "poppler-utils", "poppler", "poppler-tools")),
-        dict(key="gtksourceview", name="GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
-             found="loaded" if GtkSource is not None else None, cmd=pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4")),
-        dict(key="pyopengl", name="PyOpenGL (Python)", gives="hardware-accelerated 3D preview",
+        # The GTK 4 interface needs GtkSourceView 5 and the GTK 3 one version 4: installing the other one changes
+        # nothing, and not every distro has 5 (RHEL 9 and EPEL do not).
+        dict(key="gtksourceview", name="GtkSourceView 5" if GTK4 else "GtkSourceView", gives="syntax colouring + line numbers in the quick editor",
+             found="loaded" if GtkSource is not None else None,
+             pkgs=("gtksourceview5", "gir1.2-gtksource-5", "gtksourceview5") if GTK4 else ("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4"),
+             gone_note="Text still previews, without colouring; the GTK 3 interface can use GtkSourceView 4." if GTK4 else "",
+             cmd=(pkg_install("gtksourceview5", "gir1.2-gtksource-5", "gtksourceview5", "typelib-1_0-GtkSource-5") if GTK4 else
+                  pkg_install("gtksourceview4", "gir1.2-gtksource-4", "gtksourceview4", "typelib-1_0-GtkSource-4"))),
+        dict(key="pyopengl", name="PyOpenGL (Python)", pkgs=('', 'python3-opengl', 'python-opengl'), gives="hardware-accelerated 3D preview",
              found="OpenGL importable" if HAVE_GL else None, cmd=("python3 -m pip install --user PyOpenGL" if pm in ("dnf", "") else pkg_install("", "python3-opengl", "python-opengl", "python3-opengl"))),
-        dict(key="h5py", name="h5py (Python)", gives="HDF5 (legacy) Alembic previews",
+        dict(key="h5py", name="h5py (Python)", pkgs=('', 'python3-h5py', 'python-h5py'), gives="HDF5 (legacy) Alembic previews",
              found="h5py importable" if _has_py_module("h5py") else None, cmd=("python3 -m pip install --user h5py" if pm in ("dnf", "") else pkg_install("", "python3-h5py", "python-h5py", "python3-h5py"))),
         dict(key="usd", name="usd-core (Python)", gives="USD previews",
              found="pxr importable" if _has_py_module("pxr") else None, cmd="python3 -m pip install --user usd-core"),
-        dict(key="gst", name="GStreamer (Python bindings)", gives="video / audio playback engine" + (f" — import failed: {GST_ERROR}" if GST_ERROR else ""),
+        dict(key="gst", name="GStreamer (Python bindings)", pkgs=('gstreamer1-plugins-base', 'gstreamer1.0-plugins-base', 'gst-plugins-base'), gives="video / audio playback engine" + (f" — import failed: {GST_ERROR}" if GST_ERROR else ""),
              found=(Gst.version_string() if HAVE_GST else None),
              cmd=pkg_install("gstreamer1 gstreamer1-plugins-base python3-gobject",
                              "gir1.2-gstreamer-1.0 gir1.2-gst-plugins-base-1.0 gstreamer1.0-plugins-base python3-gi",
                              "gstreamer gst-plugins-base python-gobject",
                              "gstreamer gstreamer-plugins-base typelib-1_0-Gst-1_0 python3-gobject")),
         dict(key="gstgtk", name="GStreamer GTK sink", gives="video player in the preview pane",
+             pkgs=("gstreamer1-plugins-good-gtk", "gstreamer1.0-gtk3", "gst-plugin-gtk"),
              found="gtksink" if gst_sink_available(refresh=True) else None, cmd=pkg_install("gstreamer1-plugins-good gstreamer1-plugins-good-gtk", "gstreamer1.0-plugins-good gstreamer1.0-gtk3",
                              "gst-plugins-good gst-plugin-gtk", "gstreamer-plugins-good gstreamer-plugins-good-gtk")),
         dict(key="gstcodecs", name="GStreamer codecs" + (" (RPM Fusion)" if pm == "dnf" else ""),
@@ -11830,16 +14485,21 @@ def optional_deps() -> List[dict]:
              found=_find_mayapy(),
              cmd="echo 'Maya is installed by your studio / Autodesk installer under /usr/autodesk/maya*; Shotrover finds mayapy there or via $MAYA_LOCATION'"),
         # Only a fallback: .vdb files preview with the built-in reader (then Houdini) before this is tried. Not
-        # every distro packages it (RHEL 9 / EPEL has the library but no Python module), and installing a package
-        # that doesn't exist left the row "missing" for good, so ask the package manager first.
+        # every distro packages it (RHEL 9 / EPEL has the library but no Python module).
         dict(key="openvdb", name="OpenVDB (Python)", gives="fallback for .vdb files the built-in reader can't open",
-             found=vdb_py, unavailable=vdb_gone,
+             found=vdb_py, pkgs=("python3-openvdb", "python3-openvdb", "openvdb"), gone_note="VDB files still preview with the built-in reader.",
              cmd=pkg_install("python3-openvdb", "python3-openvdb", "openvdb", "python3-openvdb")),
-        dict(key="7z", name="7-Zip (p7zip)", gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
+        dict(key="7z", name="7-Zip (p7zip)", pkgs=('p7zip', '', '7zip'), gives=".7z, .rar, .cab, .iso archives: preview, extract and create",
              found=sevenzip(), cmd=pkg_install("p7zip p7zip-plugins", "7zip || sudo apt-get install -y p7zip-full", "7zip", "7zip")),
-        dict(key="xdotool", name="xdotool", gives="fm-bench.py benchmark script only",
+        dict(key="xdotool", name="xdotool", pkgs=('xdotool', 'xdotool', 'xdotool'), gives="fm-bench.py benchmark script only",
              found=shutil.which("xdotool"), cmd=pkg_install("xdotool", "xdotool", "xdotool", "xdotool")),
     ]
+    # Installing a package the distro does not have leaves its row "missing" for good, so every missing add-on
+    # that comes from the package manager (pkgs: its main package as dnf, apt, pacman names) is looked up
+    # first. Those the repositories lack read "not available" and cannot be ticked.
+    ask = [d for d in deps if d["found"] is None and d.get("pkgs") and not d.get("unavailable")]
+    for i in pkgs_unavailable([d["pkgs"] for d in ask]):
+        ask[i]["unavailable"] = ("Your distribution has no package for it. " + ask[i].get("gone_note", "")).strip()
     return deps
 
 
@@ -12884,7 +15544,7 @@ def load_via_houdini_mesh(path: str) -> Optional[Tuple[list, list, str]]:
 import io  # noqa: E402  (scene breakdowns: in-memory decompressed .blend)
 
 
-# =========================================================================== scene breakdowns (p3e)
+# =========================================================================== scene breakdowns (scenes.py)
 # What's inside a scene file, read without opening the application: Unreal (.umap / .uasset / .uproject),
 # Unity (.unity / .prefab / .mat / .unitypackage), Maya (.ma / .mb) and Blender (.blend). Each reader returns
 #   {"kind": str, "info": [(key, value)], "tree": [node], "notes": [str]}
@@ -15438,7 +18098,7 @@ def breakdown_text(res: dict, title: str = "") -> str:
     return "\n".join(lines) + "\n"
 
 
-# =========================================================================== shader & material previews (p3f)
+# =========================================================================== shader & material previews (shaders.py)
 # A material read from any format becomes one plain dict (MATERIAL_DEFAULTS keys, colours in linear RGB,
 # textures as file paths or (path, channel, invert) tuples) and is rendered as a "material ball": a sphere in a
 # small studio (key, fill and rim light plus a procedural softbox environment), GGX specular, optional clear
@@ -16849,14 +19509,15 @@ class GLSLRunner:
             pass
 
 
-class GLSLView(Gtk.GLArea):
+class GLSLView(Gtk.DrawingArea):
     """Runs a fragment shader live in the preview pane. Animates while visible and the window is active;
-    click (or drag) feeds iMouse; double-click restarts the clock."""
+    click (or drag) feeds iMouse; double-click restarts the clock. Rendered offscreen and painted as a
+    picture (GLOffscreen), so the window it sits in never switches to GL painting."""
 
     def __init__(self):
         super().__init__()
-        self.set_auto_render(False)
-        self.set_has_depth_buffer(False)
+        self.gl: Optional[GLOffscreen] = None
+        self._surf = None
         self.runner: Optional[GLSLRunner] = None
         self.src, self.style = "", ""
         self.dirty = False
@@ -16867,30 +19528,30 @@ class GLSLView(Gtk.GLArea):
         self.on_status = None                # callable(error text or "") set by the window
         self.flavour = ""
         self._tick = None
-        self.connect("create-context", self._create_context)
         self.connect("realize", self._realize)
         self.connect("unrealize", self._unrealize)
-        self.connect("render", self._render)
+        on_draw(self, self._draw)
         self.connect("map", lambda w: self._start() if self.playing else None)
         self.connect("unmap", lambda w: self._stop())
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK | Gdk.EventMask.POINTER_MOTION_MASK)
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", self._release)
-        self.connect("motion-notify-event", self._motion)
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK | EVMASK.POINTER_MOTION_MASK)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", self._release)
+        on_event(self, "motion-notify-event", self._motion)
 
-    def _create_context(self, area):
-        ctx, label = gl_try_contexts(self.get_window(), [])
-        self.flavour = label or ""
-        return ctx
+    def queue_render(self):
+        self.queue_draw()
 
     def _realize(self, w):
-        self.make_current()
-        if self.get_error() is not None or self.get_context() is None:
+        try:
+            self.gl = GLOffscreen()
+            self.flavour = self.gl.flavour or ""
+        except Exception:
+            self.gl = None
             if self.on_status:
                 GLib.idle_add(lambda: (self.on_status("OpenGL isn't available here, so the shader can't run live."), False)[1])
             return
         try:
-            self.runner = GLSLRunner(_gl_header(self.get_context()))
+            self.runner = GLSLRunner(_gl_header(self.gl.ctx))
         except Exception as ex:
             if self.on_status:
                 msg = f"OpenGL error: {ex}"
@@ -16901,10 +19562,17 @@ class GLSLView(Gtk.GLArea):
 
     def _unrealize(self, w):
         self._stop()
-        self.make_current()
-        if self.runner:
-            self.runner.free()
+        if self.gl is not None:
+            try:
+                self.gl.make_current()
+                if self.runner:
+                    self.runner.free()
+            except Exception:
+                pass
+            self.gl.free()
         self.runner = None
+        self.gl = None
+        self._surf = None
 
     def load(self, src: str, style: str):
         self.src, self.style = src, style
@@ -16934,34 +19602,47 @@ class GLSLView(Gtk.GLArea):
             self._tick = None
 
     def _on_tick(self, widget, clock):
-        top = self.get_toplevel()
+        top = toplevel(self)
         active = top.is_active() if isinstance(top, Gtk.Window) else True
         if self.playing and active and self.get_mapped():
             self.queue_render()
         return True
 
-    def _render(self, area, ctx):
-        if self.runner is None:
+    def _draw(self, w, cr):
+        if self.runner is None or self.gl is None:
             return True
+        try:
+            self._render()
+        except Exception as ex:
+            if self.on_status:
+                self.on_status(f"OpenGL error: {ex}")
+        if self._surf is not None:
+            cr.set_source_surface(self._surf, 0, 0)
+            cr.paint()
+        return True
+
+    def _render(self):
+        self.gl.make_current()
         if self.dirty:
             self.dirty = False
             ok = self.runner.compile(self.src, self.style)
             if self.on_status:
                 self.on_status("" if ok else self.runner.error)
         scale = self.get_scale_factor()
-        W, H = max(1, self.get_allocated_width() * scale), max(1, self.get_allocated_height() * scale)
-        fb = int(np.asarray(_GL.glGetIntegerv(_GL.GL_DRAW_FRAMEBUFFER_BINDING)).reshape(-1)[0])
+        lw, lh = max(1, self.get_allocated_width()), max(1, self.get_allocated_height())
+        W, H = lw * scale, lh * scale
+        fb = self.gl.target(W, H)
         t = (time.monotonic() - self.t0) if self.playing else getattr(self, "_paused_at", 0.0)
         self.runner.draw(W, H, t, self.frame, tuple(self.mouse), fb)
+        self._surf = self.gl.read(lw, lh)
         self.frame += 1
-        return True
 
     def _xy(self, event):
         s = self.get_scale_factor()
         return event.x * s, (self.get_allocated_height() - event.y) * s
 
     def _press(self, w, event):
-        if event.type == Gdk.EventType._2BUTTON_PRESS:
+        if event.type == EV_PRESS2:
             self.t0 = time.monotonic()
             self.frame = 0
             return True
@@ -18374,12 +21055,11 @@ class IconCache:
         self.cache: Dict[Tuple[str, int], GdkPixbuf.Pixbuf] = {}
         self.thumbs: Dict[Tuple[str, int], Optional[GdkPixbuf.Pixbuf]] = {}
         self.pending: set = set()
-        self.theme = Gtk.IconTheme.get_default()
         self.lock = threading.Lock()
         self.queue: List[Tuple[str, int, Callable, str, str]] = []
         self.workers = 0
 
-    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (p2e)
+    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (icons_theme.py)
 
     def set_icon_set(self, name: str):
         self.icon_set = "shotrover" if name == "shotrover" else "system"
@@ -18400,18 +21080,7 @@ class IconCache:
         pb = self.cache.get(key)
         if pb is not None:
             return pb
-        try:
-            info = self.theme.lookup_by_gicon(icon, size, Gtk.IconLookupFlags.FORCE_SIZE) if icon else None
-            if info is None:
-                info = self.theme.lookup_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
-            pb = info.load_icon() if info else None
-        except GLib.Error:
-            pb = None
-        if pb is None:
-            try:
-                pb = self.theme.load_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
-            except GLib.Error:
-                pb = None
+        pb = theme_icon_pixbuf(icon, size)
         self.cache[key] = pb
         return pb
 
@@ -18446,7 +21115,7 @@ class IconCache:
                 del self.queue[:-600]
             if self.workers < self.THREADS:
                 self.workers += 1
-                threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True).start()
+                bg(lambda: (pin_worker(), self._work()))
         return None
 
     def _work(self):
@@ -18533,7 +21202,6 @@ def touch_all(store):
 
 LAYOUT_ICON_SIZE = {"xlarge": 160, "large": 96, "medium": 48, "small": 24, "list": 16, "tiles": 48, "details": 16, "content": 32}
 
-URI_TARGETS = [Gtk.TargetEntry.new("text/uri-list", 0, 0)]
 
 
 def decide_drop(paths: List[str], dest: str, widget: Gtk.Widget) -> Optional[str]:
@@ -18596,30 +21264,30 @@ class FolderView(Gtk.Box):
         self.page: Optional["Page"] = None
         # slim header shown only in split view
         self.header = Gtk.Box(spacing=4)
-        self.header.get_style_context().add_class("pane-header")
+        css_class(self.header, "pane-header")
         self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, margin_start=8)
-        self.header.pack_start(self.header_label, True, True, 0)
-        hclose = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
-        hclose.set_relief(Gtk.ReliefStyle.NONE)
+        put(self.header, self.header_label, True, True, 0)
+        hclose = icon_button("window-close-symbolic", "menu")
+        flat_button(hclose)
         hclose.set_tooltip_text("Close this pane")
         hclose.connect("clicked", lambda b: self.page.unsplit(self) if self.page else None)
-        self.header.pack_end(hclose, False, False, 0)
-        hev = Gtk.EventBox()
-        hev.add(self.header)
-        hev.connect("button-press-event", lambda w, e: self.view.grab_focus() or False)
+        put_end(self.header, hclose, False, False, 0)
+        hev = event_box()
+        set_child(hev, self.header)
+        on_event(hev, "button-press-event", lambda w, e: self.view.grab_focus() or False)
         self.header_box = hev
-        self.pack_start(hev, False, False, 0)
-        self.header_box.set_no_show_all(True)
+        put(self, hev, False, False, 0)
+        start_hidden(self.header_box, True)
 
         # Entry-or-label, is_group, icon-view pixbuf, icon-view markup.  Columns 2/3 are bound directly to the
         # icon view's renderers so GTK lays out 50k tiles without calling back into Python per tile.
         self.store = Gtk.ListStore(GObject.TYPE_PYOBJECT, bool, GdkPixbuf.Pixbuf, str)
         self._index: Optional[Dict[str, int]] = None
         self.stack = Gtk.Stack()
-        self.stack.get_style_context().add_class("filearea")        # one backdrop for every layout (see CSS)
-        self.pack_start(self.stack, True, True, 0)
+        css_class(self.stack, "filearea")        # one backdrop for every layout (see CSS)
+        put(self, self.stack, True, True, 0)
         self.err_label = Gtk.Label(xalign=0.5)
-        self.err_label.get_style_context().add_class("dim-label")
+        css_class(self.err_label, "dim-label")
         self.stack.add_named(self.err_label, "error")
         self._build_tree()
         self._build_iconview()
@@ -18627,6 +21295,8 @@ class FolderView(Gtk.Box):
 
     # ---- details view
     def _build_tree(self):
+        if GTK4:
+            return self._build_list4()
         tv = Gtk.TreeView(model=self.store, enable_search=True, rubber_banding=True, headers_clickable=True)
         tv.set_search_equal_func(self._search_equal, None)
         tv.set_fixed_height_mode(True)      # O(1) row layout: 100k-row folders scroll like 100
@@ -18638,27 +21308,47 @@ class FolderView(Gtk.Box):
         sel.set_select_function(lambda s, m, p, cur, d: not m[p][1], None)
         sel.connect("changed", lambda s: self.win.on_selection_changed(self))
         tv.connect("row-activated", lambda t, p, c: self.win.activate_entry(self.entry_at(p)))
-        tv.connect("button-press-event", self._on_button, "tree")
-        tv.connect("key-press-event", self.win.on_view_key, self)
-        tv.connect("popup-menu", lambda w: self.win.context_menu(self, None) or True)
-        tv.connect("focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
-        tv.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.ASK)
-        tv.connect("drag-data-get", self._drag_get)
-        tv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        tv.connect("drag-data-received", self._drag_received, "tree")
+        on_event(tv, "button-press-event", self._on_button, "tree")
+        on_event(tv, "key-press-event", self.win.on_view_key, self)
+        on_menu_key(tv, lambda: self.win.context_menu(self, None))
+        on_event(tv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(tv, self._drag_get)
+        file_drop_target(tv, self._drag_received, "tree")
         self.name_renderer = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
         self.name_renderer.connect("edited", self._on_edited)
         self.name_renderer.connect("editing-canceled", lambda r: self._end_edit())
         self.name_renderer.connect("editing-started", self._on_editing_started)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         self.stack.add_named(sw, "details")
         self.rebuild_columns()
 
-    def rebuild_columns(self):
-        tv = self.tree
-        for c in tv.get_columns():
-            tv.remove_column(c)
+    def _build_list4(self):
+        """GTK 4: the Details list is a Gtk.ColumnView behind DetailsList (widgets.py), which answers the tree
+        view calls made in this class."""
+        tv = DetailsList(self)
+        self.tree = tv
+        tv.get_selection().connect("changed", lambda s: self.win.on_selection_changed(self))
+        tv.connect("row-activated", lambda t, p, c: self.win.activate_entry(self.entry_at(p)))
+        on_event(tv, "button-press-event", self._on_button, "tree")
+        on_event(tv, "key-press-event", self._list_key4)
+        on_menu_key(tv, lambda: self.win.context_menu(self, None))
+        on_event(tv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(tv, self._drag_get)
+        file_drop_target(tv, self._drag_received, "tree")
+        self.name_renderer = None
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        set_child(sw, tv.cv)
+        self.stack.add_named(sw, "details")
+        tv.set_model(self.store)
+        self.rebuild_columns()
+
+    def _list_key4(self, view, event):
+        if self.win.editing:                # the rename box sits inside the list: its keys are its own
+            return False
+        return self.win.on_view_key(view, event, self)
+
+    def _column_keys(self) -> List[str]:
         cols = list(self.cfg["columns"])
         if "name" not in cols:
             cols.insert(0, "name")
@@ -18683,6 +21373,22 @@ class FolderView(Gtk.Box):
             cols = ["name", "usage", "type"]
         if self.path == NETWORK:
             cols = ["name", "location", "usage", "type"]
+        return cols
+
+    COLUMN_WIDTHS = {"name": 260, "location": 260, "modified": 150, "type": 170, "size": 90, "usage": 170, "deleted": 150}
+
+    def rebuild_columns(self):
+        tv = self.tree
+        cols = self._column_keys()
+        if GTK4:
+            specs = [("_chk", "", 34, False, False)] if self.cfg["checkboxes"] else []
+            for key in cols:
+                specs.append((key, COLUMN_TITLES.get(key, "Space used" if key == "usage" else key),
+                              self.COLUMN_WIDTHS.get(key, 120), key == "name", self.path != THISPC))
+            tv.set_columns(specs, self.cfg["sort_key"], self.cfg["sort_desc"])
+            return
+        for c in tv.get_columns():
+            tv.remove_column(c)
         if self.cfg["checkboxes"]:
             tog = Gtk.CellRendererToggle()
             tog.connect("toggled", self._on_toggled)
@@ -18695,26 +21401,26 @@ class FolderView(Gtk.Box):
             col = Gtk.TreeViewColumn(COLUMN_TITLES.get(key, "Space used" if key == "usage" else key))
             col.set_resizable(True)
             col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-            col.set_fixed_width({"name": 260, "location": 260, "modified": 150, "type": 170, "size": 90, "usage": 170, "deleted": 150}.get(key, 120))
+            col.set_fixed_width(self.COLUMN_WIDTHS.get(key, 120))
             col.key = key
             if key == "name":
                 pix = Gtk.CellRendererPixbuf()
-                col.pack_start(pix, False)
+                put(col, pix, False)
                 col.set_cell_data_func(pix, self._icon_data)
-                col.pack_start(self.name_renderer, True)
+                put(col, self.name_renderer, True)
                 col.set_cell_data_func(self.name_renderer, self._name_data)
                 col.set_expand(True)
                 col.set_min_width(180)
             elif key == "usage":
                 prog = UsageRenderer()
-                col.pack_start(prog, True)
+                put(col, prog, True)
                 col.set_cell_data_func(prog, self._usage_data)
                 col.set_min_width(160)
             else:
                 r = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
                 if key == "size":
                     r.set_property("xalign", 1.0)
-                col.pack_start(r, True)
+                put(col, r, True)
                 col.set_cell_data_func(r, self._text_data, key)
                 col.set_min_width({"modified": 150, "type": 160, "size": 90}.get(key, 120))
                 if key == "location":
@@ -18734,7 +21440,7 @@ class FolderView(Gtk.Box):
     # cell data funcs
     def _icon_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)            # not model[it][0]: that builds a row object for every cell
         if not isinstance(v, Entry):
             cell.set_property("pixbuf", None)
             return
@@ -18747,36 +21453,125 @@ class FolderView(Gtk.Box):
 
     def _name_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)
         if not isinstance(v, Entry):
             cell.set_property("markup", f"<span alpha='72%'><b>{GLib.markup_escape_text(str(v))}</b></span>")
-            cell.set_property("foreground-set", False)
+            self._set_dim(cell, False)
             return
+        markup, dim = self._name_markup(v)
+        cell.set_property("markup", markup)
+        self._set_dim(cell, dim)
+
+    def _name_markup(self, v: Entry):
+        """(Pango markup for the Name cell, whether it is shown dimmed: cut, hidden, or in the inactive pane)."""
         name = self.win.display_name(v)
         if self.layout == "content":
             sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {pretty_path(v.location)}" if v.location else "")
-            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>")
+            markup = f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>"
         else:
-            cell.set_property("markup", GLib.markup_escape_text(name))
+            markup = GLib.markup_escape_text(name)
         cut = self.win.clipboard["mode"] == "cut" and v.path in self.win.clipboard["paths"]
-        dim = cut or v.hidden or self.muted
-        cell.set_property("foreground-rgba", self._dim_rgba() if dim else None)
+        return markup, bool(cut or v.hidden or self.muted)
+
+    # ---- GTK 4: the cells of the Details list are small widgets, made and filled here for DetailsList
+    def _cell_make4(self, key: str):
+        if key == "name":
+            box = Gtk.Box(spacing=6)
+            box.append(Gtk.Image())
+            lab = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, hexpand=True)
+            lab.set_max_width_chars(10)          # a small natural width: the column's width must not follow the longest name on screen
+            box.append(lab)
+            return box
+        if key == "_chk":
+            chk = Gtk.CheckButton()
+            chk.connect("toggled", self._chk_toggled4)
+            return chk
+        if key == "usage":
+            box = Gtk.Box(spacing=8)
+            bar = Gtk.LevelBar(hexpand=True, valign=Gtk.Align.CENTER)
+            box.append(bar)
+            box.append(Gtk.Label(xalign=0))
+            return box
+        return Gtk.Label(xalign=1.0 if key == "size" else 0.0, ellipsize=Pango.EllipsizeMode.END)
+
+    def _cell_fill4(self, cell, key: str):
+        row, child = cell.get_item(), cell.get_child()
+        if row is None or child is None:
+            return
+        v = row.v
+        real = isinstance(v, Entry)
+        if key == "name":
+            img, lab = child.get_first_child(), child.get_last_child()
+            img.set_visible(real)
+            if not real:
+                lab.add_css_class("sr-group")
+                lab.set_opacity(1.0)
+                lab.set_text(str(v))
+                return
+            lab.remove_css_class("sr-group")
+            size = 32 if self.layout == "content" else 16
+            pb = None
+            if size >= 32 and len(self.entries) <= 2500:
+                pb = ICONS.thumbnail(v, size, self._thumb_ready)
+            pb = pb or ICONS.pixbuf(v.icon, size, v)
+            if pb is not None and self.muted:
+                pb = ICONS.desaturated(pb)
+            img.set_pixel_size(size)
+            if pb is not None:
+                img.set_from_paintable(texture4(pb))
+            else:
+                img.clear()
+            markup, dim = self._name_markup(v)
+            lab.set_markup(markup)
+            lab.set_opacity(0.55 if dim else 1.0)
+        elif key == "_chk":
+            child.set_visible(real)
+            self._chk_busy = True
+            child.set_active(real and cell.get_selected())
+            self._chk_busy = False
+        elif key == "usage":
+            bar, lab = child.get_first_child(), child.get_last_child()
+            child.set_visible(bool(real and v.usage))
+            if real and v.usage:
+                used, total = v.usage
+                bar.set_value(used / total if total else 0.0)
+                lab.set_text(f"{int(100 * used / total) if total else 0}% used")
+        else:
+            child.set_text(self.win.cell_text(v, key) if real else "")
+            child.set_opacity(0.55 if self.muted else 1.0)
+
+    def _chk_toggled4(self, chk):
+        if getattr(self, "_chk_busy", False):
+            return
+        cell = self.tree.cell_of(chk)
+        if cell is not None:
+            sel, p = self.tree.get_selection(), Gtk.TreePath.new_from_indices([cell.get_position()])
+            (sel.select_path if chk.get_active() else sel.unselect_path)(p)
+
+    def _set_dim(self, cell, dim: bool):
+        """Dimmed or normal text on a renderer; the normal case, nearly every cell, costs nothing after the first."""
+        if dim:
+            cell.set_property("foreground-rgba", self._dim_rgba())
+            cell._sr_dim = True
+        elif getattr(cell, "_sr_dim", True):
+            cell.set_property("foreground-rgba", None)
+            cell._sr_dim = False
 
     def _dim_rgba(self):
         """Dimmed text (inactive split pane, hidden and cut files) relative to the text colour right now, so it
         stays dimmer than normal text when the window is unfocused and the theme has already greyed everything."""
         ctx = self.tree.get_style_context()
-        fg = ctx.get_color(Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
-        return Gdk.RGBA(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
+        fg = style_fg(ctx, Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
+        return rgba(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
 
     def _text_data(self, col, cell, model, it, key):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)
         if not isinstance(v, Entry):
             cell.set_property("text", "")
             return
         cell.set_property("text", self.win.cell_text(v, key))
-        cell.set_property("foreground-rgba", self._dim_rgba() if self.muted else None)
+        self._set_dim(cell, self.muted)
 
     def _usage_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
@@ -18811,17 +21606,15 @@ class FolderView(Gtk.Box):
         iv.provider = self._iv_tile
         iv.connect("item-activated", lambda v, p: self.win.activate_entry(self.entry_at(p)))
         iv.connect("selection-changed", lambda v: self.win.on_selection_changed(self))
-        iv.connect("button-press-event", self._on_button, "icons")
-        iv.connect("key-press-event", self.win.on_view_key, self)
-        iv.connect("popup-menu", lambda w: self.win.context_menu(self, None) or True)
-        iv.connect("focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
-        iv.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.ASK)
-        iv.connect("drag-data-get", self._drag_get)
-        iv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        iv.connect("drag-data-received", self._drag_received, "icons")
+        on_event(iv, "button-press-event", self._on_button, "icons")
+        on_event(iv, "key-press-event", self.win.on_view_key, self)
+        on_menu_key(iv, lambda: self.win.context_menu(self, None))
+        on_event(iv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(iv, self._drag_get)
+        file_drop_target(iv, self._drag_received, "icons")
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.add(iv)
+        set_child(sw, iv)
         self.stack.add_named(sw, "icons")
         # This PC tile view (Windows-style sections); used for every layout except Details
         self.pcview = PCView()
@@ -18903,6 +21696,8 @@ class FolderView(Gtk.Box):
             e = self.store[it][0]
             if isinstance(e, Entry) and e.path == path:
                 self.store.row_changed(self.store.get_path(it), it)
+                if GTK4:
+                    self.tree.refresh()
         except (ValueError, TypeError):
             pass
 
@@ -18919,6 +21714,8 @@ class FolderView(Gtk.Box):
             e = self.store[it][0]
             if isinstance(e, Entry):
                 self.store.row_changed(self.store.get_path(it), it)
+        if GTK4:
+            self.tree.refresh()
 
     @property
     def pc_mode(self) -> bool:
@@ -18926,6 +21723,8 @@ class FolderView(Gtk.Box):
 
     def apply_layout(self):
         lay = self.layout
+        if GTK4:                # the Details list mirrors the rows only while it is the list on show
+            self.tree.set_active(not self.pc_mode and (self.path == THISPC or lay in ("details", "content")))
         if self.pc_mode:
             self.stack.set_visible_child_name("pc")
             if self.entries:
@@ -18950,9 +21749,10 @@ class FolderView(Gtk.Box):
         # Keep the keyboard on the list that is showing. GTK gives the first focus to the details list even
         # when an icon layout is up, and a hidden list swallows every key (Space, Delete, arrows…) until the
         # first click.
-        top = self.get_toplevel()
+        top = toplevel(self)
         held = top.get_focus() if isinstance(top, Gtk.Window) else None
-        if held in (self.tree, self.icons) and held is not self.view:
+        in_list = GTK4 and self.tree.contains(held)          # GTK 4: the keyboard is on a row inside the list
+        if (held in (self.tree, self.icons) or in_list) and (self.view is self.icons if in_list else held is not self.view):
             self.view.grab_focus()
         # details rows carry section / group header rows, icon rows don't: switching between the two families
         # must rebuild the rows (from the listing already in memory — no disk access)
@@ -19043,8 +21843,13 @@ class FolderView(Gtk.Box):
                 first = first or row.path
         if first is not None and scroll:
             if self.view is self.tree:
-                self.tree.set_cursor(first, None, False)
+                self.tree.set_cursor(first, None, False)       # this also reduces the selection to that one row
                 self.tree.scroll_to_cell(first, None, False, 0, 0)
+                if len(names) > 1:
+                    sel = self.tree.get_selection()
+                    for row in self.store:
+                        if isinstance(row[0], Entry) and row[0].name in names:
+                            sel.select_path(row.path)
             else:
                 self.icons.set_cursor(first, None, False)
                 self.icons.scroll_to_path(first, False, 0, 0)
@@ -19058,7 +21863,7 @@ class FolderView(Gtk.Box):
         if kind == "tree" and event.button == 1:
             # Same fix as the icon grid: pair clicks ourselves instead of trusting GDK's 2-click events, which
             # chain across a folder change (the TreeView would otherwise activate on GDK's count).
-            if event.type in (Gdk.EventType._2BUTTON_PRESS, Gdk.EventType._3BUTTON_PRESS):
+            if event.type in (EV_PRESS2, EV_PRESS3):
                 return True
             hit = view.get_path_at_pos(int(event.x), int(event.y))
             row = hit[0].get_indices()[0] if hit else -1
@@ -19109,7 +21914,7 @@ class FolderView(Gtk.Box):
     def _drag_received(self, widget, ctx, x, y, sel, info, t, kind):
         uris = sel.get_uris()
         if not uris:
-            Gtk.drag_finish(ctx, False, False, t)
+            drag_finish(ctx, False, t)
             return
         dest = self.path if self.path not in VIRTUAL else None
         if kind == "tree":
@@ -19127,7 +21932,7 @@ class FolderView(Gtk.Box):
         paths = [p for p in (Gio.File.new_for_uri(u).get_path() for u in uris) if p]
         kind = decide_drop(paths, dest, widget)
         ok = bool(kind) and self.win.transfer(paths, dest, kind)
-        Gtk.drag_finish(ctx, ok, False, t)
+        drag_finish(ctx, ok, t)
 
     # ---- rename
     def start_rename(self):
@@ -19147,6 +21952,19 @@ class FolderView(Gtk.Box):
         col = next((c for c in self.tree.get_columns() if getattr(c, "key", "") == "name"), None)
         if col is None:
             return
+        if GTK4:                           # GTK 4.12 misplaces its own cell editor: see edit_cell4
+            e = self.entry_at(p)
+            if e is None:
+                return
+            self.win.editing = True
+
+            def done(new):
+                self.win.editing = False
+                self.tree.grab_focus()
+                if new and new != e.name:
+                    self.win.do_rename(e.path, os.path.join(os.path.dirname(e.path), new))
+            stem = len(e.name) if e.is_dir else len(os.path.splitext(e.name)[0])
+            return self.tree.edit_name(p, e.name, stem, done)
         self.name_renderer.set_property("editable", True)
         self.tree.set_cursor(p, col, True)
 
@@ -19226,7 +22044,7 @@ class FolderView(Gtk.Box):
                 except Exception as ex:
                     ents, err = [], str(ex)
                 GLib.idle_add(self._fill, gen, ents, err, old)
-            threading.Thread(target=vwork, daemon=True).start()
+            bg(vwork)
             self._watch()
             return
 
@@ -19264,7 +22082,7 @@ class FolderView(Gtk.Box):
                 except Exception:
                     pass
             GLib.idle_add(self._fill, gen, ents, err, old)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         self._watch()
 
     CHUNK = 4000          # rows appended per main-loop iteration (~15 ms)
@@ -19279,13 +22097,23 @@ class FolderView(Gtk.Box):
         rows = self._rows_for(ents)
         view = self.view
         view.set_model(None)
-        self.store.clear()
+        self._clear_store()
         app = self.store.append
         for r in rows:
             app(r)
         view.set_model(self.store)
         self.win.on_tab_loaded(self)
         return False
+
+    def _clear_store(self):
+        """Empty the rows. The GTK 4 Details list follows single inserts but not a clear, so it is detached for
+        it and attached again (to the icon grid a clear is one cheap signal per row either way)."""
+        attached = GTK4 and self.tree.get_model() is not None
+        if attached:
+            self.tree.set_model(None)
+        self.store.clear()
+        if attached:
+            self.tree.set_model(self.store)
 
     def _rows_for(self, ents: List[Entry]) -> List[list]:
         group = self.cfg["group_by"]
@@ -19339,7 +22167,7 @@ class FolderView(Gtk.Box):
         self.entries = ents
         self.error = err
         rows = self._rows_for(ents)
-        self.store.clear()
+        self._clear_store()
         if self.view.get_model() is None:
             self.view.set_model(self.store)
         if err:
@@ -19415,7 +22243,7 @@ class FolderView(Gtk.Box):
         def work():
             res = sort_entries(ents, cfg["sort_key"], cfg["sort_desc"], cfg["folders_first"])
             GLib.idle_add(self._fill, gen, res, "", old)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _watch(self):
         if self.monitor:
@@ -19447,7 +22275,7 @@ class FolderView(Gtk.Box):
         self.search_text = text
         root = self.path if self.path not in VIRTUAL else HOME
         self.entries = []
-        self.store.clear()
+        self._clear_store()
         self._index = None
         self.search = SearchOp(root, text, self.cfg["search_subfolders"], self.cfg["search_contents"], self.cfg["show_hidden"], self._search_batch)
         self.rebuild_columns()
@@ -19504,7 +22332,7 @@ class Page(Gtk.Box):
         self.win = win
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.set_wide_handle(False)
-        self.pack_start(self.paned, True, True, 0)
+        put(self, self.paned, True, True, 0)
         self.panes: List[FolderView] = []
         self.active: Optional[FolderView] = None
         self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.END, xalign=0)
@@ -19516,10 +22344,10 @@ class Page(Gtk.Box):
         fv.page = self
         self.panes.append(fv)
         if len(self.panes) == 1:
-            self.paned.pack1(fv, True, False)
+            pane_first(self.paned, fv, True, False)
         else:
-            self.paned.pack2(fv, True, False)
-        fv.show_all()
+            pane_second(self.paned, fv, True, False)
+        show_all(fv)
         self._update_headers()
         if path not in VIRTUAL:
             self.win._bump_frequent(path)
@@ -19547,10 +22375,10 @@ class Page(Gtk.Box):
         if pane.monitor:
             pane.monitor.cancel()
         self.panes.remove(pane)
-        self.paned.remove(pane)
+        take_out(self.paned, pane)
         keep = self.panes[0]
-        self.paned.remove(keep)
-        self.paned.pack1(keep, True, False)
+        take_out(self.paned, keep)
+        pane_first(self.paned, keep, True, False)
         self.active = keep
         self._update_headers()
         keep.view.grab_focus()
@@ -19607,7 +22435,7 @@ def _menu_item(label: str, cb: Optional[Callable], accel: str = "", check: Optio
     if accel:
         child = item.get_child()
         if isinstance(child, Gtk.AccelLabel):
-            key, mods = Gtk.accelerator_parse(accel)
+            key, mods = accel_parse(accel)
             child.set_accel(key, mods)
     if submenu is not None:
         item.set_submenu(submenu)
@@ -19618,7 +22446,9 @@ def _menu_item(label: str, cb: Optional[Callable], accel: str = "", check: Optio
 
 
 def build_menu(spec) -> Gtk.Menu:
-    """spec: list of dicts/tuples -> Gtk.Menu."""
+    """spec: list of dicts/tuples -> Gtk.Menu (GTK 4: a popover menu, see menu4 in toolkit.py)."""
+    if GTK4:
+        return menu4(spec)
     menu = Gtk.Menu()
     for s in spec:
         if s == "-":
@@ -19629,7 +22459,7 @@ def build_menu(spec) -> Gtk.Menu:
         sub = build_menu(s["sub"]) if "sub" in s else None
         menu.append(_menu_item(s["label"], s.get("cb"), s.get("accel", ""), s.get("check"), s.get("radio"),
                                s.get("sensitive", True), sub))
-    menu.show_all()
+    show_all(menu)
     return menu
 
 
@@ -19665,26 +22495,26 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_timer = 0
         self.set_default_size(*self.cfg["window"])
         self.set_icon_name("system-file-manager")
-        self.accel = Gtk.AccelGroup()
-        self.add_accel_group(self.accel)
+        self.accel = Shortcuts(self)
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.add(vbox)
-        self.menubar = Gtk.MenuBar()
-        vbox.pack_start(self.menubar, False, False, 0)
+        set_child(self, vbox)
+        self.menubar = menu_bar()
+        put(vbox, self.menubar, False, False, 0)
         self._build_menubar()
-        vbox.pack_start(self._build_toolbar(), False, False, 0)
-        vbox.pack_start(self._build_commandbar(), False, False, 0)
+        put(vbox, self._build_toolbar(), False, False, 0)
+        put(vbox, self._build_commandbar(), False, False, 0)
         # error bar: slides in when something failed (see CrashReporter); collapsed otherwise. GTK 3's InfoBar
         # comes up blank if it is hidden and re-shown, so it stays "shown" and only its revealed state changes.
         self.report_bar = Gtk.InfoBar(message_type=Gtk.MessageType.WARNING, show_close_button=True)
         self.report_bar.set_revealed(False)
         self.report_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.report_bar.get_content_area().pack_start(self.report_label, True, True, 0)
+        info_bar_content(self.report_bar, self.report_label)
+        self.report_dismiss = self.report_bar.add_button("Dismiss all", 2)     # shown when more than one is waiting
         self.report_bar.add_button("Review & report…", 1)
         self.report_bar.connect("response", self._on_report_bar)
         self._report_path: Optional[str] = None
-        vbox.pack_start(self.report_bar, False, False, 0)
+        put(vbox, self.report_bar, False, False, 0)
         self.notebook = Gtk.Notebook(scrollable=True)
         self.notebook.set_show_border(False)
         self.notebook.set_group_name("shotrover-tabs")
@@ -19692,53 +22522,57 @@ class MainWindow(Gtk.ApplicationWindow):
         self.notebook.connect("page-removed", self._on_page_removed)
         self.notebook.connect("page-added", self._on_page_added)
         self.notebook.connect("create-window", self._on_create_window)
-        newtab = Gtk.Button.new_from_icon_name("tab-new-symbolic", Gtk.IconSize.MENU)
-        newtab.set_relief(Gtk.ReliefStyle.NONE)
+        newtab = icon_button("tab-new-symbolic", "menu")
+        flat_button(newtab)
         self.tip(newtab, "New tab", "new_tab")
         newtab.connect("clicked", lambda b: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME))
         newtab.show()
         self.notebook.set_action_widget(newtab, Gtk.PackType.END)
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        vbox.pack_start(self.paned, True, True, 0)
+        put(vbox, self.paned, True, True, 0)
         self.nav_box = self._build_nav()
-        self.paned.pack1(self.nav_box, False, False)
+        pane_first(self.paned, self.nav_box, False, False)
         self.right = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.right.pack1(self.notebook, True, False)
+        pane_first(self.right, self.notebook, True, False)
         self.side = self._build_side()
-        self.right.pack2(self.side, False, False)
-        self.paned.pack2(self.right, True, False)
+        pane_second(self.right, self.side, False, False)
+        pane_second(self.paned, self.right, True, False)
         self.paned.set_position(self.cfg["nav_width"])
         self._watch_volumes()
         # The side pane (preview + quick view) is freely resizable, like the nav pane; both splitters are
         # remembered: side_width is the pane's width, side_split the preview/quick-view divider.
         self._side_restored = False
-        self.right.connect("size-allocate", self._restore_side_width)
+        on_resize(self.right, lambda: self._restore_side_width(self.right, self.right.get_allocation()))
         self.right.connect("notify::position", lambda p, _: self._remember_side_width())
         self.side_paned.connect("notify::position", lambda p, _: self._remember_side_split())
 
         self.status = Gtk.Label(xalign=0, margin_start=8, margin_end=8, margin_top=3, margin_bottom=3, ellipsize=Pango.EllipsizeMode.END)
         sb = Gtk.Box()
-        sb.get_style_context().add_class("statusbar")
+        css_class(sb, "statusbar")
         # bottom-left activity wheel: spins while a folder is being read (network shares, big folders) or
         # a search is running; hidden otherwise so the bar stays quiet
-        self.spinner = Gtk.Spinner(margin_start=8, no_show_all=True)
+        self.spinner = Gtk.Spinner(margin_start=8)
+        start_hidden(self.spinner)
         self.spinner.set_size_request(14, 14)
-        sb.pack_start(self.spinner, False, False, 0)
-        sb.pack_start(self.status, True, True, 0)
+        put(sb, self.spinner, False, False, 0)
+        put(sb, self.status, True, True, 0)
         for lay, icon, tip in (("details", "view-list-symbolic", "Details"), ("large", "view-grid-symbolic", "Large icons")):
-            b = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.MENU)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            b = icon_button(icon, "menu")
+            flat_button(b)
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda b, l=lay: self.set_layout(l))
-            sb.pack_end(b, False, False, 0)
-        vbox.pack_start(sb, False, False, 0)
+            put_end(sb, b, False, False, 0)
+        put(vbox, sb, False, False, 0)
 
-        self.connect("key-press-event", self._on_key)
-        self.connect("button-press-event", self._on_button)
-        self.connect("delete-event", self._on_close)
+        on_event(self, "key-press-event", self._on_key)
+        on_event(self, "button-press-event", self._on_button)
+        on_event(self, "delete-event", self._on_close)
 
-        self.show_all()
+        show_all(self)
+        # Open on the empty state. Left alone the stack starts on its first page (an empty breakdown) until
+        # the placeholder timer runs, so the pane visibly changed a moment after the window opened.
+        self.preview_stack.set_visible_child_name("info")
         bench("window")
         self._bench_listed = False
         if path != "":   # "" = empty window that will receive a dragged tab
@@ -19749,49 +22583,49 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         tb = Gtk.Box(spacing=6, margin_start=6, margin_end=6, margin_top=4, margin_bottom=2)
-        tb.get_style_context().add_class("toolbar-row")
-        self.btn_back = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
-        self.btn_fwd = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.BUTTON)
-        self.btn_up = Gtk.Button.new_from_icon_name("go-up-symbolic", Gtk.IconSize.BUTTON)
+        css_class(tb, "toolbar-row")
+        self.btn_back = icon_button("go-previous-symbolic", "button")
+        self.btn_fwd = icon_button("go-next-symbolic", "button")
+        self.btn_up = icon_button("go-up-symbolic", "button")
         for b, cb, tip in ((self.btn_back, self.go_back, ("Back", "back")), (self.btn_fwd, self.go_forward, ("Forward", "forward")),
                            (self.btn_up, self.go_up, ("Up", "up"))):
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            flat_button(b)
             self.tip(b, *tip)
             b.connect("clicked", lambda w, c=cb: c())
-            tb.pack_start(b, False, False, 0)
-        self.btn_back.connect("button-press-event", self._history_popup)
+            put(tb, b, False, False, 0)
+        on_event(self.btn_back, "button-press-event", self._history_popup)
         # path bar: breadcrumbs or entry
         self.path_stack = Gtk.Stack()
         self.crumbs = Gtk.Box()
-        self.crumbs.get_style_context().add_class("linked")
-        crumb_frame = Gtk.EventBox()
-        crumb_frame.add(self.crumbs)
-        crumb_frame.connect("button-press-event", lambda w, e: self.edit_address() if e.button == 1 else None)
+        css_class(self.crumbs, "linked")
+        crumb_frame = event_box()
+        set_child(crumb_frame, clip_wide(self.crumbs))
+        on_event(crumb_frame, "button-press-event", lambda w, e: self.edit_address() if e.button == 1 else None)
         self.path_stack.add_named(crumb_frame, "crumbs")
         self.addr = Gtk.Entry()
         self.addr.connect("activate", self._on_address)
-        self.addr.connect("focus-out-event", lambda w, e: self.path_stack.set_visible_child_name("crumbs"))
-        self.addr.connect("key-press-event", self._on_address_key)
+        on_event(self.addr, "focus-out-event", lambda w, e: self.path_stack.set_visible_child_name("crumbs"))
+        on_event(self.addr, "key-press-event", self._on_address_key)
         self.path_stack.add_named(self.addr, "entry")
         frame = Gtk.Frame()
-        frame.set_shadow_type(Gtk.ShadowType.NONE)
-        frame.get_style_context().add_class("pathbar")
-        frame.add(self.path_stack)
+        set_frame(frame, False)
+        css_class(frame, "pathbar")
+        set_child(frame, self.path_stack)
         # The bar's outline is painted here rather than by CSS: themes differ in whether a GtkFrame draws a
         # CSS border, and the outline must always be there (faint at rest, firmer under the pointer) so the
         # clickable address area is obvious.
         self._pathbar_hover = False
-        frame.connect("draw", self._draw_pathbar_outline)
+        on_draw_over(frame, self._draw_pathbar_outline, under=True)
         self.path_stack.connect("notify::visible-child-name", lambda *a: frame.queue_draw())   # firmer while typing
-        crumb_frame.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
-        crumb_frame.connect("enter-notify-event", lambda w, e: self._pathbar_hovered(frame, True))
-        crumb_frame.connect("leave-notify-event", lambda w, e: e.detail == Gdk.NotifyType.INFERIOR or self._pathbar_hovered(frame, False))
-        tb.pack_start(frame, True, True, 0)
+        add_event_mask(crumb_frame, EVMASK.ENTER_NOTIFY_MASK | EVMASK.LEAVE_NOTIFY_MASK)
+        on_event(crumb_frame, "enter-notify-event", lambda w, e: self._pathbar_hovered(frame, True))
+        on_event(crumb_frame, "leave-notify-event", lambda w, e: e.detail == Gdk.NotifyType.INFERIOR or self._pathbar_hovered(frame, False))
+        put(tb, frame, True, True, 0)
         self.searchbox = Gtk.SearchEntry(width_chars=22)
         self.searchbox.set_placeholder_text("Search")
         self.searchbox.connect("activate", lambda e: self.start_search(e.get_text()))
         self.searchbox.connect("stop-search", lambda e: self.clear_search())
-        tb.pack_start(self.searchbox, False, False, 0)
+        put(tb, self.searchbox, False, False, 0)
         return tb
 
     def _pathbar_hovered(self, frame, on: bool):
@@ -19802,7 +22636,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _draw_pathbar_outline(self, w, cr):
         a = w.get_allocation()
-        fg = w.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(w.get_style_context(), Gtk.StateFlags.NORMAL)
         x, y, ww, hh, r = 0.5, 0.5, a.width - 1.0, a.height - 1.0, 6.0
         cr.new_sub_path()
         cr.arc(x + ww - r, y + r, r, -math.pi / 2, 0)
@@ -19830,14 +22664,10 @@ class MainWindow(Gtk.ApplicationWindow):
             t = self.tab
             if not t.back:
                 return True
-            m = Gtk.Menu()
-            for i, p in enumerate(reversed(t.back[-15:])):
-                it = Gtk.MenuItem(label=self.display_path(p))
-                it.connect("activate", lambda it, n=i + 1: self.go_back(n))
-                m.append(it)
-            m.attach_to_widget(btn, None)
-            m.show_all()
-            m.popup_at_pointer(event)
+            # "_" marks a mnemonic in a menu label, so the ones in a path are doubled to show as they are
+            m = build_menu([(self.display_path(p).replace("_", "__"), lambda n=i + 1: self.go_back(n))
+                            for i, p in enumerate(reversed(t.back[-15:]))])
+            popup_menu(m, btn, event)
             return True
         return False
 
@@ -19845,18 +22675,18 @@ class MainWindow(Gtk.ApplicationWindow):
         t = self.tab
         if t is None:
             return
-        for c in self.crumbs.get_children():
-            self.crumbs.remove(c)
+        for c in child_widgets(self.crumbs):
+            take_out(self.crumbs, c)
         for label, p in self._crumb_list(t.path):
             b = Gtk.Button(label=label)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            flat_button(b)
             b.connect("clicked", lambda w, pp=p: self.navigate(pp))
-            b.connect("button-press-event", lambda w, e, pp=p: (self.new_tab(pp) or True) if e.button == 2 else False)
-            self.crumbs.pack_start(b, False, False, 0)
+            on_event(b, "button-press-event", lambda w, e, pp=p: (self.new_tab(pp) or True) if e.button == 2 else False)
+            put(self.crumbs, b, False, False, 0)
             arrow = Gtk.Label(label="›")
-            arrow.get_style_context().add_class("dim-label")
-            self.crumbs.pack_start(arrow, False, False, 2)
-        self.crumbs.show_all()
+            css_class(arrow, "dim-label")
+            put(self.crumbs, arrow, False, False, 2)
+        show_all(self.crumbs)
         self.searchbox.set_placeholder_text(f"Search {self.display_path(t.path)}")
         if not t.search:
             self.searchbox.set_text("")
@@ -19938,15 +22768,15 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ command bar (Windows 11 style)
     def _cmd_button(self, icon: str, label: str, cb: Callable, tip: str = "", menu_cb: Optional[Callable] = None):
         b = Gtk.Button()
-        b.set_relief(Gtk.ReliefStyle.NONE)
-        b.get_style_context().add_class("cmd")
+        flat_button(b)
+        css_class(b, "cmd")
         box = Gtk.Box(spacing=6)
-        box.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON), False, False, 0)
+        put(box, icon_image(icon, "button"), False, False, 0)
         if label:
-            box.pack_start(Gtk.Label(label=label), False, False, 0)
+            put(box, Gtk.Label(label=label), False, False, 0)
         if menu_cb:
-            box.pack_start(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.MENU), False, False, 0)
-        b.add(box)
+            put(box, icon_image("pan-down-symbolic", "menu"), False, False, 0)
+        set_child(b, box)
         if isinstance(tip, tuple):
             self.tip(b, *tip)                     # (text, shortcut action): the tooltip names the current shortcut
         else:
@@ -19959,32 +22789,31 @@ class MainWindow(Gtk.ApplicationWindow):
         return b
 
     def _popup_under(self, widget, menu: Gtk.Menu):
-        menu.attach_to_widget(widget, None)
-        menu.popup_at_widget(widget, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+        popup_menu(menu, widget, where="under")
 
     def _build_commandbar(self):
         bar = Gtk.Box(spacing=2)
-        bar.get_style_context().add_class("commandbar")
+        css_class(bar, "commandbar")
         bar.set_margin_start(6)
         bar.set_margin_end(6)
         bar.set_margin_bottom(4)
         sep = lambda: Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=4, margin_end=4)
-        bar.pack_start(self._cmd_button("list-add-symbolic", "New", None, "New folder or item", lambda: self._new_item_spec_with_folder()), False, False, 0)
-        bar.pack_start(sep(), False, False, 0)
+        put(bar, self._cmd_button("list-add-symbolic", "New", None, "New folder or item", lambda: self._new_item_spec_with_folder()), False, False, 0)
+        put(bar, sep(), False, False, 0)
         for icon, lab, cb, tip in (("edit-cut-symbolic", "", lambda: self.copy_sel("cut"), ("Cut", "cut")),
                                    ("edit-copy-symbolic", "", lambda: self.copy_sel("copy"), ("Copy", "copy")),
                                    ("edit-paste-symbolic", "", lambda: self.paste(), ("Paste", "paste")),
                                    ("document-edit-symbolic", "", lambda: self.tab.start_rename(), ("Rename", "rename")),
                                    ("user-trash-symbolic", "", lambda: self.delete(), ("Delete", "delete"))):
-            bar.pack_start(self._cmd_button(icon, lab, cb, tip), False, False, 0)
-        bar.pack_start(self._cmd_button("emblem-shared-symbolic", "", None, "Share", lambda: self.share_spec()), False, False, 0)
-        bar.pack_start(sep(), False, False, 0)
-        bar.pack_start(self._cmd_button("view-sort-descending-symbolic", "Sort", None, "Sort by", lambda: self.menu_spec("view")[6]["sub"]), False, False, 0)
-        bar.pack_start(self._cmd_button("view-grid-symbolic", "View", None, "Layout", lambda: self.menu_spec("view")[5]["sub"] + ["-"] + self.menu_spec("view")[11:14]), False, False, 0)
-        bar.pack_start(self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, ("Show two folders side by side", "split")), False, False, 0)
-        bar.pack_start(self._cmd_button("view-more-symbolic", "", None, "More", lambda: self.menu_spec("home")), False, False, 0)
-        bar.pack_end(self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), ("Details pane", "details_pane")), False, False, 0)
-        bar.pack_end(self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), ("Preview pane", "preview_pane")), False, False, 0)
+            put(bar, self._cmd_button(icon, lab, cb, tip), False, False, 0)
+        put(bar, self._cmd_button("emblem-shared-symbolic", "", None, "Share", lambda: self.share_spec()), False, False, 0)
+        put(bar, sep(), False, False, 0)
+        put(bar, self._cmd_button("view-sort-descending-symbolic", "Sort", None, "Sort by", lambda: self.menu_spec("view")[6]["sub"]), False, False, 0)
+        put(bar, self._cmd_button("view-grid-symbolic", "View", None, "Layout", lambda: self.menu_spec("view")[5]["sub"] + ["-"] + self.menu_spec("view")[11:14]), False, False, 0)
+        put(bar, self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, ("Show two folders side by side", "split")), False, False, 0)
+        put(bar, self._cmd_button("view-more-symbolic", "", None, "More", lambda: self.menu_spec("home")), False, False, 0)
+        put_end(bar, self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), ("Details pane", "details_pane")), False, False, 0)
+        put_end(bar, self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), ("Preview pane", "preview_pane")), False, False, 0)
         return bar
 
     def _new_item_spec_with_folder(self):
@@ -20004,9 +22833,9 @@ class MainWindow(Gtk.ApplicationWindow):
         arrow.set_fixed_size(16, -1)
         pix = Gtk.CellRendererPixbuf()
         txt = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
-        col.pack_start(arrow, False)
-        col.pack_start(pix, False)
-        col.pack_start(txt, True)
+        put(col, arrow, False)
+        put(col, pix, False)
+        put(col, txt, True)
         col.set_cell_data_func(arrow, self._nav_arrow, None)
         col.set_cell_data_func(pix, self._nav_icon, None)
         col.set_cell_data_func(txt, self._nav_text, None)
@@ -20021,15 +22850,14 @@ class MainWindow(Gtk.ApplicationWindow):
         tv.connect("row-expanded", lambda t, it, p: t.queue_draw())
         tv.connect("row-collapsed", lambda t, it, p: t.queue_draw())
         tv.connect("row-activated", self._nav_activate)
-        tv.connect("button-press-event", self._nav_button)
-        tv.connect("key-press-event", self._nav_key)
-        tv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        tv.connect("drag-data-received", self._nav_drop)
+        on_event(tv, "button-press-event", self._nav_button)
+        on_event(tv, "key-press-event", self._nav_key)
+        file_drop_target(tv, self._nav_drop)
         self.rebuild_nav()
         sw = Gtk.ScrolledWindow(hexpand=False, vexpand=True)
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        sw.add(tv)
-        sw.get_style_context().add_class("navpane")
+        set_child(sw, tv)
+        css_class(sw, "navpane")
         return sw
 
     def rebuild_nav(self):
@@ -20119,7 +22947,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.nav_store.append(it, [None])
 
     def _nav_tooltip(self, tv, x, y, keyboard, tip):
-        ok, mx, my, model, path, it = tv.get_tooltip_context(x, y, keyboard)
+        ctx = tv.get_tooltip_context(x, y, keyboard)      # GTK 3: (ok, x, y, model, path, iter); GTK 4 has no x, y
+        ok, model, path, it = ctx[0], ctx[-3], ctx[-2], ctx[-1]
         if not ok:
             return False
         n = model[it][0]
@@ -20219,7 +23048,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         self.nav_store.row_changed(self.nav_store.get_path(child), child)
                 child = nxt
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return False
 
     def _nav_node_at(self, event):
@@ -20239,12 +23068,12 @@ class MainWindow(Gtk.ApplicationWindow):
             self.navigate(node.path)       # expanding is only done by the twirly, like Explorer
 
     def _nav_button(self, tv, event):
-        if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+        if event.button == 1 and event.type == EV_PRESS2:
             node, _ = self._nav_node_at(event)
             if node and node.kind == "file" and node.path:
                 self.open_file(entry_for_path(node.path))
                 return True
-        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
+        if event.button == 1 and event.type == EV_PRESS:
             hit = tv.get_path_at_pos(int(event.x), int(event.y))
             if hit:
                 path, col, cx, cy = hit
@@ -20299,22 +23128,21 @@ class MainWindow(Gtk.ApplicationWindow):
             if node and node.path == TRASH and uris:
                 paths = [Gio.File.new_for_uri(u).get_path() for u in uris]
                 self.run_op("trash", [p for p in paths if p], None)
-                Gtk.drag_finish(ctx, True, False, t)
+                drag_finish(ctx, True, t)
                 return
-            Gtk.drag_finish(ctx, False, False, t)
+            drag_finish(ctx, False, t)
             return
         paths = [p for p in (Gio.File.new_for_uri(u).get_path() for u in uris) if p]
         kind = decide_drop(paths, node.path, tv)
         ok = bool(kind) and self.transfer(paths, node.path, kind)
-        Gtk.drag_finish(ctx, ok, False, t)
+        drag_finish(ctx, ok, t)
 
     def nav_context_menu(self, node: NavNode, path, event):
         p = node.path
         if node.kind == "volume":                      # a removable volume that isn't mounted yet
             spec = [("_Mount", lambda: self.mount_volume(node.volume))]
             menu = build_menu(spec)
-            menu.attach_to_widget(self.nav_tree, None)
-            menu.popup_at_pointer(event)
+            popup_menu(menu, self.nav_tree, event)
             return
         pinned = p in self.cfg["pinned"]
         spec = [("_Open", lambda: self.navigate(p)), ("Open in new _tab", lambda: self.new_tab(p)),
@@ -20332,8 +23160,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if node.kind == "network":
             spec += [("_Disconnect (unmount)", lambda: self.unmount(p))]
         menu = build_menu(spec)
-        menu.attach_to_widget(self.nav_tree, None)
-        menu.popup_at_pointer(event)
+        popup_menu(menu, self.nav_tree, event)
 
     # ------------------------------------------------------------------ network
     def net_entries(self) -> List[Entry]:
@@ -20359,7 +23186,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     e.type = "unavailable"
             found = network_browse()
             GLib.idle_add(lambda: self._net_browse_done(t, found) or False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return out
 
     def _net_browse_done(self, t: FolderView, found: List[Entry]):
@@ -20455,41 +23282,41 @@ class MainWindow(Gtk.ApplicationWindow):
             total = 0
         d = Gtk.Dialog(title=f"Format {label}", transient_for=self, modal=True)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Format", Gtk.ResponseType.OK)
-        d.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class("destructive-action")
+        css_class(d.get_widget_for_response(Gtk.ResponseType.OK), "destructive-action")
         box = d.get_content_area()
-        box.set_border_width(12)
+        set_margins(box, 12)
         box.set_spacing(8)
         warn = Gtk.Label(xalign=0, wrap=True)
         warn.set_markup(f"<b>Everything on {GLib.markup_escape_text(label)} ({dev}, {fmt_size(total)}) will be erased.</b>\nThis cannot be undone.")
-        box.pack_start(warn, False, False, 0)
-        box.pack_start(Gtk.Label(label="File system:", xalign=0), False, False, 0)
+        put(box, warn, False, False, 0)
+        put(box, Gtk.Label(label="File system:", xalign=0), False, False, 0)
         combo = Gtk.ComboBoxText()
         avail = [(k, desc) for k, desc, _pkg in FORMAT_CHOICES if mkfs_available(k)]
         for k, desc in avail:
             combo.append(k, desc)
         if avail:
             combo.set_active(0)
-        box.pack_start(combo, False, False, 0)
+        put(box, combo, False, False, 0)
         missing = [f"{desc.split(' — ')[0]} (package: {pkg})" for k, desc, pkg in FORMAT_CHOICES if not mkfs_available(k)]
         if missing:
             ml = Gtk.Label(xalign=0, wrap=True)
             ml.set_markup("<small>Not available until installed: " + GLib.markup_escape_text(", ".join(missing)) + "</small>")
-            box.pack_start(ml, False, False, 0)
-        box.pack_start(Gtk.Label(label="Volume label:", xalign=0), False, False, 0)
+            put(box, ml, False, False, 0)
+        put(box, Gtk.Label(label="Volume label:", xalign=0), False, False, 0)
         name = Gtk.Entry(text=re.sub(r"[^A-Za-z0-9_ -]", "", label)[:32] or "USB", activates_default=True)
-        box.pack_start(name, False, False, 0)
+        put(box, name, False, False, 0)
         quick = Gtk.CheckButton(label="Quick format (don't overwrite existing data)", active=True)
-        box.pack_start(quick, False, False, 0)
+        put(box, quick, False, False, 0)
         if total > 64 << 30:
-            box.pack_start(Gtk.Label(label=f"This drive is large. Type its current name ({label}) to confirm:", xalign=0, wrap=True), False, False, 0)
+            put(box, Gtk.Label(label=f"This drive is large. Type its current name ({label}) to confirm:", xalign=0, wrap=True), False, False, 0)
             confirm = Gtk.Entry()
-            box.pack_start(confirm, False, False, 0)
+            put(box, confirm, False, False, 0)
         else:
             confirm = None
         d.set_default_response(Gtk.ResponseType.OK)
-        d.show_all()
+        show_all(d)
         while True:
-            r = d.run()
+            r = run_dialog(d)
             if r != Gtk.ResponseType.OK:
                 d.destroy()
                 return
@@ -20503,10 +23330,10 @@ class MainWindow(Gtk.ApplicationWindow):
         fstype, vol_label, erase = combo.get_active_id(), name.get_text().strip(), not quick.get_active()
         d.destroy()
         prog = Gtk.Dialog(title="Formatting", transient_for=self, modal=True)
-        pb = Gtk.ProgressBar(text=f"Formatting {dev} as {fstype}…", show_text=True, margin=16)
-        prog.get_content_area().pack_start(pb, False, False, 0)
+        pb = with_margins(Gtk.ProgressBar(text=f"Formatting {dev} as {fstype}…", show_text=True), 16)
+        put(prog.get_content_area(), pb, False, False, 0)
         prog.set_default_size(380, -1)
-        prog.show_all()
+        show_all(prog)
         pulse = GLib.timeout_add(100, lambda: (pb.pulse(), True)[1])
 
         def done(err):
@@ -20568,19 +23395,20 @@ class MainWindow(Gtk.ApplicationWindow):
     def _build_side(self):
         """Right-hand side: Preview on top, a Quick-view properties card below, in a resizable vertical paned."""
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.get_style_context().add_class("sidepane")
+        css_class(outer, "sidepane")
         self.side_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         self.side_paned.set_wide_handle(False)
-        outer.pack_start(self.side_paned, True, True, 0)
+        put(outer, self.side_paned, True, True, 0)
 
         # ---- preview
-        pv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=6)
+        pv = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 6)
         self.preview_box = pv
         self.preview_caption = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.preview_caption.get_style_context().add_class("dim-label")
-        pv.pack_start(self.preview_caption, False, False, 0)
+        css_class(self.preview_caption, "dim-label")
+        put(pv, self.preview_caption, False, False, 0)
         self.preview_stack = Gtk.Stack()
-        self.preview_stack.set_homogeneous(False)           # minimum = the visible child's, not the biggest child's
+        if not GTK4:                                        # GTK 4 has only the two calls below
+            self.preview_stack.set_homogeneous(False)       # minimum = the visible child's, not the biggest child's
         self.preview_stack.set_hhomogeneous(False)
         self.preview_stack.set_vhomogeneous(False)
         # Transitions are done by snapshot: when a new preview lands, a picture of what the pane showed a
@@ -20592,18 +23420,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.preview_overlay = Gtk.Overlay()
         self._snap_surface = None
         self._snap_alpha = 0.0
+        # No snapshot until the pane has been painted on screen at least once (see _take_snapshot)
+        self._pv_painted = False
+        self._pv_arming = False
+        on_draw_over(self.preview_stack, self._pv_drawn)
+        on_event(self, "unmap-event", self._pv_unpainted)
         # always shown (and therefore realised and allocated from the start): a widget first shown at the
         # moment of a fade is not allocated until the next layout pass and misses the first frames
         self.snap_area = Gtk.DrawingArea()
-        self.snap_area.set_has_window(False)        # no GdkWindow of its own → it can never intercept input
-        self.snap_area.set_can_focus(False)
-        self.snap_area.set_app_paintable(True)
-        self.snap_area.connect("draw", self._draw_snapshot)
+        see_through(self.snap_area)                 # input goes to the preview underneath
+        on_draw(self.snap_area, self._draw_snapshot)
         self.preview_overlay.add_overlay(self.snap_area)
-        self.preview_overlay.set_overlay_pass_through(self.snap_area, True)
+        if not GTK4:
+            self.preview_overlay.set_overlay_pass_through(self.snap_area, True)
         self.preview_image = FitImage()
-        self.preview_image.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        self.preview_image.connect("button-press-event", self._preview_image_click)
+        add_event_mask(self.preview_image, EVMASK.BUTTON_PRESS_MASK)
+        on_event(self.preview_image, "button-press-event", self._preview_image_click)
         if GtkSource is not None:
             self.preview_text = GtkSource.View.new_with_buffer(GtkSource.Buffer())
             self.preview_text.set_show_line_numbers(True)
@@ -20621,43 +23453,43 @@ class MainWindow(Gtk.ApplicationWindow):
         self.preview_text.set_cursor_visible(False)
         self.preview_text.set_wrap_mode(Gtk.WrapMode.NONE)
         self.preview_text.set_left_margin(6)
-        self.preview_text.connect("key-press-event", self._edit_key)
+        on_event(self.preview_text, "key-press-event", self._edit_key)
         tsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        tsw.add(self.preview_text)
+        set_child(tsw, self.preview_text)
         # quick-edit toolbar: Edit toggle · find · prev/next · Save · Revert
         tb = Gtk.Box(spacing=4)
-        tb.get_style_context().add_class("edit-toolbar")
+        css_class(tb, "edit-toolbar")
         self.edit_toggle = Gtk.ToggleButton(label="Edit")
         self.edit_toggle.set_tooltip_text("Edit this text file in place (Ctrl+S saves)")
         self.edit_toggle.connect("toggled", self._edit_toggled)
-        tb.pack_start(self.edit_toggle, False, False, 0)
+        put(tb, self.edit_toggle, False, False, 0)
         self.edit_badge = Gtk.Label(label="READ-ONLY")
-        self.edit_badge.get_style_context().add_class("edit-badge")
-        tb.pack_start(self.edit_badge, False, False, 2)
+        css_class(self.edit_badge, "edit-badge")
+        put(tb, self.edit_badge, False, False, 2)
         self.find_entry = Gtk.SearchEntry(placeholder_text="Find in file", width_chars=14, hexpand=True)
         self.find_entry.connect("search-changed", lambda e: self._find(1, from_start=True))
         self.find_entry.connect("activate", lambda e: self._find(1))
-        self.find_entry.connect("key-press-event", lambda w, ev: (self._find(-1) or True) if ev.keyval == Gdk.KEY_Return and ev.state & Gdk.ModifierType.SHIFT_MASK else False)
-        tb.pack_start(self.find_entry, True, True, 0)
+        on_event(self.find_entry, "key-press-event", lambda w, ev: (self._find(-1) or True) if ev.keyval == Gdk.KEY_Return and ev.state & Gdk.ModifierType.SHIFT_MASK else False)
+        put(tb, self.find_entry, True, True, 0)
         for icon, d, tip in (("go-up-symbolic", -1, "Previous match (Shift+Enter)"), ("go-down-symbolic", 1, "Next match (Enter)")):
-            b = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.MENU)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            b = icon_button(icon, "menu")
+            flat_button(b)
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda w, dd=d: self._find(dd))
-            tb.pack_start(b, False, False, 0)
+            put(tb, b, False, False, 0)
         self.find_count = Gtk.Label()
-        self.find_count.get_style_context().add_class("dim-label")
-        tb.pack_start(self.find_count, False, False, 4)
+        css_class(self.find_count, "dim-label")
+        put(tb, self.find_count, False, False, 4)
         self.btn_save = Gtk.Button(label="Save", sensitive=False)
         self.btn_save.set_tooltip_text("Save (Ctrl+S)")
         self.btn_save.connect("clicked", lambda b: self.save_edit())
         self.btn_revert = Gtk.Button(label="Revert", sensitive=False)
         self.btn_revert.connect("clicked", lambda b: self.revert_edit())
-        tb.pack_end(self.btn_save, False, False, 0)
-        tb.pack_end(self.btn_revert, False, False, 0)
+        put_end(tb, self.btn_save, False, False, 0)
+        put_end(tb, self.btn_revert, False, False, 0)
         psw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        psw.pack_start(clip_width(tb), False, False, 0)
-        psw.pack_start(tsw, True, True, 0)
+        put(psw, clip_width(tb), False, False, 0)
+        put(psw, tsw, True, True, 0)
         self.edit_path: Optional[str] = None
         self.edit_entry: Optional[Entry] = None
         self.edit_dirty = False
@@ -20667,14 +23499,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.find_cur_tag = buf.create_tag("findcur", background="#ff8c00", foreground="#000000")
         buf.connect("changed", self._edit_changed)
         self.preview_info = Gtk.Label(justify=Gtk.Justification.CENTER, wrap=True)
-        self.preview_info.get_style_context().add_class("dim-label")
+        css_class(self.preview_info, "dim-label")
         self.preview_big_icon = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER)
         self.preview_icon_img = FitImage(128)
         self.preview_icon_img.set_size_request(-1, 48)
         self.preview_icon_lab = Gtk.Label(justify=Gtk.Justification.CENTER, wrap=True)
-        self.preview_icon_lab.get_style_context().add_class("dim-label")
-        self.preview_big_icon.pack_start(self.preview_icon_img, True, True, 0)
-        self.preview_big_icon.pack_start(self.preview_icon_lab, False, False, 0)
+        css_class(self.preview_icon_lab, "dim-label")
+        put(self.preview_big_icon, self.preview_icon_img, True, True, 0)
+        put(self.preview_big_icon, self.preview_icon_lab, False, False, 0)
         self.preview_folder = Gtk.ListStore(GObject.TYPE_PYOBJECT, str)     # entry, size text
         ftv = Gtk.TreeView(model=self.preview_folder, headers_visible=False)
         ftv.set_activate_on_single_click(False)
@@ -20686,8 +23518,8 @@ class MainWindow(Gtk.ApplicationWindow):
         fpix.set_fixed_size(22, 22)
         ftxt.set_fixed_size(-1, 24)
         fsize_fixed = 24
-        fcol.pack_start(fpix, False)
-        fcol.pack_start(ftxt, True)
+        put(fcol, fpix, False)
+        put(fcol, ftxt, True)
         fcol.set_expand(True)
         fcol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16, m[it][0])), None)
@@ -20704,42 +23536,42 @@ class MainWindow(Gtk.ApplicationWindow):
         # (rows of an archive listing have no path of their own: nothing to open)
         ftv.connect("row-activated", lambda t, p, c: self.preview_folder[p][0].path and self.activate_entry(self.preview_folder[p][0]))
         fsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        fsw.add(ftv)
+        set_child(fsw, ftv)
         self.model_view = None            # created on the first model preview (GL context setup is ~300 ms)
         mbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.model_box = mbox
         mbar = Gtk.Box(spacing=6)
         self.model_count = Gtk.Label(xalign=0, hexpand=True)
-        self.model_count.get_style_context().add_class("dim-label")
-        mbar.pack_start(self.model_count, True, True, 4)
+        css_class(self.model_count, "dim-label")
+        put(mbar, self.model_count, True, True, 4)
         self.model_full_toggle = Gtk.ToggleButton(label="All triangles")
         self.model_full_toggle.set_tooltip_text("Override the 500,000-face preview cap and load every triangle.\n"
                                                 "Heavy meshes orbit slowly in the software renderer.")
-        self.model_full_toggle.get_style_context().add_class("flat")
+        css_class(self.model_full_toggle, "flat")
         self.model_full_toggle.connect("toggled", self._toggle_model_full)
-        mbar.pack_end(self.model_full_toggle, False, False, 0)
+        put_end(mbar, self.model_full_toggle, False, False, 0)
         self.model_bd_btn = Gtk.Button(label="Breakdown")
         self.model_bd_btn.set_tooltip_text("Show what's in this scene: outliner, references, materials, settings")
-        self.model_bd_btn.get_style_context().add_class("flat")
+        css_class(self.model_bd_btn, "flat")
         self.model_bd_btn.connect("clicked", lambda b: self._switch_blend_view("breakdown"))
-        self.model_bd_btn.set_no_show_all(True)
-        mbar.pack_end(self.model_bd_btn, False, False, 0)
+        start_hidden(self.model_bd_btn, True)
+        put_end(mbar, self.model_bd_btn, False, False, 0)
         self.seq_button = Gtk.Button(label="Preview as sequence")
         self.seq_button.set_tooltip_text("Play the selected caches as frames of one sequence, in name order")
-        self.seq_button.get_style_context().add_class("flat")
+        css_class(self.seq_button, "flat")
         self.seq_button.connect("clicked", self._seq_button_clicked)
-        self.seq_button.set_no_show_all(True)
-        mbar.pack_end(self.seq_button, False, False, 0)
-        mbox.pack_start(clip_width(mbar), False, False, 0)
+        start_hidden(self.seq_button, True)
+        put_end(mbar, self.seq_button, False, False, 0)
+        put(mbox, clip_width(mbar), False, False, 0)
         self.model_slot = Gtk.Box()
-        mbox.pack_start(self.model_slot, True, True, 0)
+        put(mbox, self.model_slot, True, True, 0)
         # time slider for a selected sequence of caches (several .vdb / .bgeo frames selected together)
         sbar = Gtk.Box(spacing=4)
-        self.seq_play = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
-        self.seq_play.get_style_context().add_class("flat")
+        self.seq_play = icon_button("media-playback-start-symbolic", "button")
+        css_class(self.seq_play, "flat")
         self.seq_play.set_tooltip_text("Play / pause (Space in the viewer; ← → step a frame)")
         self.seq_play.connect("clicked", lambda b: self._seq_toggle_play())
-        sbar.pack_start(self.seq_play, False, False, 0)
+        put(sbar, self.seq_play, False, False, 0)
         self.seq_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
         self.seq_scale.set_draw_value(False)
         self.seq_scale.set_digits(0)
@@ -20749,63 +23581,63 @@ class MainWindow(Gtk.ApplicationWindow):
         self.seq_scale.set_show_fill_level(True)
         self.seq_scale.set_restrict_to_fill_level(False)
         self.seq_scale.connect("value-changed", self._seq_scrub)
-        sbar.pack_start(self.seq_scale, True, True, 0)
+        put(sbar, self.seq_scale, True, True, 0)
         # Fixed width: the slider must not shift as frame numbers change length during playback (tabular
         # digits). The file name lives in its own row above the viewer, so it never squeezes the slider.
         self.seq_counter = Gtk.Label(xalign=1)
         self.seq_counter.set_width_chars(9)
         self.seq_counter.set_max_width_chars(9)
         self.seq_counter.set_attributes(_tabular_digits())
-        sbar.pack_start(self.seq_counter, False, False, 0)
+        put(sbar, self.seq_counter, False, False, 0)
         self.seq_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.seq_label.get_style_context().add_class("dim-label")
+        css_class(self.seq_label, "dim-label")
         self.seq_label.set_margin_start(4)
-        self.seq_label.set_no_show_all(True)
+        start_hidden(self.seq_label, True)
         self.seq_fps = Gtk.SpinButton.new_with_range(1, 60, 1)
         self.seq_fps.set_width_chars(2)
         self.seq_fps.set_value(float(self.cfg.get("seq_fps", 24)))
         self.seq_fps.set_tooltip_text("Playback speed (frames per second)")
         self.seq_fps.connect("value-changed", self._seq_fps_changed)
-        sbar.pack_start(self.seq_fps, False, False, 0)
-        sbar.pack_start(Gtk.Label(label="fps"), False, False, 0)
-        sbar.show_all()
-        sbar.set_no_show_all(True)
+        put(sbar, self.seq_fps, False, False, 0)
+        put(sbar, Gtk.Label(label="fps"), False, False, 0)
+        show_all(sbar)
+        start_hidden(sbar, True)
         sbar.hide()
         self.seq_bar = sbar
         self._seq = None
         self.connect("notify::is-active", self._seq_focus_changed)
-        mbox.pack_start(sbar, False, False, 0)
-        mbox.pack_start(self.seq_label, False, False, 0)
-        mbox.reorder_child(self.seq_label, 1)            # current frame's file name: between the bar and the viewer
+        put(mbox, sbar, False, False, 0)
+        put(mbox, self.seq_label, False, False, 0)
+        move_child(mbox, self.seq_label, 1)            # current frame's file name: between the bar and the viewer
         mhint = Gtk.Label(wrap=True, lines=2, ellipsize=Pango.EllipsizeMode.END, justify=Gtk.Justification.CENTER, max_width_chars=30)
         mhint.set_markup("<small>Drag to orbit · middle-drag to pan · wheel to zoom\ndouble-click resets · W wireframe · S flat / smooth</small>")
         mhint.set_tooltip_text("Left drag: orbit\nMiddle drag: pan\nWheel or Alt + right drag: zoom\nDouble-click: reset the view\nW: wireframe\nS: flat / smooth shading")
-        mhint.get_style_context().add_class("dim-label")
-        mbox.pack_start(mhint, False, False, 0)
+        css_class(mhint, "dim-label")
+        put(mbox, mhint, False, False, 0)
         self.preview_stack.add_named(mbox, "model")
         self.preview_stack.add_named(self._build_breakdown_page(), "breakdown")
         # image page = the picture plus (PDFs only) a page stepper underneath
         ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        ibox.pack_start(self.preview_image, True, True, 0)
+        put(ibox, self.preview_image, True, True, 0)
         self.pdf_bar = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
-        self.pdf_prev = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU)
-        self.pdf_next = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU)
+        self.pdf_prev = icon_button("go-previous-symbolic", "menu")
+        self.pdf_next = icon_button("go-next-symbolic", "menu")
         self.pdf_label = Gtk.Label()
-        self.pdf_label.get_style_context().add_class("dim-label")
+        css_class(self.pdf_label, "dim-label")
         for b, d, tip in ((self.pdf_prev, -1, "Previous page (or scroll up over the page)"), (self.pdf_next, 1, "Next page (or scroll down over the page)")):
-            b.get_style_context().add_class("flat")
+            css_class(b, "flat")
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda w, d=d: self._pdf_go(d))
-        self.pdf_bar.pack_start(self.pdf_prev, False, False, 0)
-        self.pdf_bar.pack_start(self.pdf_label, False, False, 0)
-        self.pdf_bar.pack_start(self.pdf_next, False, False, 0)
-        self.pdf_bar.show_all()
-        self.pdf_bar.set_no_show_all(True)
+        put(self.pdf_bar, self.pdf_prev, False, False, 0)
+        put(self.pdf_bar, self.pdf_label, False, False, 0)
+        put(self.pdf_bar, self.pdf_next, False, False, 0)
+        show_all(self.pdf_bar)
+        start_hidden(self.pdf_bar, True)
         self.pdf_bar.hide()
-        ibox.pack_start(self.pdf_bar, False, False, 0)
+        put(ibox, self.pdf_bar, False, False, 0)
         self._pdf = None                  # {'entry', 'page', 'pages'} while a multi-page PDF is on screen
-        self.preview_image.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
-        self.preview_image.connect("scroll-event", self._pdf_scroll)
+        add_event_mask(self.preview_image, EVMASK.SCROLL_MASK | EVMASK.SMOOTH_SCROLL_MASK)
+        on_event(self.preview_image, "scroll-event", self._pdf_scroll)
         self.preview_stack.add_named(ibox, "image")
         self.video = VideoPreview() if gst_sink_available() else None
         if self.video is not None:
@@ -20813,44 +23645,50 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.video is not None:
             self.preview_stack.add_named(self.video, "video")
         self.preview_stack.add_named(psw, "text")
+        self.preview_info.set_text("Select a file to preview")      # what a new window opens on
         self.preview_stack.add_named(self.preview_info, "info")
         self.preview_stack.add_named(self.preview_big_icon, "icon")
         self.preview_stack.add_named(fsw, "folder")
-        self.preview_overlay.add(self.preview_stack)
-        pv.pack_start(self.preview_overlay, True, True, 0)
+        set_child(self.preview_overlay, self.preview_stack)
+        put(pv, self.preview_overlay, True, True, 0)
         # shrink=True on both halves: the divider can be dragged until either the preview or the quick view
         # is almost closed, regardless of what the current content would like as its minimum size
-        self.side_paned.pack1(pv, True, False)
+        pane_first(self.side_paned, pv, True, False)
 
         # ---- quick view (properties card)
-        qv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        qv = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), 8)
         self.details_box = qv
         head = Gtk.Box(spacing=8)
         self.qv_icon = Gtk.Image()
-        head.pack_start(self.qv_icon, False, False, 0)
+        put(head, self.qv_icon, False, False, 0)
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.details_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, selectable=True)
+        # Bold through an attribute that covers the whole label, not <b> markup: with markup, GTK 4 drew only
+        # the first few letters of a middle-ellipsised name in bold.
+        bold = Pango.AttrList()
+        bold.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+        self.details_title.set_attributes(bold)
         self.qv_subtitle = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.qv_subtitle.get_style_context().add_class("dim-label")
-        tb.pack_start(self.details_title, False, False, 0)
-        tb.pack_start(self.qv_subtitle, False, False, 0)
-        head.pack_start(tb, True, True, 0)
-        qv.pack_start(head, False, False, 0)
+        css_class(self.qv_subtitle, "dim-label")
+        put(tb, self.details_title, False, False, 0)
+        put(tb, self.qv_subtitle, False, False, 0)
+        put(head, tb, True, True, 0)
+        put(qv, head, False, False, 0)
         self.details_grid = Gtk.Grid(column_spacing=10, row_spacing=3)
         qsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         qsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        qsw.add(self.details_grid)
-        qv.pack_start(qsw, True, True, 0)
+        set_child(qsw, self.details_grid)
+        put(qv, qsw, True, True, 0)
         act = Gtk.Box(spacing=4)
-        act.get_style_context().add_class("linked")
+        css_class(act, "linked")
         for lab, cb in (("Open", lambda: self.activate_entry(self.tab.current_entry() if self.tab else None)),
                         ("Open with…", self.open_with), ("Properties…", self.properties)):
             b = Gtk.Button(label=lab)
             b.connect("clicked", lambda w, c=cb: c())
-            act.pack_start(b, True, True, 0)
+            put(act, b, True, True, 0)
         self.qv_actions = act
-        qv.pack_end(act, False, False, 0)
-        self.side_paned.pack2(qv, False, False)
+        put_end(qv, act, False, False, 0)
+        pane_second(self.side_paned, qv, False, False)
         outer.set_size_request(180, -1)                       # floor only; the splitter sets the real width
         return outer
 
@@ -20904,14 +23742,14 @@ class MainWindow(Gtk.ApplicationWindow):
         win = Gtk.Window(title="Quick look", transient_for=self, destroy_with_parent=True)
         win.set_default_size(*[max(320, int(v)) for v in (self.cfg.get("quicklook_size") or [900, 680])[:2]])
         holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        holder.get_style_context().add_class("sidepane")
-        win.add(holder)
-        self.side_paned.remove(self.preview_box)
-        holder.pack_start(self.preview_box, True, True, 0)
+        css_class(holder, "sidepane")
+        set_child(win, holder)
+        take_out(self.side_paned, self.preview_box)
+        put(holder, self.preview_box, True, True, 0)
         self._ql, self._ql_size = win, None
-        win.connect("key-press-event", self._ql_key)
-        win.connect("delete-event", lambda *a: (self._ql_close(), True)[1])
-        win.connect("size-allocate", self._ql_resized)
+        on_event(win, "key-press-event", self._ql_key)
+        on_event(win, "delete-event", lambda *a: (self._ql_close(), True)[1])
+        on_resize(win, lambda: self._ql_resized(win, win.get_allocation()))
         holder.show()
         self._ql_moving = True
         self._apply_panes()
@@ -20920,6 +23758,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _path_under_pointer(self, t: FolderView):
         view = t.view
+        if not hasattr(view, "get_bin_window"):          # GTK 4 has no such windows: the keyboard cursor is used
+            return None
         outer, inner = view.get_window(), view.get_bin_window()       # the visible area / the scrolled canvas
         if outer is None or inner is None or not view.get_mapped():
             return None
@@ -20940,10 +23780,10 @@ class MainWindow(Gtk.ApplicationWindow):
         win, self._ql = self._ql, None
         if win is None:
             return
-        self.cfg["quicklook_size"] = list(win.get_size())
+        self.cfg["quicklook_size"] = list(window_size(win))
         self._drop_snapshot()
-        self.preview_box.get_parent().remove(self.preview_box)
-        self.side_paned.pack1(self.preview_box, True, False)
+        take_out(self.preview_box.get_parent(), self.preview_box)
+        pane_first(self.side_paned, self.preview_box, True, False)
         win.destroy()
         self._ql_moving = True
         self._apply_panes()
@@ -21184,7 +24024,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._show_preview("folder")             # content arrived: fade it in
                     self._preview_dir_sizes(gen, [k for k in kids if k.is_dir], fpath)
                     return False
-                GLib.timeout_add(250, lambda: (gen == self._side_gen and threading.Thread(target=flist, daemon=True).start(), False)[1])
+                GLib.timeout_add(250, lambda: (gen == self._side_gen and bg(flist), False)[1])
                 return
             self.preview_folder.clear()
             self._set_caption(e.name)
@@ -21213,7 +24053,7 @@ class MainWindow(Gtk.ApplicationWindow):
             def minfo():
                 rows = describe_media(path)
                 GLib.idle_add(lambda: (gen == self._side_gen and [self._qv_add(k, v) for k, v in rows], False)[1])
-            threading.Thread(target=minfo, daemon=True).start()
+            bg(minfo)
             return
         w = max(120, self._pv_width() - 24)
         h = max(120, self.preview_box.get_allocated_height() - 24)
@@ -21242,13 +24082,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 if gen != self._side_gen:
                     return False
                 self.pdf_bar.hide()
-                self.preview_image.set_from_pixbuf(pb)
+                image_set_pixbuf(self.preview_image, pb)
                 self._show_preview("image")
                 if dims:
                     e.extra_dims = dims
                     self._qv_set("Dimensions", f"{dims[0]} × {dims[1]} px")
                 return False
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
             return
         if e.path and e.ext.lower() in SHADER_PREVIEW_EXTS and (e.size or 0) <= (64 << 20) and shader_preview_kind(e.path):
             self._load_breakdown(e, gen, shader=True)
@@ -21272,7 +24112,7 @@ class MainWindow(Gtk.ApplicationWindow):
                        or ct.startswith(("video/", "audio/", "application/pdf"))):
             self._placeholder("Loading preview…", gen)
             path = e.path
-            threading.Thread(target=lambda: GLib.idle_add(self._extended_done, gen, e, generate_preview(path, ct, w, h)), daemon=True).start()
+            bg(lambda: GLib.idle_add(self._extended_done, gen, e, generate_preview(path, ct, w, h)))
             return
         if (ct.startswith("text/") or ct in ("application/json", "application/xml", "application/x-shellscript", "application/javascript", "application/x-yaml", "application/x-desktop")) and e.path:
             try:
@@ -21323,11 +24163,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._set_caption(cap + "  ·  click to pause")
             self._show_preview("image")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return True
 
     def _preview_image_click(self, w, event):
-        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS and self.preview_image.animating:
+        if event.button == 1 and event.type == EV_PRESS and self.preview_image.animating:
             self.preview_image.toggle_animation()
             return True
         return False
@@ -21372,7 +24212,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         fb = 0
                     self.preview_caption.set_text(txt + f"  ·  total {fmt_size(fb + sum(res.values()))}")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     # ---- quick text edit
     def _load_text(self, path: str, data: bytes, complete: bool):
@@ -21428,10 +24268,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._prompting = True
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                               text=f"Save changes to {os.path.basename(self.edit_path)}?")
-        d.format_secondary_text("Your edits in the preview pane haven't been saved.")
+        dialog_secondary(d, "Your edits in the preview pane haven't been saved.")
         d.add_buttons("_Discard", 2, "_Keep editing", Gtk.ResponseType.CANCEL, "_Save", 1)
         d.set_default_response(1)
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         self._prompting = False
         if r == 1:
@@ -21641,7 +24481,7 @@ class MainWindow(Gtk.ApplicationWindow):
             img = res["raw"]
             pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
             self.pdf_bar.hide()
-            self.preview_image.set_from_pixbuf(pb)
+            image_set_pixbuf(self.preview_image, pb)
             self._show_preview("image")
         elif "png" in res:
             try:
@@ -21653,7 +24493,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.pdf_prev.set_sensitive(self._pdf["page"] > 1)
                     self.pdf_next.set_sensitive(self._pdf["page"] < pages)
                 self.pdf_bar.set_visible(pages > 1)
-                self.preview_image.set_from_pixbuf(pb)
+                image_set_pixbuf(self.preview_image, pb)
                 self._show_preview("image")
             except GLib.Error:
                 self._preview_as_icon(e, "No preview available")
@@ -21717,7 +24557,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def done(conv):
             try:
                 if conv and req == self._pdf_req and gen == self._side_gen:
-                    self.preview_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(conv[0]))
+                    image_set_pixbuf(self.preview_image, GdkPixbuf.Pixbuf.new_from_file(conv[0]))
             except GLib.Error:
                 pass
             finally:
@@ -21727,7 +24567,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         pass
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _pdf_scroll(self, w, event):
         if not self._pdf or not self.pdf_bar.get_visible():
@@ -21755,15 +24595,15 @@ class MainWindow(Gtk.ApplicationWindow):
         g = self.details_grid
         i = len(labs)
         kl = Gtk.Label(label=key, xalign=1, yalign=0)
-        kl.get_style_context().add_class("dim-label")
+        css_class(kl, "dim-label")
         vl = Gtk.Label(label=value or "—", xalign=0, wrap=True, selectable=True, hexpand=True)
-        vl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        label_wrap_mode(vl, Pango.WrapMode.WORD_CHAR)
         vl.set_max_width_chars(34)
         g.attach(kl, 0, i, 1, 1)
         g.attach(vl, 1, i, 1, 1)
         labs[key] = vl
         self._qv_labels = labs
-        g.show_all()
+        show_all(g)
 
     def _make_model_view(self):
         """GLModelView when hardware acceleration is on and PyOpenGL imports, otherwise the software viewer."""
@@ -21773,7 +24613,7 @@ class MainWindow(Gtk.ApplicationWindow):
             v.on_cache_failed = self._gl_cache_failed
         else:
             v = ModelView()
-        v.connect("key-press-event", self._model_key)
+        on_event(v, "key-press-event", self._model_key)
         return v
 
     def _gl_cache_failed(self, m: dict, msg: str):
@@ -21814,15 +24654,15 @@ class MainWindow(Gtk.ApplicationWindow):
         want_soft = software or not (self.cfg.get("gl_preview", True) and HAVE_GL)
         cur = self.model_view
         if cur is not None and isinstance(cur, ModelView) != want_soft:
-            self.model_slot.remove(cur)
+            take_out(self.model_slot, cur)
             cur = None
         if cur is None:
             if want_soft:
                 cur = ModelView()
-                cur.connect("key-press-event", self._model_key)
+                on_event(cur, "key-press-event", self._model_key)
             else:
                 cur = self._make_model_view()
-            self.model_slot.pack_start(cur, True, True, 0)
+            put(self.model_slot, cur, True, True, 0)
             cur.show()
             self.model_view = cur
         return cur
@@ -21834,9 +24674,9 @@ class MainWindow(Gtk.ApplicationWindow):
         old = self.model_view
         m = old.model if old is not None else None
         if old is not None:
-            self.model_slot.remove(old)
+            take_out(self.model_slot, old)
         new = self._make_model_view()
-        self.model_slot.pack_start(new, True, True, 0)
+        put(self.model_slot, new, True, True, 0)
         new.show()
         self.model_view = new
         if m is not None:
@@ -21897,7 +24737,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 mv.set_model(m)
                 self._show_preview("model")
             return False
-        threading.Thread(target=mwork, daemon=True).start()
+        bg(mwork)
 
     def _toggle_model_full(self, btn):
         e = getattr(self, "_model_entry", None)
@@ -21916,27 +24756,27 @@ class MainWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         head = Gtk.Box(spacing=6)
         self.bd_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.bd_title.get_style_context().add_class("dim-label")
-        head.pack_start(self.bd_title, True, True, 4)
-        self.bd_copy = Gtk.Button.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.BUTTON)
+        css_class(self.bd_title, "dim-label")
+        put(head, self.bd_title, True, True, 4)
+        self.bd_copy = icon_button("edit-copy-symbolic", "button")
         self.bd_copy.set_tooltip_text("Copy the breakdown as text")
-        self.bd_copy.get_style_context().add_class("flat")
+        css_class(self.bd_copy, "flat")
         self.bd_copy.connect("clicked", self._bd_copy_all)
-        head.pack_end(self.bd_copy, False, False, 0)
+        put_end(head, self.bd_copy, False, False, 0)
         self.bd_3d = Gtk.Button(label="3D view")
         self.bd_3d.set_tooltip_text("Preview the geometry instead (starts Blender in the background)")
-        self.bd_3d.get_style_context().add_class("flat")
+        css_class(self.bd_3d, "flat")
         self.bd_3d.connect("clicked", lambda b: self._switch_blend_view("3d"))
-        self.bd_3d.set_no_show_all(True)
-        head.pack_end(self.bd_3d, False, False, 0)
+        start_hidden(self.bd_3d, True)
+        put_end(head, self.bd_3d, False, False, 0)
         self.bd_code_btn = Gtk.ToggleButton(label="Code")
         self.bd_code_btn.set_tooltip_text("Show the source instead of the breakdown")
-        self.bd_code_btn.get_style_context().add_class("flat")
+        css_class(self.bd_code_btn, "flat")
         self.bd_code_btn.set_active(bool(self.cfg.get("bd_code")))
         self.bd_code_btn.connect("toggled", self._bd_code_toggled)
-        self.bd_code_btn.set_no_show_all(True)
-        head.pack_end(self.bd_code_btn, False, False, 0)
-        box.pack_start(clip_width(head), False, False, 0)
+        start_hidden(self.bd_code_btn, True)
+        put_end(head, self.bd_code_btn, False, False, 0)
+        put(box, clip_width(head), False, False, 0)
         # top half: stored preview / material ball / light pattern / live GLSL; bottom half: tree or code
         self.bd_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, wide_handle=False)
         self.bd_paned.connect("notify::position", self._bd_pane_moved)
@@ -21946,37 +24786,37 @@ class MainWindow(Gtk.ApplicationWindow):
         self.bd_image = FitImage()
         self.bd_media_stack.add_named(self.bd_image, "image")
         self.bd_glsl: Optional[GLSLView] = None             # created on first use (needs a GL context)
-        media.pack_start(self.bd_media_stack, True, True, 0)
+        put(media, self.bd_media_stack, True, True, 0)
         cap = Gtk.Box(spacing=4)
         self.bd_media_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.bd_media_label.get_style_context().add_class("dim-label")
-        cap.pack_start(self.bd_media_label, True, True, 4)
-        self.bd_play = Gtk.Button.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.MENU)
-        self.bd_play.set_relief(Gtk.ReliefStyle.NONE)
+        css_class(self.bd_media_label, "dim-label")
+        put(cap, self.bd_media_label, True, True, 4)
+        self.bd_play = icon_button("media-playback-pause-symbolic", "menu")
+        flat_button(self.bd_play)
         self.bd_play.set_tooltip_text("Pause / play (double-click the picture to restart the clock)")
         self.bd_play.connect("clicked", self._bd_glsl_toggle)
-        self.bd_play.set_no_show_all(True)
-        cap.pack_end(self.bd_play, False, False, 0)
-        media.pack_start(clip_width(cap), False, False, 0)
-        media.show_all()
-        media.set_no_show_all(True)
+        start_hidden(self.bd_play, True)
+        put_end(cap, self.bd_play, False, False, 0)
+        put(media, clip_width(cap), False, False, 0)
+        show_all(media)
+        start_hidden(media, True)
         media.hide()
         self.bd_media = media
-        self.bd_paned.pack1(media, True, False)
+        pane_first(self.bd_paned, media, True, False)
         lower = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.bd_err = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        self.bd_err.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        self.bd_err.get_style_context().add_class("bd-error")
-        self.bd_err.set_no_show_all(True)
-        lower.pack_start(self.bd_err, False, False, 0)
+        label_wrap_mode(self.bd_err, Pango.WrapMode.WORD_CHAR)
+        css_class(self.bd_err, "bd-error")
+        start_hidden(self.bd_err, True)
+        put(lower, self.bd_err, False, False, 0)
         self.bd_filter = Gtk.SearchEntry()
         self.bd_filter.set_placeholder_text("Filter names, types and paths")
         self.bd_filter.connect("search-changed", self._bd_refilter)
-        lower.pack_start(self.bd_filter, False, False, 0)
+        put(lower, self.bd_filter, False, False, 0)
         self.bd_notes = Gtk.Label(xalign=0, wrap=True)
-        self.bd_notes.get_style_context().add_class("dim-label")
-        self.bd_notes.set_no_show_all(True)
-        lower.pack_start(self.bd_notes, False, False, 0)
+        css_class(self.bd_notes, "dim-label")
+        start_hidden(self.bd_notes, True)
+        put(lower, self.bd_notes, False, False, 0)
         # name, info, path, colour, visible, tooltip, key (material:N rows)
         self.bd_store = Gtk.TreeStore(str, str, str, str, bool, str, str)
         self.bd_model = self.bd_store.filter_new()
@@ -21994,11 +24834,11 @@ class MainWindow(Gtk.ApplicationWindow):
             c.set_cell_data_func(r, self._bd_cell, col)
             tv.append_column(c)
         tv.connect("row-activated", self._bd_activate)
-        tv.connect("button-press-event", self._bd_button)
+        on_event(tv, "button-press-event", self._bd_button)
         tv.get_selection().connect("changed", self._bd_selection)
         self.bd_view = tv
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         if GtkSource is not None:
             self.bd_code = GtkSource.View.new_with_buffer(GtkSource.Buffer())
             self.bd_code.set_show_line_numbers(True)
@@ -22009,15 +24849,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.bd_code.set_editable(False)
         self.bd_code.set_left_margin(6)
         csw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        csw.add(self.bd_code)
+        set_child(csw, self.bd_code)
         self.bd_lower = Gtk.Stack()
         self.bd_lower.add_named(sw, "tree")
         self.bd_lower.add_named(csw, "code")
-        lower.pack_start(self.bd_lower, True, True, 0)
-        self.bd_paned.pack2(lower, True, False)
-        self.bd_paned.connect("size-allocate", lambda w, a: self._bd_place_pane())
-        box.pack_start(self.bd_paned, True, True, 0)
-        box.show_all()
+        put(lower, self.bd_lower, True, True, 0)
+        pane_second(self.bd_paned, lower, True, False)
+        on_resize(self.bd_paned, self._bd_place_pane)
+        put(box, self.bd_paned, True, True, 0)
+        show_all(box)
         return box
 
     def _bd_cell(self, col, cell, model, it, idx):
@@ -22073,7 +24913,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._bd_set_media(res)
             self._show_preview("breakdown")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _bd_text_fallback(self, e: Entry) -> bool:
         """A shader file the reader choked on still previews as plain text."""
@@ -22137,7 +24977,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.bd_glsl.load(glsl["source"], glsl["style"])
             self.bd_media_label.set_text({"shadertoy": "Shadertoy shader", "sandbox": "Fragment shader"}.get(glsl["style"], "Shader")
                                          + " · live")
-            self.bd_play.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.MENU))
+            button_image(self.bd_play, icon_image("media-playback-pause-symbolic", "menu"))
             self.bd_play.show()
             self._bd_show_media(True)
             return
@@ -22149,7 +24989,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _bd_show_image(self, img, label: str):
         pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
-        self.bd_image.set_from_pixbuf(pb)
+        image_set_pixbuf(self.bd_image, pb)
         self.bd_media_stack.set_visible_child_name("image")
         self.bd_media_label.set_text(label)
         self.bd_media_label.set_tooltip_text(None)
@@ -22206,8 +25046,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if v is None:
             return
         v.set_playing(not v.playing)
-        btn.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic" if v.playing else "media-playback-start-symbolic",
-                                                   Gtk.IconSize.MENU))
+        button_image(btn, icon_image("media-playback-pause-symbolic" if v.playing else "media-playback-start-symbolic",
+                                                   "menu"))
 
     def _bd_selection(self, sel):
         """Picking a row in a breakdown: a material → its ball / stored preview; an outliner object → its
@@ -22241,7 +25081,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 if alive() and img is not None:
                     self._bd_show_image(img, name + (" · stored preview" if mat.get("_image") is not None else " · material ball"))
                 return False
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
         elif key.startswith("object:"):
             e = getattr(self, "_bd_entry", None)
             if e is None:
@@ -22282,7 +25122,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         self.bd_media_label.set_text(f"{name} · {mdl.get('label', '')} · {msg}")
                     else:
                         self._bd_status(f"{name} · {msg}")
-                    threading.Thread(target=mwork, daemon=True).start()
+                    bg(mwork)
                 elif not ok:
                     self._bd_status(f"{name} · {mdl.get('error', 'no geometry') if mdl else 'no geometry'}")
                 return False
@@ -22296,7 +25136,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     return False
                 self._bd_show_model(mdl, f"{name} · {mdl.get('label', '')} · via Maya", mdl.get("notes") or [])
                 return False
-            threading.Thread(target=owork, daemon=True).start()
+            bg(owork)
         elif path and os.path.splitext(path)[1].lower() in SCENE_IMAGE_EXTS:
             name = os.path.basename(path)
 
@@ -22339,7 +25179,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     size = f" · {dims[1]}"
                 tile = "" if real == path else f" · tile {os.path.basename(real)}"
                 if isinstance(img, GdkPixbuf.Pixbuf):
-                    self.bd_image.set_from_pixbuf(img)
+                    image_set_pixbuf(self.bd_image, img)
                     self.bd_media_stack.set_visible_child_name("image")
                     self.bd_media_label.set_text(name + size + tile)
                     self.bd_play.hide()
@@ -22349,14 +25189,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 else:
                     self._bd_show_image(img, name + size + tile)
                 return False
-            threading.Thread(target=twork, daemon=True).start()
+            bg(twork)
 
     def _bd_status(self, text: str):
         """A one-line message in the picture half (shown even when nothing has been pictured yet)."""
         self.bd_media_label.set_text(text)
         self.bd_media_label.set_tooltip_text(text)
         if not self.bd_media.get_visible():
-            self.bd_image.set_from_pixbuf(None)
+            image_set_pixbuf(self.bd_image, None)
             self.bd_media_stack.set_visible_child_name("image")
             self.bd_play.hide()
             self._bd_show_media(True, 60)
@@ -22366,7 +25206,7 @@ class MainWindow(Gtk.ApplicationWindow):
         mv = getattr(self, "bd_model_view", None)
         want_soft = not (self.cfg.get("gl_preview", True) and HAVE_GL) or getattr(self, "_bd_gl_broken", False)
         if mv is not None and isinstance(mv, ModelView) != want_soft:
-            self.bd_media_stack.remove(mv)
+            take_out(self.bd_media_stack, mv)
             mv = None
         if mv is None:
             if want_soft:
@@ -22494,25 +25334,17 @@ class MainWindow(Gtk.ApplicationWindow):
         tv.get_selection().select_path(hit[0])
         it = self.bd_model.get_iter(hit[0])
         name, path = self.bd_model.get_value(it, 0), self.bd_model.get_value(it, 2)
-        menu = Gtk.Menu()
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        items = [("Copy name", lambda *_: cb.set_text(name, -1))]
+        items = [("Copy name", lambda: set_clipboard_text(name))]
         if path:
-            items = [("Show in folder", lambda *_: self._bd_reveal(path)), ("Copy path", lambda *_: cb.set_text(path, -1))] + items
-        for label, fn in items:
-            mi = Gtk.MenuItem(label=label)
-            mi.connect("activate", fn)
-            menu.append(mi)
-        menu.show_all()
-        menu.attach_to_widget(tv, None)
-        menu.popup_at_pointer(event)
+            items = [("Show in folder", lambda: self._bd_reveal(path)), ("Copy path", lambda: set_clipboard_text(path))] + items
+        popup_menu(build_menu(items), tv, event)
         return True
 
     def _bd_copy_all(self, btn):
         res = getattr(self, "_bd_res", None)
         if res:
             e = getattr(self, "_bd_entry", None)
-            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(breakdown_text(res, f"{e.path if e else ''}\n{res.get('kind', '')}"), -1)
+            set_clipboard_text(breakdown_text(res, f"{e.path if e else ''}\n{res.get('kind', '')}"))
             self.flash("Breakdown copied")
 
     def _switch_blend_view(self, which: str):
@@ -22577,7 +25409,7 @@ class MainWindow(Gtk.ApplicationWindow):
             fut.cancel()
         self.seq_bar.hide()
         self.seq_label.hide()
-        self.seq_play.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON))
+        button_image(self.seq_play, icon_image("media-playback-start-symbolic", "button"))
 
     def _seq_request(self, i: int):
         s = self._seq
@@ -22740,7 +25572,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if on:
             s["timer"] = GLib.timeout_add(max(15, int(1000 / self.seq_fps.get_value())), self._seq_tick)
         icon = "media-playback-pause-symbolic" if on else "media-playback-start-symbolic"
-        self.seq_play.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+        button_image(self.seq_play, icon_image(icon, "button"))
 
     def _seq_tick(self):
         s = self._seq
@@ -22815,6 +25647,11 @@ class MainWindow(Gtk.ApplicationWindow):
         the next item loads."""
         if not self._preview_on() or not self.preview_stack.get_realized() or getattr(self, "_ql_moving", False):
             return
+        if not self._pv_painted:
+            # Nothing of ours is on screen yet (the window is just starting up, or is minimised). Reading the
+            # window's pixels now fails without an error and hands back uninitialised memory, which then sat
+            # in the pane for a moment at startup as coloured garbage. There is nothing to fade from anyway.
+            return
         if self._ql is not None:
             # No crossfade in the quick look window. Reading pixels back from that window aborts inside cairo
             # ("cairo_surface_mark_dirty_rectangle: ! _cairo_surface_has_mime_data"), which takes the app down.
@@ -22882,6 +25719,22 @@ class MainWindow(Gtk.ApplicationWindow):
             bench(f"snapshot failed: {ex}")
             self._snap_surface = None
 
+    def _pv_drawn(self, *_a):
+        """The preview pane was drawn: once that frame is finished its pixels can be read back."""
+        if not self._pv_painted and not self._pv_arming:
+            self._pv_arming = True
+
+            def ready():
+                self._pv_arming = False
+                self._pv_painted = self.get_mapped()
+                return False
+            GLib.idle_add(ready, priority=GLib.PRIORITY_LOW)
+        return False
+
+    def _pv_unpainted(self, *_a):
+        self._pv_painted = False
+        return False
+
     def _drop_snapshot(self):
         """Discard a held snapshot without a fade (the content under it is unchanged)."""
         self._snap_surface = None
@@ -22925,7 +25778,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _preview_as_icon(self, e: Entry, note: str):
         pb = ICONS.pixbuf(e.icon, 128, e)
-        self.preview_icon_img.set_from_pixbuf(pb)
+        image_set_pixbuf(self.preview_icon_img, pb)
         self.preview_icon_lab.set_text(note)
         self._show_preview("icon")
 
@@ -22937,16 +25790,16 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _update_details(self, sel: List[Entry]):
         g = self.details_grid
-        for c in g.get_children():
-            g.remove(c)
+        for c in child_widgets(g):
+            take_out(g, c)
         self._qv_labels = {}
         t = self.tab
         gen = self._side_gen
         self.qv_actions.set_sensitive(bool(sel))
         f_long = "%A, %B %d, %Y  %H:%M"
         if not sel:
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(Gio.ThemedIcon.new("folder"), 32))
-            self.details_title.set_markup(f"<b>{GLib.markup_escape_text(self.display_path(t.path))}</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(Gio.ThemedIcon.new("folder"), 32))
+            self.details_title.set_text(self.display_path(t.path))
             nd = sum(1 for e in t.entries if e.is_dir)
             self.qv_subtitle.set_text(f"{len(t.entries) - nd} files, {nd} folders")
             rows = [("Location", pretty_path(t.path) if t.path not in VIRTUAL else self.display_path(t.path))]
@@ -22961,11 +25814,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         txt = "unavailable"
                     GLib.idle_add(lambda: (gen == self._side_gen and self._qv_set("Disk", txt), False)[1])
-                threading.Thread(target=dwork, daemon=True).start()
+                bg(dwork)
         elif len(sel) > 1:
             nd = sum(1 for e in sel if e.is_dir)
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(Gio.ThemedIcon.new("edit-select-all"), 32))
-            self.details_title.set_markup(f"<b>{len(sel)} items selected</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(Gio.ThemedIcon.new("edit-select-all"), 32))
+            self.details_title.set_text(f"{len(sel)} items selected")
             self.qv_subtitle.set_text(f"{len(sel) - nd} files, {nd} folders")
             total = sum(e.size or 0 for e in sel if not e.is_dir)
             rows = [("Size", fmt_size(total) + ("  (files only)" if nd else "")),
@@ -22975,8 +25828,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 rows.append(("Types", ", ".join(exts[:8]) + ("…" if len(exts) > 8 else "")))
         else:
             e = sel[0]
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32, e))
-            self.details_title.set_markup(f"<b>{GLib.markup_escape_text(e.name)}</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(e.icon, 32, e))
+            self.details_title.set_text(e.name)
             self.qv_subtitle.set_text(e.type)
             rows = []
             if e.is_dir:
@@ -23015,7 +25868,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 def runnable():
                     if script_runner(spath):
                         GLib.idle_add(lambda: (gen == self._side_gen and self._qv_add("Runnable", "yes"), False)[1])
-                threading.Thread(target=runnable, daemon=True).start()
+                bg(runnable)
             # background facts: folder size / contents, text line count
             path = e.path
             if e.is_dir and path:
@@ -23030,7 +25883,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     if not cancel.is_set():
                         GLib.idle_add(lambda: (gen == self._side_gen and (self._qv_set("Contains", f"{f:,} files, {d:,} folders"), self._qv_set("Size", fmt_size(b) + f"  ({b:,} bytes)"))) and False)
                 # same 250 ms debounce as the folder preview: a double-click must not start a size walk
-                GLib.timeout_add(250, lambda: (gen == self._side_gen and not cancel.is_set() and threading.Thread(target=work, daemon=True).start(), False)[1])
+                GLib.timeout_add(250, lambda: (gen == self._side_gen and not cancel.is_set() and bg(work), False)[1])
             elif (e.content_type or "").startswith("text/") and path and (e.size or 0) < 8 << 20:
                 def work_lines():
                     try:
@@ -23039,17 +25892,17 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         n = 0
                     GLib.idle_add(lambda: (gen == self._side_gen and self._qv_set("Lines", f"{n:,}")) and False)
-                threading.Thread(target=work_lines, daemon=True).start()
+                bg(work_lines)
         for i, (k, v) in enumerate(rows):
             kl = Gtk.Label(label=k, xalign=1, yalign=0)
-            kl.get_style_context().add_class("dim-label")
+            css_class(kl, "dim-label")
             vl = Gtk.Label(label=v or "—", xalign=0, wrap=True, selectable=True, hexpand=True)
-            vl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            label_wrap_mode(vl, Pango.WrapMode.WORD_CHAR)
             vl.set_max_width_chars(34)
             g.attach(kl, 0, i, 1, 1)
             g.attach(vl, 1, i, 1, 1)
             self._qv_labels[k] = vl
-        g.show_all()
+        show_all(g)
 
     # ------------------------------------------------------------------ tabs & panes
     @property
@@ -23065,22 +25918,22 @@ class MainWindow(Gtk.ApplicationWindow):
     def new_tab(self, path: str, switch: bool = True) -> FolderView:
         pg = Page(self, path)
         lab = Gtk.Box(spacing=2)
-        lab.pack_start(pg.label, True, True, 0)
-        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
-        close.set_relief(Gtk.ReliefStyle.NONE)
+        put(lab, pg.label, True, True, 0)
+        close = icon_button("window-close-symbolic", "menu")
+        flat_button(close)
         close.set_focus_on_click(False)
-        close.get_style_context().add_class("tab-close")
+        css_class(close, "tab-close")
         close.connect("clicked", lambda b: pg.win.close_tab(pg))
-        lab.pack_start(close, False, False, 0)
-        lab.show_all()
-        ev = Gtk.EventBox()
-        ev.add(lab)
-        ev.connect("button-press-event", lambda w, e: pg.win._on_tab_label_button(w, e, pg))
-        ev.show_all()
-        n = self.notebook.append_page(pg, ev)
+        put(lab, close, False, False, 0)
+        show_all(lab)
+        ev = event_box()
+        set_child(ev, lab)
+        on_event(ev, "button-press-event", lambda w, e: pg.win._on_tab_label_button(w, e, pg))
+        show_all(ev)
+        n = self.notebook.append_page(pg, fixed_width(ev))
         self.notebook.set_tab_reorderable(pg, True)
         self.notebook.set_tab_detachable(pg, True)
-        pg.show_all()
+        show_all(pg)
         pg._update_headers()
         if switch:
             self.notebook.set_current_page(n)
@@ -23100,8 +25953,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     ("Close other tabs", lambda: [self.close_tab(p) for p in self._pages() if p is not pg]),
                     ("_Close tab", lambda: self.close_tab(pg))]
             m = build_menu(spec)
-            m.attach_to_widget(w, None)
-            m.popup_at_pointer(event)
+            popup_menu(m, w, event)
             return True
         return False
 
@@ -23112,7 +25964,7 @@ class MainWindow(Gtk.ApplicationWindow):
         win = self.app.new_window("")
         tab_label = self.notebook.get_tab_label(pg)
         self.notebook.detach_tab(pg)
-        n = win.notebook.append_page(pg, tab_label)
+        n = win.notebook.append_page(pg, fixed_width(tab_label))
         win.notebook.set_tab_reorderable(pg, True)
         win.notebook.set_tab_detachable(pg, True)
         pg.win = win
@@ -23425,7 +26277,7 @@ class MainWindow(Gtk.ApplicationWindow):
         w = d.get_widget()
         w.set_show_other(True)
         w.set_show_default(True)
-        if d.run() == Gtk.ResponseType.OK:
+        if run_dialog(d) == Gtk.ResponseType.OK:
             app = d.get_app_info()
             if app:
                 try:
@@ -23593,7 +26445,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 except OSError:
                     e.type = "unavailable"
             GLib.idle_add(lambda: (t and t.path == THISPC and (touch_all(t.store), t.pcview.refresh())) or False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return out
 
     def _place_folder_drives(self, out: List[Entry], sources: List[Entry]) -> List[Entry]:
@@ -23762,7 +26614,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def on_view_key(self, view, event, t: FolderView):
         key = event.keyval
         mods = event.state & Gtk.accelerator_get_default_mod_mask()
-        ctrl, shift, alt = bool(mods & Gdk.ModifierType.CONTROL_MASK), bool(mods & Gdk.ModifierType.SHIFT_MASK), bool(mods & Gdk.ModifierType.MOD1_MASK)
+        ctrl, shift, alt = bool(mods & Gdk.ModifierType.CONTROL_MASK), bool(mods & Gdk.ModifierType.SHIFT_MASK), bool(mods & ALT_MASK)
         cb = self._list_keys.get((Gdk.keyval_to_lower(key), int(mods)))       # Space, Delete, F2… (Preferences → Shortcuts)
         if cb is not None:
             cb()
@@ -23787,6 +26639,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return True
         if view is t.icons and not mods and event.string and event.string.isprintable():
             self._icon_typeahead(t, event.string)
+            return True
+        if GTK4 and view is t.tree and not mods and event.string and event.string.isprintable() and event.string != " ":
+            t.tree.typeahead(event.string)          # the tree view's own type-to-find, which the GTK 4 list lacks
             return True
         return False
 
@@ -23828,10 +26683,21 @@ class MainWindow(Gtk.ApplicationWindow):
         self._report_path = path
         self.report_label.set_text(text or ("Something went wrong: " + CRASH.summary_of(path)))
         self.report_label.set_tooltip_text(CRASH.summary_of(path))
+        self.report_dismiss.set_visible(len(CRASH.pending()) > 1)
         self.report_bar.set_revealed(True)
 
     def _on_report_bar(self, bar, response):
         bar.set_revealed(False)
+        if response == 2:                    # Dismiss all: none of the waiting reports is offered again
+            waiting = CRASH.pending()
+            for path in waiting:
+                CRASH.archive(path, "dismissed")
+            self._report_path = None
+            for w in self.get_application().get_windows():
+                if w is not self and hasattr(w, "report_bar"):
+                    w.report_bar.set_revealed(False)
+            self.flash(f"{len(waiting)} error report{'s' if len(waiting) != 1 else ''} dismissed")
+            return
         if response == 1 and self._report_path:
             path, self._report_path = self._report_path, None
             if os.path.exists(path):
@@ -23846,7 +26712,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return True        # keep the window open
         if getattr(self, "video", None) is not None:
             self.video.stop()
-        self.cfg["window"] = list(self.get_size())
+        self.cfg["window"] = list(window_size(self))
         self.cfg["nav_width"] = self.paned.get_position()
         self._remember_side_width()
         self._remember_side_split()
@@ -23857,12 +26723,15 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ menus
     def _build_menubar(self):
         for i, (key, title) in enumerate(self.MENU_KEYS.items()):
+            if GTK4:
+                menu_bar_add4(self.menubar, "_" + title, lambda k=key: self.menu_spec(k))
+                continue
             item = Gtk.MenuItem.new_with_mnemonic("_" + title)
             menu = Gtk.Menu()
             item.set_submenu(menu)
             menu.connect("show", lambda m, k=key: self._fill_menu(m, k))
             self.menubar.append(item)
-        self.menubar.show_all()
+        show_all(self.menubar)
         # Keyboard shortcuts. The keys come from the config (Preferences → Shortcuts), see SHORTCUT_ACTIONS.
         self._actions = {
             "quick_look": self.quick_look,
@@ -23881,20 +26750,19 @@ class MainWindow(Gtk.ApplicationWindow):
             "details_pane": lambda: self.toggle_cfg("details_pane"), "hidden": lambda: self.toggle_cfg("show_hidden"),
             "fullscreen": self._toggle_fullscreen, "help": lambda: show_shortcuts(self), "quit": self.close,
         }
-        self._bound: List[Tuple[int, int]] = []
+        self._bound: list = []                   # handles from Shortcuts.bind
         self._list_keys: Dict[Tuple[int, int], Callable] = {}
         self.bind_shortcuts()
         for i in range(1, 10):
-            key, mods = Gtk.accelerator_parse(f"<Control>{i}")
-            self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, n=i: (self.notebook.set_current_page(n - 1), True)[1])
+            self.accel.bind(f"<Control>{i}", lambda n=i: self.notebook.set_current_page(n - 1))
         self._watch_clipboard()
 
     def bind_shortcuts(self):
         """(Re)connect every shortcut from the config. Keys with Ctrl / Alt and function keys go on the window;
         plain keys (Space, Delete…) and list-only actions are answered by the file list alone (on_view_key),
         so they never fire while typing or while the preview has the keyboard."""
-        for key, mods in self._bound:
-            self.accel.disconnect_key(key, Gdk.ModifierType(mods))
+        for handle in self._bound:
+            self.accel.unbind(handle)
         self._bound, self._list_keys = [], {}
         taken = set()
         for aid, cb in self._actions.items():
@@ -23906,9 +26774,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 if aid in SHORTCUT_LIST_ONLY or shortcut_plain(*km):
                     self._list_keys[km] = cb
                 else:
-                    key, mods = Gtk.accelerator_parse(accel)
-                    self.accel.connect(key, mods, Gtk.AccelFlags.VISIBLE, lambda g, o, k, m, c=cb: (c(), True)[1])
-                    self._bound.append((key, int(mods)))
+                    self._bound.append(self.accel.bind(accel, cb))
         for widget, text, aid in getattr(self, "_tips", ()):
             widget.set_tooltip_text(self._tip_text(text, aid))
 
@@ -23936,8 +26802,8 @@ class MainWindow(Gtk.ApplicationWindow):
             self.fullscreen()
 
     def _fill_menu(self, menu: Gtk.Menu, key: str):
-        for c in menu.get_children():
-            menu.remove(c)
+        for c in child_widgets(menu):
+            take_out(menu, c)
         for s in self.menu_spec(key):
             if s == "-":
                 menu.append(Gtk.SeparatorMenuItem())
@@ -23946,7 +26812,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 s = {"label": s[0], "cb": s[1] if len(s) > 1 else None, "accel": s[2] if len(s) > 2 else ""}
             sub = build_menu(s["sub"]) if "sub" in s else None
             menu.append(_menu_item(s["label"], s.get("cb"), s.get("accel", ""), s.get("check"), s.get("radio"), s.get("sensitive", True), sub))
-        menu.show_all()
+        show_all(menu)
 
     def menu_spec(self, key: str):
         cfg = self.cfg
@@ -24023,7 +26889,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     {"label": "Split _view (two folders)", "cb": self.toggle_split, "accel": self.acc("split"), "check": bool(self.page and self.page.split)}, "-",
                     {"label": "_Layout", "sub": layouts}, {"label": "_Sort by", "sub": sorts}, {"label": "_Group by", "sub": groups},
                     {"label": "Add _columns", "sub": cols},
-                    ("Size all columns to _fit", lambda: [c.queue_resize() for c in t.tree.get_columns()] and None), "-",
+                    ("Size all columns to _fit", lambda: (t.tree.fit_columns() if GTK4 else [c.queue_resize() for c in t.tree.get_columns()]) and None), "-",
                     {"label": "Item check _boxes", "cb": lambda: self.toggle_cfg("checkboxes"), "check": cfg["checkboxes"]},
                     {"label": "File name _extensions", "cb": lambda: self.toggle_cfg("hide_extensions"), "check": not cfg["hide_extensions"]},
                     {"label": "_Hidden items", "cb": lambda: self.toggle_cfg("show_hidden"), "accel": self.acc("hidden"), "check": cfg["show_hidden"]}, "-",
@@ -24121,11 +26987,7 @@ class MainWindow(Gtk.ApplicationWindow):
                      ("Open in _terminal", lambda: self.open_terminal()), {"label": "Ne_w", "sub": self._new_item_spec(), "sensitive": real}, "-",
                      ("P_roperties", lambda: self.show_properties([entry_for_path(t.path)]) if real else self.properties())]
         menu = build_menu(spec)
-        menu.attach_to_widget(t.view, None)
-        if event is not None:
-            menu.popup_at_pointer(event)
-        else:
-            menu.popup_at_widget(t.view, Gdk.Gravity.CENTER, Gdk.Gravity.NORTH_WEST, None)
+        popup_menu(menu, t.view, event, "pointer" if event is not None else "center")
 
     # ------------------------------------------------------------------ clipboard
     def copy_sel(self, mode: str):
@@ -24147,7 +27009,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def _export_clipboard(self, mode: str, paths: List[str]):
         """Offer the files to every other application (see FileClipboard); plain paths as a last resort."""
         if not file_clipboard().set_files(mode, paths):
-            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text("\n".join(paths), -1)
+            set_clipboard_text("\n".join(paths))
 
     def _external_clipboard_has_files(self) -> bool:
         """Whether another app put files on the clipboard. Answered from a cache that is refreshed
@@ -24157,8 +27019,20 @@ class MainWindow(Gtk.ApplicationWindow):
         return bool(getattr(self, "_clip_files", False))
 
     def _watch_clipboard(self):
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         self._clip_files = False
+        if GTK4:
+            clip = Gdk.Display.get_default().get_clipboard()
+
+            def changed(*a):
+                try:
+                    fm = clip.get_formats()
+                    self._clip_files = (not clip.is_local()) and any(fm.contain_mime_type(t) for t in
+                                                                     ("x-special/gnome-copied-files", "text/uri-list"))
+                except Exception:
+                    self._clip_files = False
+            clip.connect("changed", changed)
+            return changed()
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
         wanted = {"x-special/gnome-copied-files", "text/uri-list"}
 
         def got(clip, *args):
@@ -24181,10 +27055,12 @@ class MainWindow(Gtk.ApplicationWindow):
         """Ask the clipboard owner for files, asynchronously, then call done(mode, paths) on the GTK thread.
         The wait_for_* variants run a nested main loop; a click or menu during that loop re-entered the same
         code until GTK crashed (seen in a crash report), so nothing here ever waits."""
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-
         def from_uris(uris):
             return [p for p in (Gio.File.new_for_uri(u).get_path() for u in (uris or []) if u.strip()) if p]
+
+        if GTK4:
+            return read_cut_files4(Gdk.Display.get_default().get_clipboard(), done)
+        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
 
         def got_uris(clip, uris, *a):
             done("copy", from_uris(uris))
@@ -24243,14 +27119,16 @@ class MainWindow(Gtk.ApplicationWindow):
                 except OSError as ex:
                     message(self, "Create shortcut", str(ex), Gtk.MessageType.ERROR)
             return
-        if self.transfer(paths, dest, mode or "copy") and mode == "cut":
+        # The clipboard says "cut"; the file operation is called "move". Passing "cut" on used to run a plain
+        # copy: the originals stayed, nothing was counted for the progress bar and Undo did not know about it.
+        if self.transfer(paths, dest, "move" if mode == "cut" else "copy") and mode == "cut":
             self.clipboard = {"mode": "", "paths": []}
             self._update_status()
 
     def ask_drop_action(self) -> Optional[bool]:
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION, text="Drop files")
         d.add_buttons("_Move here", 1, "_Copy here", 2, "_Cancel", Gtk.ResponseType.CANCEL)
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         return {1: True, 2: False}.get(r)
 
@@ -24500,11 +27378,11 @@ class MainWindow(Gtk.ApplicationWindow):
         tv = Gtk.TextView(editable=False, monospace=True)
         tv.get_buffer().set_text("Checking… (mayapy can take a few seconds to start)")
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        d.get_content_area().pack_start(sw, True, True, 0)
-        d.show_all()
-        threading.Thread(target=lambda: GLib.idle_add(lambda: tv.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
-        d.run()
+        set_child(sw, tv)
+        put(d.get_content_area(), sw, True, True, 0)
+        show_all(d)
+        bg(lambda: GLib.idle_add(lambda: tv.get_buffer().set_text(preview_tool_report()) or False))
+        run_dialog(d)
         d.destroy()
 
     def open_in_rv(self, sequence: bool = False):
@@ -24535,7 +27413,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def index_now(self, full: bool = False):
         if not INDEX.loaded:
-            threading.Thread(target=lambda: (INDEX.load(), GLib.idle_add(lambda: (self.index_now(full), False)[1])), daemon=True).start()
+            bg(lambda: (INDEX.load(), INDEX.loaded and GLib.idle_add(lambda: (self.index_now(full), False)[1])))
             return
         INDEX.on_status = lambda: self.flash(self.index_status_line())
         INDEX.crawl(self.cfg.get("index_roots", [HOME]), self.cfg.get("index_network", False), self.cfg.get("index_hidden", False), full)
@@ -24557,13 +27435,13 @@ class MainWindow(Gtk.ApplicationWindow):
         d.set_default_size(900, 600)
         tv = Gtk.TextView(editable=False, monospace=True)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
-        d.get_content_area().pack_start(sw, True, True, 0)
+        set_child(sw, tv)
+        put(d.get_content_area(), sw, True, True, 0)
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_markup("<small>Stalls are moments the interface thread was blocked for more than 120 ms; the stack shows what it was doing. "
                         "Run <tt>python3 shotrover.py --profile</tt> for a full cProfile of everything on the interface thread, "
                         "and <tt>python3 shotrover.py --selftest</tt> for timed unit/benchmark tests.</small>")
-        d.get_content_area().pack_start(hint, False, False, 6)
+        put(d.get_content_area(), hint, False, False, 6)
 
         def refresh():
             if not d.get_visible():
@@ -24575,9 +27453,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return True
         refresh()
         GLib.timeout_add(2000, refresh)
-        d.show_all()
+        show_all(d)
         while True:
-            r = d.run()
+            r = run_dialog(d)
             if r == 1:
                 out = os.path.join(GLib.get_user_cache_dir(), "shotrover", f"performance-{_dt.datetime.now():%Y%m%d-%H%M%S}.txt")
                 os.makedirs(os.path.dirname(out), exist_ok=True)
@@ -24595,27 +27473,27 @@ class MainWindow(Gtk.ApplicationWindow):
         d.add_button("_Close", Gtk.ResponseType.CLOSE)
         copy_btn = d.add_button("_Copy commands", 1)
         run_btn = d.add_button("_Install selected in terminal", Gtk.ResponseType.OK)
-        run_btn.get_style_context().add_class("suggested-action")
+        css_class(run_btn, "suggested-action")
         d.set_default_size(680, 460)
         box = d.get_content_area()
         box.set_spacing(6)
-        box.set_border_width(12)
-        box.pack_start(Gtk.Label(label="Checking what's installed…", xalign=0), False, False, 0)
+        set_margins(box, 12)
+        put(box, Gtk.Label(label="Checking what's installed…", xalign=0), False, False, 0)
         grid = Gtk.Grid(column_spacing=12, row_spacing=4)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(grid)
-        box.pack_start(sw, True, True, 0)
+        set_child(sw, grid)
+        put(box, sw, True, True, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
                         "The commands match your distribution. Restart Shotrover afterwards.</small>")
-        box.pack_start(note, False, False, 0)
+        put(box, note, False, False, 0)
         checks: List[Tuple[Gtk.CheckButton, dict]] = []
-        d.show_all()
+        show_all(d)
         run_btn.set_sensitive(False)
         copy_btn.set_sensitive(False)
 
         def fill(deps):
-            box.get_children()[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
+            child_widgets(box)[0].set_text(f"{sum(1 for x in deps if x['found'])} of {len(deps)} optional tools found.")
             for i, dep in enumerate(deps):
                 gone = dep.get("unavailable") if dep["found"] is None else None      # can't be installed here
                 cb = Gtk.CheckButton()
@@ -24628,22 +27506,22 @@ class MainWindow(Gtk.ApplicationWindow):
                 st = Gtk.Label(xalign=0)
                 if gone:
                     st.set_text("not available")
-                    st.get_style_context().add_class("dim-label")
+                    css_class(st, "dim-label")
                 else:
                     st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
-                g.get_style_context().add_class("dim-label")
+                css_class(g, "dim-label")
                 grid.attach(g, 3, i, 1, 1)
                 name.set_tooltip_text(gone or dep["cmd"])
                 checks.append((cb, dep))
-            grid.show_all()
+            show_all(grid)
             run_btn.set_sensitive(True)
             copy_btn.set_sensitive(True)
             return False
-        threading.Thread(target=lambda: GLib.idle_add(fill, optional_deps()), daemon=True).start()
+        bg(lambda: GLib.idle_add(fill, optional_deps()))
         while True:
-            resp = d.run()
+            resp = run_dialog(d)
             chosen = [dep for cb, dep in checks if cb.get_active() and dep["found"] is None]
             if resp == 1:
                 set_clipboard_text("\n".join(dep["cmd"] for dep in chosen) or "# nothing selected")
@@ -24678,7 +27556,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 GLib.idle_add(lambda: message(self, "Checksum", str(ex), Gtk.MessageType.ERROR) and False)
                 return
             GLib.idle_add(lambda: (set_clipboard_text(digest), self.flash(f"SHA-256 copied: {digest[:16]}…")) and False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def new_folder(self):
         self.new_item("folder")
@@ -24790,13 +27668,13 @@ class MainWindow(Gtk.ApplicationWindow):
         d = Gtk.Dialog(title="Compress", transient_for=self, modal=True)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Create", Gtk.ResponseType.OK)
         box = d.get_content_area()
-        box.set_border_width(12)
+        set_margins(box, 12)
         box.set_spacing(6)
         base = sel[0].name if len(sel) == 1 else self.display_path(t.path)
         stem = base if sel[0].is_dir or len(sel) > 1 else os.path.splitext(base)[0]
-        box.pack_start(Gtk.Label(label="Archive name:", xalign=0), False, False, 0)
+        put(box, Gtk.Label(label="Archive name:", xalign=0), False, False, 0)
         name = Gtk.Entry(text=stem, activates_default=True)
-        box.pack_start(name, False, False, 0)
+        put(box, name, False, False, 0)
         combo = Gtk.ComboBoxText()
         fmts = [("zip (Compressed folder)", "zip"), ("tar.gz", "gztar"), ("tar.xz", "xztar"), ("tar", "tar")]
         if sevenzip():
@@ -24804,10 +27682,10 @@ class MainWindow(Gtk.ApplicationWindow):
         for f, _ in fmts:
             combo.append_text(f)
         combo.set_active(0)
-        box.pack_start(combo, False, False, 0)
+        put(box, combo, False, False, 0)
         d.set_default_response(Gtk.ResponseType.OK)
-        d.show_all()
-        r = d.run()
+        show_all(d)
+        r = run_dialog(d)
         fmt = fmts[combo.get_active()][1]
         stem = name.get_text().strip() or stem
         d.destroy()
@@ -25162,11 +28040,14 @@ class ExplorerApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN | Gio.ApplicationFlags.NON_UNIQUE)
         self.cfg = load_config()
+        if GTK4_FAILED and self.cfg.get("toolkit") == "gtk4":      # do not try again at every start
+            self.cfg["toolkit"] = "gtk3"
+            save_config(self.cfg)
 
     def do_startup(self):
         Gtk.Application.do_startup(self)
         icons = [p for p in (app_icon(s) for s in (16, 24, 32, 48, 64, 128, 256)) if p is not None]
-        if icons:
+        if icons and not GTK4:            # GTK 4 takes window icons from the icon theme by name only
             Gtk.Window.set_default_icon_list(icons)
         else:
             Gtk.Window.set_default_icon_name("shotrover")
@@ -25174,14 +28055,12 @@ class ExplorerApp(Gtk.Application):
         # The stylesheet. (These lines once sat after the `return True` of _index_tick below, where they could
         # never run, so the app shipped with none of its own styling. A broken sheet must not stop startup.)
         try:
-            prov = Gtk.CssProvider()
-            prov.load_from_data(CSS)
-            Gtk.StyleContext.add_provider_for_screen(Gdk.Screen.get_default(), prov, Gtk.STYLE_PROVIDER_PRIORITY_APPLICATION)
+            load_app_css(CSS)
         except GLib.Error as ex:
             print("shotrover: stylesheet not loaded —", ex, file=sys.stderr)
         apply_theme_mode(self.cfg.get("theme", "system"))
         ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
-        GLib.timeout_add(400, lambda: (threading.Thread(target=warm_workers, daemon=True).start(), False)[1])
+        GLib.timeout_add(400, lambda: (bg(warm_workers), False)[1])
         GLib.timeout_add(1500, self._index_startup)
 
     def _index_startup(self):
@@ -25196,7 +28075,7 @@ class ExplorerApp(Gtk.Application):
             age_h = (time.time() - INDEX.progress.get("finished", 0)) / 3600.0
             if age_h > float(cfg.get("index_interval_h", 6)):
                 INDEX.crawl(cfg.get("index_roots", [HOME]), cfg.get("index_network", False), cfg.get("index_hidden", False))
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         GLib.timeout_add_seconds(1800, self._index_tick)
         return False
 
@@ -25234,8 +28113,21 @@ class ExplorerApp(Gtk.Application):
     def new_window(self, path: Optional[str]):
         if path in VIRTUAL:
             path = HOME
-        w = MainWindow(self, path)
-        w.present()
+        try:
+            w = MainWindow(self, path)
+            w.present()
+        except Exception as ex:
+            if GTK4:
+                gtk4_start_failed(ex)      # does not return when a GTK 3 fallback is standing by
+            raise
+        if not getattr(self, "_toolkit_checked", False):          # the first window of this run
+            self._toolkit_checked = True
+            if GTK4:
+                GLib.timeout_add(3000, lambda: (gtk4_started(), False)[1])
+            elif GTK4_FAILED:
+                GLib.timeout_add(1200, lambda: (message(w, "GTK 4 did not start", f"The GTK 4 interface could not be used: {GTK4_FAILED}.",
+                                                        secondary="Shotrover is running on GTK 3, and \"Use GTK 4\" in Preferences → "
+                                                                  "Optional has been switched off."), False)[1])
         if not self.cfg.get("setup_done") and DEMO is None and STRESS is None and not getattr(self, "_welcomed", False):
             self._welcomed = True                    # once per run, on the first window, however it was opened
             GLib.timeout_add(350, lambda: (WelcomeDialog(w, self.cfg, w.apply_cfg), False)[1])
@@ -25271,8 +28163,8 @@ def _probe_gl_child() -> int:
                 out["error"] = f"shader/render: {ex}"[:400]
             return True
         area.connect("render", render)
-        win.add(area)
-        win.show_all()
+        set_child(win, area)
+        show_all(win)
         t0 = time.time()
         while time.time() - t0 < 3 and not out["ok"] and not out["error"]:
             while Gtk.events_pending():

@@ -37,11 +37,170 @@ import time
 from typing import Callable, Dict, List, Optional, Tuple
 
 import gi
-gi.require_version("Gtk", "3.0")
-gi.require_version("Gdk", "3.0")
+# Shotrover runs on GTK 3 (the default) or GTK 4 (experimental; docs/internal/GTK4-PORT.md). The toolkit has
+# to be chosen before Gtk is imported, so the setting is read here by hand, long before load_config().
+
+
+def gtk4_installed() -> bool:
+    try:
+        return "4.0" in gi.Repository.get_default().enumerate_versions("Gtk")
+    except Exception:
+        return False
+
+
+def _choose_gtk4() -> bool:
+    """SHOTROVER_GTK=3 or =4 decides when set (the way back if the GTK 4 interface will not start); otherwise
+    "toolkit" in the config file (Preferences → Optional). Demo mode and the self-test never read the real
+    config. GTK 4 chosen but not installed: GTK 3."""
+    loaded = sys.modules.get("gi.repository.Gtk")
+    if loaded is not None:           # loaded as a module by a script that already has a Gtk (the GUI tests): that one
+        return getattr(loaded, "_version", "3.0") == "4.0"
+    env = os.environ.get("SHOTROVER_GTK")
+    if env in ("3", "4"):
+        want = env == "4"
+    else:
+        want = False
+        if "--demo" not in sys.argv and "--selftest" not in sys.argv:
+            try:
+                base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+                with open(os.path.join(base, "shotrover", "config.json"), encoding="utf-8") as f:
+                    want = json.load(f).get("toolkit") == "gtk4"
+            except Exception:
+                want = False
+    if env in ("3", "4") or not want:
+        return want
+    if not gtk4_installed():
+        return False
+    return _gtk4_guarded()
+
+
+GTK4_FAILED = ""          # why the GTK 4 interface was given up at this start ("" = it was not)
+_GTK4_MARK = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.join(os.path.expanduser("~"), ".cache"),
+                          "shotrover", "gtk4-starting")
+
+
+def _gtk4_guarded() -> bool:
+    """The setting asks for GTK 4. Make sure a GTK 4 that cannot start leaves the user with a working GTK 3
+    window instead of nothing: this process stays behind as a small watcher and the application runs in a
+    child. The child writes a marker file and removes it once its window has been up for a few seconds
+    (gtk4_started). If the child dies before that, by a crash, a kill or an error, the watcher itself
+    carries on as the GTK 3 application (it has not loaded Gtk yet). Returns True in the child only."""
+    global GTK4_FAILED
+    try:
+        with open(_GTK4_MARK) as f:
+            old = int(f.read().strip() or 0)
+        try:
+            os.kill(old, 0)                  # that start is still going on in another process: no verdict
+        except OSError:
+            GTK4_FAILED = "it did not finish starting last time"
+            os.remove(_GTK4_MARK)
+            return False
+    except (OSError, ValueError):
+        pass
+    if any(a.startswith("--") for a in sys.argv[1:]):       # tests and probes: no watcher
+        return True
+    try:
+        os.makedirs(os.path.dirname(_GTK4_MARK), exist_ok=True)
+        child = os.fork()
+    except OSError:
+        return True
+    if child == 0:
+        try:
+            with open(_GTK4_MARK, "w") as f:
+                f.write(str(os.getpid()))
+        except OSError:
+            pass
+        return True
+    asked = []                               # signals sent to us: passed on, and then the end is no failure
+
+    def forward(sig, frame):
+        asked.append(sig)
+        try:
+            os.kill(child, sig)
+        except OSError:
+            pass
+    olds = {sg: signal.signal(sg, forward) for sg in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)}
+    while True:
+        try:
+            status = os.waitpid(child, 0)[1]
+            break
+        except InterruptedError:
+            continue
+        except OSError:
+            status = 0
+            break
+    for sg, old_handler in olds.items():
+        signal.signal(sg, old_handler)
+    try:
+        with open(_GTK4_MARK) as f:
+            unfinished = f.read().strip() == str(child)
+    except OSError:
+        unfinished = False
+    if unfinished:
+        try:
+            os.remove(_GTK4_MARK)
+        except OSError:
+            pass
+    code = os.WEXITSTATUS(status) if os.WIFEXITED(status) else -os.WTERMSIG(status)
+    if unfinished and code != 0 and not asked:
+        GTK4_FAILED = ("it was closed by force while starting" if code == -signal.SIGKILL else
+                       f"it crashed while starting (signal {-code})" if code < 0 else "it hit an error while starting")
+        print(f"shotrover: the GTK 4 interface did not start ({GTK4_FAILED}); using GTK 3", file=sys.stderr)
+        return False
+    os._exit(code if code >= 0 else 128 - code)
+
+
+def gtk4_started():
+    """The GTK 4 window is up and working: a later crash is an ordinary crash, not a failed start."""
+    try:
+        with open(_GTK4_MARK) as f:
+            mine = f.read().strip() == str(os.getpid())
+        if mine:
+            os.remove(_GTK4_MARK)
+    except OSError:
+        pass
+
+
+def gtk4_start_failed(ex):
+    """Called in the GTK 4 process when building the first window raised: end with an error so the watcher
+    (see _gtk4_guarded) takes over with GTK 3. Without a watcher this returns and the error is raised."""
+    try:
+        with open(_GTK4_MARK) as f:
+            watched = f.read().strip() == str(os.getpid())
+    except OSError:
+        watched = False
+    if watched:
+        import traceback
+        traceback.print_exception(type(ex), ex, ex.__traceback__)
+        os._exit(70)
+
+
+GTK4 = _choose_gtk4()
+if GTK4:
+    os.environ.setdefault("GSK_RENDERER", "cairo")      # GTK 4's CPU renderer; must be set before Gtk loads
+    # GTK 4 makes its GL contexts with EGL, on X11 as well as Wayland (GTK 3 on X11 used GLX). PyOpenGL has to
+    # be told before it is imported, or it looks for a GLX context and finds none ("no valid context").
+    os.environ.setdefault("PYOPENGL_PLATFORM", "egl")
+    if not os.environ.get("SHOTROVER_GTK_WARN"):
+        # GTK 4.12 marks the old list, dialog and style calls deprecated and PyGObject prints one warning per
+        # call site: hundreds of lines that bury real errors. They still work; replacing them is stage 8 of
+        # the port. Set SHOTROVER_GTK_WARN=1 to see them.
+        import warnings
+        warnings.filterwarnings("ignore", message=r".* is deprecated", category=DeprecationWarning)
+gi.require_version("Gtk", "4.0" if GTK4 else "3.0")
+gi.require_version("Gdk", "4.0" if GTK4 else "3.0")
 gi.require_version("GdkPixbuf", "2.0")
 gi.require_version("PangoCairo", "1.0")
 from gi.repository import Gdk, GdkPixbuf, Gio, GLib, GObject, Gtk, Pango, PangoCairo  # noqa: E402
+ALT_MASK = Gdk.ModifierType.ALT_MASK if GTK4 else Gdk.ModifierType.MOD1_MASK      # the Alt key's modifier bit
+
+
+def rgba(red: float, green: float, blue: float, alpha: float = 1.0):
+    """A Gdk.RGBA. Always build colours with this: with GTK 4 and PyGObject before 3.42 the constructor
+    ignores its arguments and Gdk.RGBA(r, g, b, a) comes out as transparent black."""
+    c = Gdk.RGBA()
+    c.red, c.green, c.blue, c.alpha = red, green, blue, alpha
+    return c
 
 # numpy is optional: the 3D previewer uses it for projection/sorting when present (h5py pulls it in anyway),
 # and falls back to pure Python otherwise.
@@ -53,7 +212,7 @@ except ImportError:   # pragma: no cover
 # GtkSourceView is optional: it gives the preview pane syntax colouring, line numbers and a proper code
 # editor. most GNOME desktops ship it; without it the preview falls back to a plain TextView.
 GtkSource = None
-for _ver in ("4", "3.0"):
+for _ver in (("5",) if GTK4 else ("4", "3.0")):
     try:
         gi.require_version("GtkSource", _ver)
         from gi.repository import GtkSource  # noqa: E402
@@ -78,7 +237,7 @@ def bench(label: str):
 APP_ID = "io.github.KCArrow.Shotrover"
 APP_NAME = "Shotrover"
 APP_FULL_NAME = "Shotrover"
-VERSION = "1.1.2"
+VERSION = "1.2.0"
 # the app icon (also packaging/shotrover.svg, which install.sh puts in the icon theme): embedded so the single
 # file and the portable build show it in the title bar, task switcher and About box without installing
 APP_ICON_SVG = r'''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256">
@@ -278,7 +437,7 @@ DEFAULT_CONFIG = {
     "open_to": "quick", "browse_in_new_tab": False, "single_click": False,
     "show_recent": True, "show_frequent": True,
     "show_hidden": False, "hide_extensions": False, "full_path_title": False, "folders_first": True,
-    "confirm_delete": True, "checkboxes": False, "gl_preview": True, "seq_fps": 24, "blend_view": "breakdown", "gdk_backend": "", "rv_enabled": False, "rv_path": "", "ui_cores": 2, "archive_action": "extract", "index_enabled": False, "index_roots": [HOME], "index_network": False, "index_hidden": False, "index_interval_h": 6, "nav_pane": True, "preview_pane": False, "details_pane": False,
+    "confirm_delete": True, "checkboxes": False, "gl_preview": True, "toolkit": "gtk3", "seq_fps": 24, "blend_view": "breakdown", "gdk_backend": "", "rv_enabled": False, "rv_path": "", "ui_cores": 2, "archive_action": "extract", "index_enabled": False, "index_roots": [HOME], "index_network": False, "index_hidden": False, "index_interval_h": 6, "nav_pane": True, "preview_pane": False, "details_pane": False,
     "size_in_bytes": False, "date_format": "%Y-%m-%d %H:%M", "layout": "details",
     "sort_key": "name", "sort_desc": False, "group_by": "none",
     "columns": ["name", "modified", "type", "size"],
@@ -334,7 +493,7 @@ SHORTCUT_ACTIONS = [
 ]
 SHORTCUT_DEFAULTS = {a[0]: a[2] for a in SHORTCUT_ACTIONS}
 SHORTCUT_LIST_ONLY = {a[0] for a in SHORTCUT_ACTIONS if a[3]}
-_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.MOD1_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
+_SC_STRONG = Gdk.ModifierType.CONTROL_MASK | ALT_MASK | Gdk.ModifierType.SUPER_MASK | Gdk.ModifierType.META_MASK
 _SC_RESERVED = (Gdk.KEY_Return, Gdk.KEY_KP_Enter, Gdk.KEY_Escape, Gdk.KEY_Menu, Gdk.KEY_F10, Gdk.KEY_Tab, Gdk.KEY_ISO_Left_Tab,
                 Gdk.KEY_Up, Gdk.KEY_Down, Gdk.KEY_Left, Gdk.KEY_Right, Gdk.KEY_Home, Gdk.KEY_End, Gdk.KEY_Page_Up, Gdk.KEY_Page_Down)
 
@@ -346,12 +505,12 @@ def shortcut_accels(cfg: dict, aid: str) -> List[str]:
 
 
 def shortcut_key(accel: str) -> Optional[Tuple[int, int]]:
-    key, mods = Gtk.accelerator_parse(accel or "")
+    key, mods = accel_parse(accel or "")
     return (Gdk.keyval_to_lower(key), int(mods)) if key else None
 
 
 def shortcut_label(accel: str) -> str:
-    key, mods = Gtk.accelerator_parse(accel or "")
+    key, mods = accel_parse(accel or "")
     return Gtk.accelerator_get_label(key, mods) if key else ""
 
 
@@ -1731,7 +1890,7 @@ def dir_stats_cached(path: str, cancel: threading.Event) -> Tuple[int, int, int]
     return res
 
 
-def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
+def _dir_stats_here(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
     files = folders = total = 0
     for root, ds, fs in os.walk(path, onerror=lambda e: None):
         if cancel.is_set():
@@ -1744,6 +1903,91 @@ def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
             except OSError:
                 pass
     return files, folders, total
+
+
+# The same walk, as a program of its own: reads one JSON path per line, answers "files folders bytes".
+_STAT_HELPER = r"""
+import json, os, sys
+try:
+    cores = json.loads(sys.argv[1])
+    if cores:
+        os.sched_setaffinity(0, cores)
+    os.nice(5)
+except Exception:
+    pass
+for line in sys.stdin.buffer:
+    files = folders = total = 0
+    try:
+        for root, ds, fs in os.walk(json.loads(line), onerror=lambda e: None):
+            folders += len(ds)
+            files += len(fs)
+            for f in fs:
+                try:
+                    total += os.lstat(os.path.join(root, f)).st_size
+                except OSError:
+                    pass
+    except Exception:
+        pass
+    sys.stdout.write("%d %d %d\n" % (files, folders, total))
+    sys.stdout.flush()
+"""
+_STAT_IDLE: list = []                     # helper processes waiting for the next folder
+_STAT_LOCK = threading.Lock()
+
+
+def dir_stats(path: str, cancel: threading.Event) -> Tuple[int, int, int]:
+    """(files, folders, bytes) under a folder. Blocks, so call it from a worker thread.
+
+    The walk runs in a helper process, not in the calling thread. Walking a big tree is a tight Python loop
+    of lstat calls; in a thread of this process it takes the interpreter lock back after every call faster
+    than the GTK thread can get hold of it, and the window froze for seconds at a time whenever a large
+    folder (a network share, most of all) was selected. A cancelled walk has its helper killed and returns
+    zeros; if no helper can be started the walk runs here as it used to."""
+    import select
+    proc = None
+    try:
+        with _STAT_LOCK:
+            while _STAT_IDLE and proc is None:
+                cand = _STAT_IDLE.pop()
+                if cand.poll() is None:
+                    proc = cand
+        if proc is None:
+            proc = subprocess.Popen([sys.executable, "-I", "-S", "-c", _STAT_HELPER, json.dumps(sorted(_cpu_sets()[1] or []))],
+                                    stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        proc.stdin.write((json.dumps(path) + "\n").encode())
+        proc.stdin.flush()
+        fd, buf = proc.stdout.fileno(), b""
+        while b"\n" not in buf:
+            if cancel.is_set():
+                _stat_helper_end(proc)
+                return 0, 0, 0
+            if select.select([fd], [], [], 0.1)[0]:
+                chunk = os.read(fd, 4096)
+                if not chunk:
+                    raise OSError("the helper ended")
+                buf += chunk
+        files, folders, total = (int(x) for x in buf.split()[:3])
+        with _STAT_LOCK:
+            keep = len(_STAT_IDLE) < 2
+            if keep:
+                _STAT_IDLE.append(proc)
+        if not keep:
+            _stat_helper_end(proc)
+        return files, folders, total
+    except Exception:
+        if proc is not None:
+            _stat_helper_end(proc)
+        return _dir_stats_here(path, cancel)
+
+
+def _stat_helper_end(proc):
+    try:
+        proc.kill()
+        proc.wait(timeout=2)
+        proc.stdin.close()
+        proc.stdout.close()
+    except Exception:
+        pass
 
 
 # --------------------------------------------------------------------------- launching
@@ -1846,6 +2090,12 @@ def shortcut_name(e) -> str:
 
 
 def set_clipboard_text(text: str) -> None:
+    """Put plain text on the clipboard. Every text copy in the application goes through here."""
+    if GTK4:
+        data = GLib.Bytes.new((text or "").encode("utf-8"))
+        Gdk.Display.get_default().get_clipboard().set_content(
+            Gdk.ContentProvider.new_for_bytes("text/plain;charset=utf-8", data))
+        return
     cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-    cb.set_text(text, -1)
+    cb.set_text(text or "", -1)
     cb.store()

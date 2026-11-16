@@ -157,12 +157,11 @@ class IconCache:
         self.cache: Dict[Tuple[str, int], GdkPixbuf.Pixbuf] = {}
         self.thumbs: Dict[Tuple[str, int], Optional[GdkPixbuf.Pixbuf]] = {}
         self.pending: set = set()
-        self.theme = Gtk.IconTheme.get_default()
         self.lock = threading.Lock()
         self.queue: List[Tuple[str, int, Callable, str, str]] = []
         self.workers = 0
 
-    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (p2e)
+    icon_set = "system"         # "shotrover" draws files, folders and drives from the built-in set (icons_theme.py)
 
     def set_icon_set(self, name: str):
         self.icon_set = "shotrover" if name == "shotrover" else "system"
@@ -183,18 +182,7 @@ class IconCache:
         pb = self.cache.get(key)
         if pb is not None:
             return pb
-        try:
-            info = self.theme.lookup_by_gicon(icon, size, Gtk.IconLookupFlags.FORCE_SIZE) if icon else None
-            if info is None:
-                info = self.theme.lookup_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
-            pb = info.load_icon() if info else None
-        except GLib.Error:
-            pb = None
-        if pb is None:
-            try:
-                pb = self.theme.load_icon("text-x-generic", size, Gtk.IconLookupFlags.FORCE_SIZE)
-            except GLib.Error:
-                pb = None
+        pb = theme_icon_pixbuf(icon, size)
         self.cache[key] = pb
         return pb
 
@@ -229,7 +217,7 @@ class IconCache:
                 del self.queue[:-600]
             if self.workers < self.THREADS:
                 self.workers += 1
-                threading.Thread(target=lambda: (pin_worker(), self._work()), daemon=True).start()
+                bg(lambda: (pin_worker(), self._work()))
         return None
 
     def _work(self):
@@ -316,7 +304,6 @@ def touch_all(store):
 
 LAYOUT_ICON_SIZE = {"xlarge": 160, "large": 96, "medium": 48, "small": 24, "list": 16, "tiles": 48, "details": 16, "content": 32}
 
-URI_TARGETS = [Gtk.TargetEntry.new("text/uri-list", 0, 0)]
 
 
 def decide_drop(paths: List[str], dest: str, widget: Gtk.Widget) -> Optional[str]:
@@ -379,30 +366,30 @@ class FolderView(Gtk.Box):
         self.page: Optional["Page"] = None
         # slim header shown only in split view
         self.header = Gtk.Box(spacing=4)
-        self.header.get_style_context().add_class("pane-header")
+        css_class(self.header, "pane-header")
         self.header_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.START, margin_start=8)
-        self.header.pack_start(self.header_label, True, True, 0)
-        hclose = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
-        hclose.set_relief(Gtk.ReliefStyle.NONE)
+        put(self.header, self.header_label, True, True, 0)
+        hclose = icon_button("window-close-symbolic", "menu")
+        flat_button(hclose)
         hclose.set_tooltip_text("Close this pane")
         hclose.connect("clicked", lambda b: self.page.unsplit(self) if self.page else None)
-        self.header.pack_end(hclose, False, False, 0)
-        hev = Gtk.EventBox()
-        hev.add(self.header)
-        hev.connect("button-press-event", lambda w, e: self.view.grab_focus() or False)
+        put_end(self.header, hclose, False, False, 0)
+        hev = event_box()
+        set_child(hev, self.header)
+        on_event(hev, "button-press-event", lambda w, e: self.view.grab_focus() or False)
         self.header_box = hev
-        self.pack_start(hev, False, False, 0)
-        self.header_box.set_no_show_all(True)
+        put(self, hev, False, False, 0)
+        start_hidden(self.header_box, True)
 
         # Entry-or-label, is_group, icon-view pixbuf, icon-view markup.  Columns 2/3 are bound directly to the
         # icon view's renderers so GTK lays out 50k tiles without calling back into Python per tile.
         self.store = Gtk.ListStore(GObject.TYPE_PYOBJECT, bool, GdkPixbuf.Pixbuf, str)
         self._index: Optional[Dict[str, int]] = None
         self.stack = Gtk.Stack()
-        self.stack.get_style_context().add_class("filearea")        # one backdrop for every layout (see CSS)
-        self.pack_start(self.stack, True, True, 0)
+        css_class(self.stack, "filearea")        # one backdrop for every layout (see CSS)
+        put(self, self.stack, True, True, 0)
         self.err_label = Gtk.Label(xalign=0.5)
-        self.err_label.get_style_context().add_class("dim-label")
+        css_class(self.err_label, "dim-label")
         self.stack.add_named(self.err_label, "error")
         self._build_tree()
         self._build_iconview()
@@ -410,6 +397,8 @@ class FolderView(Gtk.Box):
 
     # ---- details view
     def _build_tree(self):
+        if GTK4:
+            return self._build_list4()
         tv = Gtk.TreeView(model=self.store, enable_search=True, rubber_banding=True, headers_clickable=True)
         tv.set_search_equal_func(self._search_equal, None)
         tv.set_fixed_height_mode(True)      # O(1) row layout: 100k-row folders scroll like 100
@@ -421,27 +410,47 @@ class FolderView(Gtk.Box):
         sel.set_select_function(lambda s, m, p, cur, d: not m[p][1], None)
         sel.connect("changed", lambda s: self.win.on_selection_changed(self))
         tv.connect("row-activated", lambda t, p, c: self.win.activate_entry(self.entry_at(p)))
-        tv.connect("button-press-event", self._on_button, "tree")
-        tv.connect("key-press-event", self.win.on_view_key, self)
-        tv.connect("popup-menu", lambda w: self.win.context_menu(self, None) or True)
-        tv.connect("focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
-        tv.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.ASK)
-        tv.connect("drag-data-get", self._drag_get)
-        tv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        tv.connect("drag-data-received", self._drag_received, "tree")
+        on_event(tv, "button-press-event", self._on_button, "tree")
+        on_event(tv, "key-press-event", self.win.on_view_key, self)
+        on_menu_key(tv, lambda: self.win.context_menu(self, None))
+        on_event(tv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(tv, self._drag_get)
+        file_drop_target(tv, self._drag_received, "tree")
         self.name_renderer = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
         self.name_renderer.connect("edited", self._on_edited)
         self.name_renderer.connect("editing-canceled", lambda r: self._end_edit())
         self.name_renderer.connect("editing-started", self._on_editing_started)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         self.stack.add_named(sw, "details")
         self.rebuild_columns()
 
-    def rebuild_columns(self):
-        tv = self.tree
-        for c in tv.get_columns():
-            tv.remove_column(c)
+    def _build_list4(self):
+        """GTK 4: the Details list is a Gtk.ColumnView behind DetailsList (widgets.py), which answers the tree
+        view calls made in this class."""
+        tv = DetailsList(self)
+        self.tree = tv
+        tv.get_selection().connect("changed", lambda s: self.win.on_selection_changed(self))
+        tv.connect("row-activated", lambda t, p, c: self.win.activate_entry(self.entry_at(p)))
+        on_event(tv, "button-press-event", self._on_button, "tree")
+        on_event(tv, "key-press-event", self._list_key4)
+        on_menu_key(tv, lambda: self.win.context_menu(self, None))
+        on_event(tv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(tv, self._drag_get)
+        file_drop_target(tv, self._drag_received, "tree")
+        self.name_renderer = None
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        set_child(sw, tv.cv)
+        self.stack.add_named(sw, "details")
+        tv.set_model(self.store)
+        self.rebuild_columns()
+
+    def _list_key4(self, view, event):
+        if self.win.editing:                # the rename box sits inside the list: its keys are its own
+            return False
+        return self.win.on_view_key(view, event, self)
+
+    def _column_keys(self) -> List[str]:
         cols = list(self.cfg["columns"])
         if "name" not in cols:
             cols.insert(0, "name")
@@ -466,6 +475,22 @@ class FolderView(Gtk.Box):
             cols = ["name", "usage", "type"]
         if self.path == NETWORK:
             cols = ["name", "location", "usage", "type"]
+        return cols
+
+    COLUMN_WIDTHS = {"name": 260, "location": 260, "modified": 150, "type": 170, "size": 90, "usage": 170, "deleted": 150}
+
+    def rebuild_columns(self):
+        tv = self.tree
+        cols = self._column_keys()
+        if GTK4:
+            specs = [("_chk", "", 34, False, False)] if self.cfg["checkboxes"] else []
+            for key in cols:
+                specs.append((key, COLUMN_TITLES.get(key, "Space used" if key == "usage" else key),
+                              self.COLUMN_WIDTHS.get(key, 120), key == "name", self.path != THISPC))
+            tv.set_columns(specs, self.cfg["sort_key"], self.cfg["sort_desc"])
+            return
+        for c in tv.get_columns():
+            tv.remove_column(c)
         if self.cfg["checkboxes"]:
             tog = Gtk.CellRendererToggle()
             tog.connect("toggled", self._on_toggled)
@@ -478,26 +503,26 @@ class FolderView(Gtk.Box):
             col = Gtk.TreeViewColumn(COLUMN_TITLES.get(key, "Space used" if key == "usage" else key))
             col.set_resizable(True)
             col.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
-            col.set_fixed_width({"name": 260, "location": 260, "modified": 150, "type": 170, "size": 90, "usage": 170, "deleted": 150}.get(key, 120))
+            col.set_fixed_width(self.COLUMN_WIDTHS.get(key, 120))
             col.key = key
             if key == "name":
                 pix = Gtk.CellRendererPixbuf()
-                col.pack_start(pix, False)
+                put(col, pix, False)
                 col.set_cell_data_func(pix, self._icon_data)
-                col.pack_start(self.name_renderer, True)
+                put(col, self.name_renderer, True)
                 col.set_cell_data_func(self.name_renderer, self._name_data)
                 col.set_expand(True)
                 col.set_min_width(180)
             elif key == "usage":
                 prog = UsageRenderer()
-                col.pack_start(prog, True)
+                put(col, prog, True)
                 col.set_cell_data_func(prog, self._usage_data)
                 col.set_min_width(160)
             else:
                 r = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
                 if key == "size":
                     r.set_property("xalign", 1.0)
-                col.pack_start(r, True)
+                put(col, r, True)
                 col.set_cell_data_func(r, self._text_data, key)
                 col.set_min_width({"modified": 150, "type": 160, "size": 90}.get(key, 120))
                 if key == "location":
@@ -517,7 +542,7 @@ class FolderView(Gtk.Box):
     # cell data funcs
     def _icon_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)            # not model[it][0]: that builds a row object for every cell
         if not isinstance(v, Entry):
             cell.set_property("pixbuf", None)
             return
@@ -530,36 +555,125 @@ class FolderView(Gtk.Box):
 
     def _name_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)
         if not isinstance(v, Entry):
             cell.set_property("markup", f"<span alpha='72%'><b>{GLib.markup_escape_text(str(v))}</b></span>")
-            cell.set_property("foreground-set", False)
+            self._set_dim(cell, False)
             return
+        markup, dim = self._name_markup(v)
+        cell.set_property("markup", markup)
+        self._set_dim(cell, dim)
+
+    def _name_markup(self, v: Entry):
+        """(Pango markup for the Name cell, whether it is shown dimmed: cut, hidden, or in the inactive pane)."""
         name = self.win.display_name(v)
         if self.layout == "content":
             sub = v.type + ("" if v.is_dir else f"  ·  {fmt_size(v.size, self.cfg['size_in_bytes'])}") + (f"  ·  {pretty_path(v.location)}" if v.location else "")
-            cell.set_property("markup", f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>")
+            markup = f"{GLib.markup_escape_text(name)}\n<small><span foreground='{COL_DIM}'>{GLib.markup_escape_text(sub)}</span></small>"
         else:
-            cell.set_property("markup", GLib.markup_escape_text(name))
+            markup = GLib.markup_escape_text(name)
         cut = self.win.clipboard["mode"] == "cut" and v.path in self.win.clipboard["paths"]
-        dim = cut or v.hidden or self.muted
-        cell.set_property("foreground-rgba", self._dim_rgba() if dim else None)
+        return markup, bool(cut or v.hidden or self.muted)
+
+    # ---- GTK 4: the cells of the Details list are small widgets, made and filled here for DetailsList
+    def _cell_make4(self, key: str):
+        if key == "name":
+            box = Gtk.Box(spacing=6)
+            box.append(Gtk.Image())
+            lab = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, hexpand=True)
+            lab.set_max_width_chars(10)          # a small natural width: the column's width must not follow the longest name on screen
+            box.append(lab)
+            return box
+        if key == "_chk":
+            chk = Gtk.CheckButton()
+            chk.connect("toggled", self._chk_toggled4)
+            return chk
+        if key == "usage":
+            box = Gtk.Box(spacing=8)
+            bar = Gtk.LevelBar(hexpand=True, valign=Gtk.Align.CENTER)
+            box.append(bar)
+            box.append(Gtk.Label(xalign=0))
+            return box
+        return Gtk.Label(xalign=1.0 if key == "size" else 0.0, ellipsize=Pango.EllipsizeMode.END)
+
+    def _cell_fill4(self, cell, key: str):
+        row, child = cell.get_item(), cell.get_child()
+        if row is None or child is None:
+            return
+        v = row.v
+        real = isinstance(v, Entry)
+        if key == "name":
+            img, lab = child.get_first_child(), child.get_last_child()
+            img.set_visible(real)
+            if not real:
+                lab.add_css_class("sr-group")
+                lab.set_opacity(1.0)
+                lab.set_text(str(v))
+                return
+            lab.remove_css_class("sr-group")
+            size = 32 if self.layout == "content" else 16
+            pb = None
+            if size >= 32 and len(self.entries) <= 2500:
+                pb = ICONS.thumbnail(v, size, self._thumb_ready)
+            pb = pb or ICONS.pixbuf(v.icon, size, v)
+            if pb is not None and self.muted:
+                pb = ICONS.desaturated(pb)
+            img.set_pixel_size(size)
+            if pb is not None:
+                img.set_from_paintable(texture4(pb))
+            else:
+                img.clear()
+            markup, dim = self._name_markup(v)
+            lab.set_markup(markup)
+            lab.set_opacity(0.55 if dim else 1.0)
+        elif key == "_chk":
+            child.set_visible(real)
+            self._chk_busy = True
+            child.set_active(real and cell.get_selected())
+            self._chk_busy = False
+        elif key == "usage":
+            bar, lab = child.get_first_child(), child.get_last_child()
+            child.set_visible(bool(real and v.usage))
+            if real and v.usage:
+                used, total = v.usage
+                bar.set_value(used / total if total else 0.0)
+                lab.set_text(f"{int(100 * used / total) if total else 0}% used")
+        else:
+            child.set_text(self.win.cell_text(v, key) if real else "")
+            child.set_opacity(0.55 if self.muted else 1.0)
+
+    def _chk_toggled4(self, chk):
+        if getattr(self, "_chk_busy", False):
+            return
+        cell = self.tree.cell_of(chk)
+        if cell is not None:
+            sel, p = self.tree.get_selection(), Gtk.TreePath.new_from_indices([cell.get_position()])
+            (sel.select_path if chk.get_active() else sel.unselect_path)(p)
+
+    def _set_dim(self, cell, dim: bool):
+        """Dimmed or normal text on a renderer; the normal case, nearly every cell, costs nothing after the first."""
+        if dim:
+            cell.set_property("foreground-rgba", self._dim_rgba())
+            cell._sr_dim = True
+        elif getattr(cell, "_sr_dim", True):
+            cell.set_property("foreground-rgba", None)
+            cell._sr_dim = False
 
     def _dim_rgba(self):
         """Dimmed text (inactive split pane, hidden and cut files) relative to the text colour right now, so it
         stays dimmer than normal text when the window is unfocused and the theme has already greyed everything."""
         ctx = self.tree.get_style_context()
-        fg = ctx.get_color(Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
-        return Gdk.RGBA(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
+        fg = style_fg(ctx, Gtk.StateFlags.BACKDROP if ctx.get_state() & Gtk.StateFlags.BACKDROP else Gtk.StateFlags.NORMAL)
+        return rgba(fg.red, fg.green, fg.blue, fg.alpha * 0.55)
 
     def _text_data(self, col, cell, model, it, key):
         hover_bg(self.tree, cell, model, it)
-        v = model[it][0]
+        v = model.get_value(it, 0)
         if not isinstance(v, Entry):
             cell.set_property("text", "")
             return
         cell.set_property("text", self.win.cell_text(v, key))
-        cell.set_property("foreground-rgba", self._dim_rgba() if self.muted else None)
+        self._set_dim(cell, self.muted)
 
     def _usage_data(self, col, cell, model, it, data=None):
         hover_bg(self.tree, cell, model, it)
@@ -594,17 +708,15 @@ class FolderView(Gtk.Box):
         iv.provider = self._iv_tile
         iv.connect("item-activated", lambda v, p: self.win.activate_entry(self.entry_at(p)))
         iv.connect("selection-changed", lambda v: self.win.on_selection_changed(self))
-        iv.connect("button-press-event", self._on_button, "icons")
-        iv.connect("key-press-event", self.win.on_view_key, self)
-        iv.connect("popup-menu", lambda w: self.win.context_menu(self, None) or True)
-        iv.connect("focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
-        iv.enable_model_drag_source(Gdk.ModifierType.BUTTON1_MASK, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE | Gdk.DragAction.ASK)
-        iv.connect("drag-data-get", self._drag_get)
-        iv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        iv.connect("drag-data-received", self._drag_received, "icons")
+        on_event(iv, "button-press-event", self._on_button, "icons")
+        on_event(iv, "key-press-event", self.win.on_view_key, self)
+        on_menu_key(iv, lambda: self.win.context_menu(self, None))
+        on_event(iv, "focus-in-event", lambda w, e: self.win.set_active_pane(self) or False)
+        file_drag_source(iv, self._drag_get)
+        file_drop_target(iv, self._drag_received, "icons")
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         sw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        sw.add(iv)
+        set_child(sw, iv)
         self.stack.add_named(sw, "icons")
         # This PC tile view (Windows-style sections); used for every layout except Details
         self.pcview = PCView()
@@ -686,6 +798,8 @@ class FolderView(Gtk.Box):
             e = self.store[it][0]
             if isinstance(e, Entry) and e.path == path:
                 self.store.row_changed(self.store.get_path(it), it)
+                if GTK4:
+                    self.tree.refresh()
         except (ValueError, TypeError):
             pass
 
@@ -702,6 +816,8 @@ class FolderView(Gtk.Box):
             e = self.store[it][0]
             if isinstance(e, Entry):
                 self.store.row_changed(self.store.get_path(it), it)
+        if GTK4:
+            self.tree.refresh()
 
     @property
     def pc_mode(self) -> bool:
@@ -709,6 +825,8 @@ class FolderView(Gtk.Box):
 
     def apply_layout(self):
         lay = self.layout
+        if GTK4:                # the Details list mirrors the rows only while it is the list on show
+            self.tree.set_active(not self.pc_mode and (self.path == THISPC or lay in ("details", "content")))
         if self.pc_mode:
             self.stack.set_visible_child_name("pc")
             if self.entries:
@@ -733,9 +851,10 @@ class FolderView(Gtk.Box):
         # Keep the keyboard on the list that is showing. GTK gives the first focus to the details list even
         # when an icon layout is up, and a hidden list swallows every key (Space, Delete, arrows…) until the
         # first click.
-        top = self.get_toplevel()
+        top = toplevel(self)
         held = top.get_focus() if isinstance(top, Gtk.Window) else None
-        if held in (self.tree, self.icons) and held is not self.view:
+        in_list = GTK4 and self.tree.contains(held)          # GTK 4: the keyboard is on a row inside the list
+        if (held in (self.tree, self.icons) or in_list) and (self.view is self.icons if in_list else held is not self.view):
             self.view.grab_focus()
         # details rows carry section / group header rows, icon rows don't: switching between the two families
         # must rebuild the rows (from the listing already in memory — no disk access)
@@ -826,8 +945,13 @@ class FolderView(Gtk.Box):
                 first = first or row.path
         if first is not None and scroll:
             if self.view is self.tree:
-                self.tree.set_cursor(first, None, False)
+                self.tree.set_cursor(first, None, False)       # this also reduces the selection to that one row
                 self.tree.scroll_to_cell(first, None, False, 0, 0)
+                if len(names) > 1:
+                    sel = self.tree.get_selection()
+                    for row in self.store:
+                        if isinstance(row[0], Entry) and row[0].name in names:
+                            sel.select_path(row.path)
             else:
                 self.icons.set_cursor(first, None, False)
                 self.icons.scroll_to_path(first, False, 0, 0)
@@ -841,7 +965,7 @@ class FolderView(Gtk.Box):
         if kind == "tree" and event.button == 1:
             # Same fix as the icon grid: pair clicks ourselves instead of trusting GDK's 2-click events, which
             # chain across a folder change (the TreeView would otherwise activate on GDK's count).
-            if event.type in (Gdk.EventType._2BUTTON_PRESS, Gdk.EventType._3BUTTON_PRESS):
+            if event.type in (EV_PRESS2, EV_PRESS3):
                 return True
             hit = view.get_path_at_pos(int(event.x), int(event.y))
             row = hit[0].get_indices()[0] if hit else -1
@@ -892,7 +1016,7 @@ class FolderView(Gtk.Box):
     def _drag_received(self, widget, ctx, x, y, sel, info, t, kind):
         uris = sel.get_uris()
         if not uris:
-            Gtk.drag_finish(ctx, False, False, t)
+            drag_finish(ctx, False, t)
             return
         dest = self.path if self.path not in VIRTUAL else None
         if kind == "tree":
@@ -910,7 +1034,7 @@ class FolderView(Gtk.Box):
         paths = [p for p in (Gio.File.new_for_uri(u).get_path() for u in uris) if p]
         kind = decide_drop(paths, dest, widget)
         ok = bool(kind) and self.win.transfer(paths, dest, kind)
-        Gtk.drag_finish(ctx, ok, False, t)
+        drag_finish(ctx, ok, t)
 
     # ---- rename
     def start_rename(self):
@@ -930,6 +1054,19 @@ class FolderView(Gtk.Box):
         col = next((c for c in self.tree.get_columns() if getattr(c, "key", "") == "name"), None)
         if col is None:
             return
+        if GTK4:                           # GTK 4.12 misplaces its own cell editor: see edit_cell4
+            e = self.entry_at(p)
+            if e is None:
+                return
+            self.win.editing = True
+
+            def done(new):
+                self.win.editing = False
+                self.tree.grab_focus()
+                if new and new != e.name:
+                    self.win.do_rename(e.path, os.path.join(os.path.dirname(e.path), new))
+            stem = len(e.name) if e.is_dir else len(os.path.splitext(e.name)[0])
+            return self.tree.edit_name(p, e.name, stem, done)
         self.name_renderer.set_property("editable", True)
         self.tree.set_cursor(p, col, True)
 
@@ -1009,7 +1146,7 @@ class FolderView(Gtk.Box):
                 except Exception as ex:
                     ents, err = [], str(ex)
                 GLib.idle_add(self._fill, gen, ents, err, old)
-            threading.Thread(target=vwork, daemon=True).start()
+            bg(vwork)
             self._watch()
             return
 
@@ -1047,7 +1184,7 @@ class FolderView(Gtk.Box):
                 except Exception:
                     pass
             GLib.idle_add(self._fill, gen, ents, err, old)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         self._watch()
 
     CHUNK = 4000          # rows appended per main-loop iteration (~15 ms)
@@ -1062,13 +1199,23 @@ class FolderView(Gtk.Box):
         rows = self._rows_for(ents)
         view = self.view
         view.set_model(None)
-        self.store.clear()
+        self._clear_store()
         app = self.store.append
         for r in rows:
             app(r)
         view.set_model(self.store)
         self.win.on_tab_loaded(self)
         return False
+
+    def _clear_store(self):
+        """Empty the rows. The GTK 4 Details list follows single inserts but not a clear, so it is detached for
+        it and attached again (to the icon grid a clear is one cheap signal per row either way)."""
+        attached = GTK4 and self.tree.get_model() is not None
+        if attached:
+            self.tree.set_model(None)
+        self.store.clear()
+        if attached:
+            self.tree.set_model(self.store)
 
     def _rows_for(self, ents: List[Entry]) -> List[list]:
         group = self.cfg["group_by"]
@@ -1122,7 +1269,7 @@ class FolderView(Gtk.Box):
         self.entries = ents
         self.error = err
         rows = self._rows_for(ents)
-        self.store.clear()
+        self._clear_store()
         if self.view.get_model() is None:
             self.view.set_model(self.store)
         if err:
@@ -1198,7 +1345,7 @@ class FolderView(Gtk.Box):
         def work():
             res = sort_entries(ents, cfg["sort_key"], cfg["sort_desc"], cfg["folders_first"])
             GLib.idle_add(self._fill, gen, res, "", old)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _watch(self):
         if self.monitor:
@@ -1230,7 +1377,7 @@ class FolderView(Gtk.Box):
         self.search_text = text
         root = self.path if self.path not in VIRTUAL else HOME
         self.entries = []
-        self.store.clear()
+        self._clear_store()
         self._index = None
         self.search = SearchOp(root, text, self.cfg["search_subfolders"], self.cfg["search_contents"], self.cfg["show_hidden"], self._search_batch)
         self.rebuild_columns()
@@ -1287,7 +1434,7 @@ class Page(Gtk.Box):
         self.win = win
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
         self.paned.set_wide_handle(False)
-        self.pack_start(self.paned, True, True, 0)
+        put(self, self.paned, True, True, 0)
         self.panes: List[FolderView] = []
         self.active: Optional[FolderView] = None
         self.label = Gtk.Label(label="", width_chars=14, max_width_chars=30, ellipsize=Pango.EllipsizeMode.END, xalign=0)
@@ -1299,10 +1446,10 @@ class Page(Gtk.Box):
         fv.page = self
         self.panes.append(fv)
         if len(self.panes) == 1:
-            self.paned.pack1(fv, True, False)
+            pane_first(self.paned, fv, True, False)
         else:
-            self.paned.pack2(fv, True, False)
-        fv.show_all()
+            pane_second(self.paned, fv, True, False)
+        show_all(fv)
         self._update_headers()
         if path not in VIRTUAL:
             self.win._bump_frequent(path)
@@ -1330,10 +1477,10 @@ class Page(Gtk.Box):
         if pane.monitor:
             pane.monitor.cancel()
         self.panes.remove(pane)
-        self.paned.remove(pane)
+        take_out(self.paned, pane)
         keep = self.panes[0]
-        self.paned.remove(keep)
-        self.paned.pack1(keep, True, False)
+        take_out(self.paned, keep)
+        pane_first(self.paned, keep, True, False)
         self.active = keep
         self._update_headers()
         keep.view.grab_focus()

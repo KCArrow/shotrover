@@ -215,7 +215,7 @@ Download `shotrover-<version>-portable.zip` from the
 `./make-portable.sh` (output in `dist/`). Unzip anywhere:
 
 ```
-shotrover-1.1.2-portable/
+shotrover-1.2.0-portable/
 ├── shotrover          # launcher: ./shotrover [folder]
 ├── shotrover.py       # the application
 ├── install.sh         # optional: install into ~/.local/bin later
@@ -306,7 +306,7 @@ A legacy `~/.config/explorer-gtk/config.json` is migrated automatically on first
 editing manageable; they share one module namespace). Edit the parts, never `shotrover.py` directly.
 
 ```bash
-./build.sh            # src/p*.py → shotrover.py, then py_compile as a syntax check
+./build.sh            # src/*.py → shotrover.py, then py_compile as a syntax check
 ./make-portable.sh    # → dist/shotrover-<version>-portable.zip
 ```
 

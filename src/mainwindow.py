@@ -17,7 +17,7 @@ def _menu_item(label: str, cb: Optional[Callable], accel: str = "", check: Optio
     if accel:
         child = item.get_child()
         if isinstance(child, Gtk.AccelLabel):
-            key, mods = Gtk.accelerator_parse(accel)
+            key, mods = accel_parse(accel)
             child.set_accel(key, mods)
     if submenu is not None:
         item.set_submenu(submenu)
@@ -28,7 +28,9 @@ def _menu_item(label: str, cb: Optional[Callable], accel: str = "", check: Optio
 
 
 def build_menu(spec) -> Gtk.Menu:
-    """spec: list of dicts/tuples -> Gtk.Menu."""
+    """spec: list of dicts/tuples -> Gtk.Menu (GTK 4: a popover menu, see menu4 in toolkit.py)."""
+    if GTK4:
+        return menu4(spec)
     menu = Gtk.Menu()
     for s in spec:
         if s == "-":
@@ -39,7 +41,7 @@ def build_menu(spec) -> Gtk.Menu:
         sub = build_menu(s["sub"]) if "sub" in s else None
         menu.append(_menu_item(s["label"], s.get("cb"), s.get("accel", ""), s.get("check"), s.get("radio"),
                                s.get("sensitive", True), sub))
-    menu.show_all()
+    show_all(menu)
     return menu
 
 
@@ -75,26 +77,26 @@ class MainWindow(Gtk.ApplicationWindow):
         self.status_timer = 0
         self.set_default_size(*self.cfg["window"])
         self.set_icon_name("system-file-manager")
-        self.accel = Gtk.AccelGroup()
-        self.add_accel_group(self.accel)
+        self.accel = Shortcuts(self)
 
         vbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        self.add(vbox)
-        self.menubar = Gtk.MenuBar()
-        vbox.pack_start(self.menubar, False, False, 0)
+        set_child(self, vbox)
+        self.menubar = menu_bar()
+        put(vbox, self.menubar, False, False, 0)
         self._build_menubar()
-        vbox.pack_start(self._build_toolbar(), False, False, 0)
-        vbox.pack_start(self._build_commandbar(), False, False, 0)
+        put(vbox, self._build_toolbar(), False, False, 0)
+        put(vbox, self._build_commandbar(), False, False, 0)
         # error bar: slides in when something failed (see CrashReporter); collapsed otherwise. GTK 3's InfoBar
         # comes up blank if it is hidden and re-shown, so it stays "shown" and only its revealed state changes.
         self.report_bar = Gtk.InfoBar(message_type=Gtk.MessageType.WARNING, show_close_button=True)
         self.report_bar.set_revealed(False)
         self.report_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.report_bar.get_content_area().pack_start(self.report_label, True, True, 0)
+        info_bar_content(self.report_bar, self.report_label)
+        self.report_dismiss = self.report_bar.add_button("Dismiss all", 2)     # shown when more than one is waiting
         self.report_bar.add_button("Review & report…", 1)
         self.report_bar.connect("response", self._on_report_bar)
         self._report_path: Optional[str] = None
-        vbox.pack_start(self.report_bar, False, False, 0)
+        put(vbox, self.report_bar, False, False, 0)
         self.notebook = Gtk.Notebook(scrollable=True)
         self.notebook.set_show_border(False)
         self.notebook.set_group_name("shotrover-tabs")
@@ -102,53 +104,57 @@ class MainWindow(Gtk.ApplicationWindow):
         self.notebook.connect("page-removed", self._on_page_removed)
         self.notebook.connect("page-added", self._on_page_added)
         self.notebook.connect("create-window", self._on_create_window)
-        newtab = Gtk.Button.new_from_icon_name("tab-new-symbolic", Gtk.IconSize.MENU)
-        newtab.set_relief(Gtk.ReliefStyle.NONE)
+        newtab = icon_button("tab-new-symbolic", "menu")
+        flat_button(newtab)
         self.tip(newtab, "New tab", "new_tab")
         newtab.connect("clicked", lambda b: self.new_tab(self.tab.path if self.tab.path not in VIRTUAL else HOME))
         newtab.show()
         self.notebook.set_action_widget(newtab, Gtk.PackType.END)
 
         self.paned = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        vbox.pack_start(self.paned, True, True, 0)
+        put(vbox, self.paned, True, True, 0)
         self.nav_box = self._build_nav()
-        self.paned.pack1(self.nav_box, False, False)
+        pane_first(self.paned, self.nav_box, False, False)
         self.right = Gtk.Paned(orientation=Gtk.Orientation.HORIZONTAL)
-        self.right.pack1(self.notebook, True, False)
+        pane_first(self.right, self.notebook, True, False)
         self.side = self._build_side()
-        self.right.pack2(self.side, False, False)
-        self.paned.pack2(self.right, True, False)
+        pane_second(self.right, self.side, False, False)
+        pane_second(self.paned, self.right, True, False)
         self.paned.set_position(self.cfg["nav_width"])
         self._watch_volumes()
         # The side pane (preview + quick view) is freely resizable, like the nav pane; both splitters are
         # remembered: side_width is the pane's width, side_split the preview/quick-view divider.
         self._side_restored = False
-        self.right.connect("size-allocate", self._restore_side_width)
+        on_resize(self.right, lambda: self._restore_side_width(self.right, self.right.get_allocation()))
         self.right.connect("notify::position", lambda p, _: self._remember_side_width())
         self.side_paned.connect("notify::position", lambda p, _: self._remember_side_split())
 
         self.status = Gtk.Label(xalign=0, margin_start=8, margin_end=8, margin_top=3, margin_bottom=3, ellipsize=Pango.EllipsizeMode.END)
         sb = Gtk.Box()
-        sb.get_style_context().add_class("statusbar")
+        css_class(sb, "statusbar")
         # bottom-left activity wheel: spins while a folder is being read (network shares, big folders) or
         # a search is running; hidden otherwise so the bar stays quiet
-        self.spinner = Gtk.Spinner(margin_start=8, no_show_all=True)
+        self.spinner = Gtk.Spinner(margin_start=8)
+        start_hidden(self.spinner)
         self.spinner.set_size_request(14, 14)
-        sb.pack_start(self.spinner, False, False, 0)
-        sb.pack_start(self.status, True, True, 0)
+        put(sb, self.spinner, False, False, 0)
+        put(sb, self.status, True, True, 0)
         for lay, icon, tip in (("details", "view-list-symbolic", "Details"), ("large", "view-grid-symbolic", "Large icons")):
-            b = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.MENU)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            b = icon_button(icon, "menu")
+            flat_button(b)
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda b, l=lay: self.set_layout(l))
-            sb.pack_end(b, False, False, 0)
-        vbox.pack_start(sb, False, False, 0)
+            put_end(sb, b, False, False, 0)
+        put(vbox, sb, False, False, 0)
 
-        self.connect("key-press-event", self._on_key)
-        self.connect("button-press-event", self._on_button)
-        self.connect("delete-event", self._on_close)
+        on_event(self, "key-press-event", self._on_key)
+        on_event(self, "button-press-event", self._on_button)
+        on_event(self, "delete-event", self._on_close)
 
-        self.show_all()
+        show_all(self)
+        # Open on the empty state. Left alone the stack starts on its first page (an empty breakdown) until
+        # the placeholder timer runs, so the pane visibly changed a moment after the window opened.
+        self.preview_stack.set_visible_child_name("info")
         bench("window")
         self._bench_listed = False
         if path != "":   # "" = empty window that will receive a dragged tab
@@ -159,49 +165,49 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ toolbar
     def _build_toolbar(self):
         tb = Gtk.Box(spacing=6, margin_start=6, margin_end=6, margin_top=4, margin_bottom=2)
-        tb.get_style_context().add_class("toolbar-row")
-        self.btn_back = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.BUTTON)
-        self.btn_fwd = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.BUTTON)
-        self.btn_up = Gtk.Button.new_from_icon_name("go-up-symbolic", Gtk.IconSize.BUTTON)
+        css_class(tb, "toolbar-row")
+        self.btn_back = icon_button("go-previous-symbolic", "button")
+        self.btn_fwd = icon_button("go-next-symbolic", "button")
+        self.btn_up = icon_button("go-up-symbolic", "button")
         for b, cb, tip in ((self.btn_back, self.go_back, ("Back", "back")), (self.btn_fwd, self.go_forward, ("Forward", "forward")),
                            (self.btn_up, self.go_up, ("Up", "up"))):
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            flat_button(b)
             self.tip(b, *tip)
             b.connect("clicked", lambda w, c=cb: c())
-            tb.pack_start(b, False, False, 0)
-        self.btn_back.connect("button-press-event", self._history_popup)
+            put(tb, b, False, False, 0)
+        on_event(self.btn_back, "button-press-event", self._history_popup)
         # path bar: breadcrumbs or entry
         self.path_stack = Gtk.Stack()
         self.crumbs = Gtk.Box()
-        self.crumbs.get_style_context().add_class("linked")
-        crumb_frame = Gtk.EventBox()
-        crumb_frame.add(self.crumbs)
-        crumb_frame.connect("button-press-event", lambda w, e: self.edit_address() if e.button == 1 else None)
+        css_class(self.crumbs, "linked")
+        crumb_frame = event_box()
+        set_child(crumb_frame, clip_wide(self.crumbs))
+        on_event(crumb_frame, "button-press-event", lambda w, e: self.edit_address() if e.button == 1 else None)
         self.path_stack.add_named(crumb_frame, "crumbs")
         self.addr = Gtk.Entry()
         self.addr.connect("activate", self._on_address)
-        self.addr.connect("focus-out-event", lambda w, e: self.path_stack.set_visible_child_name("crumbs"))
-        self.addr.connect("key-press-event", self._on_address_key)
+        on_event(self.addr, "focus-out-event", lambda w, e: self.path_stack.set_visible_child_name("crumbs"))
+        on_event(self.addr, "key-press-event", self._on_address_key)
         self.path_stack.add_named(self.addr, "entry")
         frame = Gtk.Frame()
-        frame.set_shadow_type(Gtk.ShadowType.NONE)
-        frame.get_style_context().add_class("pathbar")
-        frame.add(self.path_stack)
+        set_frame(frame, False)
+        css_class(frame, "pathbar")
+        set_child(frame, self.path_stack)
         # The bar's outline is painted here rather than by CSS: themes differ in whether a GtkFrame draws a
         # CSS border, and the outline must always be there (faint at rest, firmer under the pointer) so the
         # clickable address area is obvious.
         self._pathbar_hover = False
-        frame.connect("draw", self._draw_pathbar_outline)
+        on_draw_over(frame, self._draw_pathbar_outline, under=True)
         self.path_stack.connect("notify::visible-child-name", lambda *a: frame.queue_draw())   # firmer while typing
-        crumb_frame.add_events(Gdk.EventMask.ENTER_NOTIFY_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
-        crumb_frame.connect("enter-notify-event", lambda w, e: self._pathbar_hovered(frame, True))
-        crumb_frame.connect("leave-notify-event", lambda w, e: e.detail == Gdk.NotifyType.INFERIOR or self._pathbar_hovered(frame, False))
-        tb.pack_start(frame, True, True, 0)
+        add_event_mask(crumb_frame, EVMASK.ENTER_NOTIFY_MASK | EVMASK.LEAVE_NOTIFY_MASK)
+        on_event(crumb_frame, "enter-notify-event", lambda w, e: self._pathbar_hovered(frame, True))
+        on_event(crumb_frame, "leave-notify-event", lambda w, e: e.detail == Gdk.NotifyType.INFERIOR or self._pathbar_hovered(frame, False))
+        put(tb, frame, True, True, 0)
         self.searchbox = Gtk.SearchEntry(width_chars=22)
         self.searchbox.set_placeholder_text("Search")
         self.searchbox.connect("activate", lambda e: self.start_search(e.get_text()))
         self.searchbox.connect("stop-search", lambda e: self.clear_search())
-        tb.pack_start(self.searchbox, False, False, 0)
+        put(tb, self.searchbox, False, False, 0)
         return tb
 
     def _pathbar_hovered(self, frame, on: bool):
@@ -212,7 +218,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _draw_pathbar_outline(self, w, cr):
         a = w.get_allocation()
-        fg = w.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(w.get_style_context(), Gtk.StateFlags.NORMAL)
         x, y, ww, hh, r = 0.5, 0.5, a.width - 1.0, a.height - 1.0, 6.0
         cr.new_sub_path()
         cr.arc(x + ww - r, y + r, r, -math.pi / 2, 0)
@@ -240,14 +246,10 @@ class MainWindow(Gtk.ApplicationWindow):
             t = self.tab
             if not t.back:
                 return True
-            m = Gtk.Menu()
-            for i, p in enumerate(reversed(t.back[-15:])):
-                it = Gtk.MenuItem(label=self.display_path(p))
-                it.connect("activate", lambda it, n=i + 1: self.go_back(n))
-                m.append(it)
-            m.attach_to_widget(btn, None)
-            m.show_all()
-            m.popup_at_pointer(event)
+            # "_" marks a mnemonic in a menu label, so the ones in a path are doubled to show as they are
+            m = build_menu([(self.display_path(p).replace("_", "__"), lambda n=i + 1: self.go_back(n))
+                            for i, p in enumerate(reversed(t.back[-15:]))])
+            popup_menu(m, btn, event)
             return True
         return False
 
@@ -255,18 +257,18 @@ class MainWindow(Gtk.ApplicationWindow):
         t = self.tab
         if t is None:
             return
-        for c in self.crumbs.get_children():
-            self.crumbs.remove(c)
+        for c in child_widgets(self.crumbs):
+            take_out(self.crumbs, c)
         for label, p in self._crumb_list(t.path):
             b = Gtk.Button(label=label)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            flat_button(b)
             b.connect("clicked", lambda w, pp=p: self.navigate(pp))
-            b.connect("button-press-event", lambda w, e, pp=p: (self.new_tab(pp) or True) if e.button == 2 else False)
-            self.crumbs.pack_start(b, False, False, 0)
+            on_event(b, "button-press-event", lambda w, e, pp=p: (self.new_tab(pp) or True) if e.button == 2 else False)
+            put(self.crumbs, b, False, False, 0)
             arrow = Gtk.Label(label="›")
-            arrow.get_style_context().add_class("dim-label")
-            self.crumbs.pack_start(arrow, False, False, 2)
-        self.crumbs.show_all()
+            css_class(arrow, "dim-label")
+            put(self.crumbs, arrow, False, False, 2)
+        show_all(self.crumbs)
         self.searchbox.set_placeholder_text(f"Search {self.display_path(t.path)}")
         if not t.search:
             self.searchbox.set_text("")
@@ -348,15 +350,15 @@ class MainWindow(Gtk.ApplicationWindow):
     # ------------------------------------------------------------------ command bar (Windows 11 style)
     def _cmd_button(self, icon: str, label: str, cb: Callable, tip: str = "", menu_cb: Optional[Callable] = None):
         b = Gtk.Button()
-        b.set_relief(Gtk.ReliefStyle.NONE)
-        b.get_style_context().add_class("cmd")
+        flat_button(b)
+        css_class(b, "cmd")
         box = Gtk.Box(spacing=6)
-        box.pack_start(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON), False, False, 0)
+        put(box, icon_image(icon, "button"), False, False, 0)
         if label:
-            box.pack_start(Gtk.Label(label=label), False, False, 0)
+            put(box, Gtk.Label(label=label), False, False, 0)
         if menu_cb:
-            box.pack_start(Gtk.Image.new_from_icon_name("pan-down-symbolic", Gtk.IconSize.MENU), False, False, 0)
-        b.add(box)
+            put(box, icon_image("pan-down-symbolic", "menu"), False, False, 0)
+        set_child(b, box)
         if isinstance(tip, tuple):
             self.tip(b, *tip)                     # (text, shortcut action): the tooltip names the current shortcut
         else:
@@ -369,32 +371,31 @@ class MainWindow(Gtk.ApplicationWindow):
         return b
 
     def _popup_under(self, widget, menu: Gtk.Menu):
-        menu.attach_to_widget(widget, None)
-        menu.popup_at_widget(widget, Gdk.Gravity.SOUTH_WEST, Gdk.Gravity.NORTH_WEST, None)
+        popup_menu(menu, widget, where="under")
 
     def _build_commandbar(self):
         bar = Gtk.Box(spacing=2)
-        bar.get_style_context().add_class("commandbar")
+        css_class(bar, "commandbar")
         bar.set_margin_start(6)
         bar.set_margin_end(6)
         bar.set_margin_bottom(4)
         sep = lambda: Gtk.Separator(orientation=Gtk.Orientation.VERTICAL, margin_top=6, margin_bottom=6, margin_start=4, margin_end=4)
-        bar.pack_start(self._cmd_button("list-add-symbolic", "New", None, "New folder or item", lambda: self._new_item_spec_with_folder()), False, False, 0)
-        bar.pack_start(sep(), False, False, 0)
+        put(bar, self._cmd_button("list-add-symbolic", "New", None, "New folder or item", lambda: self._new_item_spec_with_folder()), False, False, 0)
+        put(bar, sep(), False, False, 0)
         for icon, lab, cb, tip in (("edit-cut-symbolic", "", lambda: self.copy_sel("cut"), ("Cut", "cut")),
                                    ("edit-copy-symbolic", "", lambda: self.copy_sel("copy"), ("Copy", "copy")),
                                    ("edit-paste-symbolic", "", lambda: self.paste(), ("Paste", "paste")),
                                    ("document-edit-symbolic", "", lambda: self.tab.start_rename(), ("Rename", "rename")),
                                    ("user-trash-symbolic", "", lambda: self.delete(), ("Delete", "delete"))):
-            bar.pack_start(self._cmd_button(icon, lab, cb, tip), False, False, 0)
-        bar.pack_start(self._cmd_button("emblem-shared-symbolic", "", None, "Share", lambda: self.share_spec()), False, False, 0)
-        bar.pack_start(sep(), False, False, 0)
-        bar.pack_start(self._cmd_button("view-sort-descending-symbolic", "Sort", None, "Sort by", lambda: self.menu_spec("view")[6]["sub"]), False, False, 0)
-        bar.pack_start(self._cmd_button("view-grid-symbolic", "View", None, "Layout", lambda: self.menu_spec("view")[5]["sub"] + ["-"] + self.menu_spec("view")[11:14]), False, False, 0)
-        bar.pack_start(self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, ("Show two folders side by side", "split")), False, False, 0)
-        bar.pack_start(self._cmd_button("view-more-symbolic", "", None, "More", lambda: self.menu_spec("home")), False, False, 0)
-        bar.pack_end(self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), ("Details pane", "details_pane")), False, False, 0)
-        bar.pack_end(self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), ("Preview pane", "preview_pane")), False, False, 0)
+            put(bar, self._cmd_button(icon, lab, cb, tip), False, False, 0)
+        put(bar, self._cmd_button("emblem-shared-symbolic", "", None, "Share", lambda: self.share_spec()), False, False, 0)
+        put(bar, sep(), False, False, 0)
+        put(bar, self._cmd_button("view-sort-descending-symbolic", "Sort", None, "Sort by", lambda: self.menu_spec("view")[6]["sub"]), False, False, 0)
+        put(bar, self._cmd_button("view-grid-symbolic", "View", None, "Layout", lambda: self.menu_spec("view")[5]["sub"] + ["-"] + self.menu_spec("view")[11:14]), False, False, 0)
+        put(bar, self._cmd_button("view-dual-symbolic", "Split", self.toggle_split, ("Show two folders side by side", "split")), False, False, 0)
+        put(bar, self._cmd_button("view-more-symbolic", "", None, "More", lambda: self.menu_spec("home")), False, False, 0)
+        put_end(bar, self._cmd_button("sidebar-show-right-symbolic", "", lambda: self.toggle_cfg("details_pane"), ("Details pane", "details_pane")), False, False, 0)
+        put_end(bar, self._cmd_button("image-x-generic-symbolic", "", lambda: self.toggle_cfg("preview_pane"), ("Preview pane", "preview_pane")), False, False, 0)
         return bar
 
     def _new_item_spec_with_folder(self):
@@ -414,9 +415,9 @@ class MainWindow(Gtk.ApplicationWindow):
         arrow.set_fixed_size(16, -1)
         pix = Gtk.CellRendererPixbuf()
         txt = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
-        col.pack_start(arrow, False)
-        col.pack_start(pix, False)
-        col.pack_start(txt, True)
+        put(col, arrow, False)
+        put(col, pix, False)
+        put(col, txt, True)
         col.set_cell_data_func(arrow, self._nav_arrow, None)
         col.set_cell_data_func(pix, self._nav_icon, None)
         col.set_cell_data_func(txt, self._nav_text, None)
@@ -431,15 +432,14 @@ class MainWindow(Gtk.ApplicationWindow):
         tv.connect("row-expanded", lambda t, it, p: t.queue_draw())
         tv.connect("row-collapsed", lambda t, it, p: t.queue_draw())
         tv.connect("row-activated", self._nav_activate)
-        tv.connect("button-press-event", self._nav_button)
-        tv.connect("key-press-event", self._nav_key)
-        tv.drag_dest_set(Gtk.DestDefaults.ALL, URI_TARGETS, Gdk.DragAction.COPY | Gdk.DragAction.MOVE)
-        tv.connect("drag-data-received", self._nav_drop)
+        on_event(tv, "button-press-event", self._nav_button)
+        on_event(tv, "key-press-event", self._nav_key)
+        file_drop_target(tv, self._nav_drop)
         self.rebuild_nav()
         sw = Gtk.ScrolledWindow(hexpand=False, vexpand=True)
         sw.set_policy(Gtk.PolicyType.AUTOMATIC, Gtk.PolicyType.AUTOMATIC)
-        sw.add(tv)
-        sw.get_style_context().add_class("navpane")
+        set_child(sw, tv)
+        css_class(sw, "navpane")
         return sw
 
     def rebuild_nav(self):
@@ -529,7 +529,8 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.nav_store.append(it, [None])
 
     def _nav_tooltip(self, tv, x, y, keyboard, tip):
-        ok, mx, my, model, path, it = tv.get_tooltip_context(x, y, keyboard)
+        ctx = tv.get_tooltip_context(x, y, keyboard)      # GTK 3: (ok, x, y, model, path, iter); GTK 4 has no x, y
+        ok, model, path, it = ctx[0], ctx[-3], ctx[-2], ctx[-1]
         if not ok:
             return False
         n = model[it][0]
@@ -629,7 +630,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         self.nav_store.row_changed(self.nav_store.get_path(child), child)
                 child = nxt
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return False
 
     def _nav_node_at(self, event):
@@ -649,12 +650,12 @@ class MainWindow(Gtk.ApplicationWindow):
             self.navigate(node.path)       # expanding is only done by the twirly, like Explorer
 
     def _nav_button(self, tv, event):
-        if event.button == 1 and event.type == Gdk.EventType._2BUTTON_PRESS:
+        if event.button == 1 and event.type == EV_PRESS2:
             node, _ = self._nav_node_at(event)
             if node and node.kind == "file" and node.path:
                 self.open_file(entry_for_path(node.path))
                 return True
-        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS:
+        if event.button == 1 and event.type == EV_PRESS:
             hit = tv.get_path_at_pos(int(event.x), int(event.y))
             if hit:
                 path, col, cx, cy = hit
@@ -709,22 +710,21 @@ class MainWindow(Gtk.ApplicationWindow):
             if node and node.path == TRASH and uris:
                 paths = [Gio.File.new_for_uri(u).get_path() for u in uris]
                 self.run_op("trash", [p for p in paths if p], None)
-                Gtk.drag_finish(ctx, True, False, t)
+                drag_finish(ctx, True, t)
                 return
-            Gtk.drag_finish(ctx, False, False, t)
+            drag_finish(ctx, False, t)
             return
         paths = [p for p in (Gio.File.new_for_uri(u).get_path() for u in uris) if p]
         kind = decide_drop(paths, node.path, tv)
         ok = bool(kind) and self.transfer(paths, node.path, kind)
-        Gtk.drag_finish(ctx, ok, False, t)
+        drag_finish(ctx, ok, t)
 
     def nav_context_menu(self, node: NavNode, path, event):
         p = node.path
         if node.kind == "volume":                      # a removable volume that isn't mounted yet
             spec = [("_Mount", lambda: self.mount_volume(node.volume))]
             menu = build_menu(spec)
-            menu.attach_to_widget(self.nav_tree, None)
-            menu.popup_at_pointer(event)
+            popup_menu(menu, self.nav_tree, event)
             return
         pinned = p in self.cfg["pinned"]
         spec = [("_Open", lambda: self.navigate(p)), ("Open in new _tab", lambda: self.new_tab(p)),
@@ -742,8 +742,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if node.kind == "network":
             spec += [("_Disconnect (unmount)", lambda: self.unmount(p))]
         menu = build_menu(spec)
-        menu.attach_to_widget(self.nav_tree, None)
-        menu.popup_at_pointer(event)
+        popup_menu(menu, self.nav_tree, event)
 
     # ------------------------------------------------------------------ network
     def net_entries(self) -> List[Entry]:
@@ -769,7 +768,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     e.type = "unavailable"
             found = network_browse()
             GLib.idle_add(lambda: self._net_browse_done(t, found) or False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return out
 
     def _net_browse_done(self, t: FolderView, found: List[Entry]):
@@ -865,41 +864,41 @@ class MainWindow(Gtk.ApplicationWindow):
             total = 0
         d = Gtk.Dialog(title=f"Format {label}", transient_for=self, modal=True)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Format", Gtk.ResponseType.OK)
-        d.get_widget_for_response(Gtk.ResponseType.OK).get_style_context().add_class("destructive-action")
+        css_class(d.get_widget_for_response(Gtk.ResponseType.OK), "destructive-action")
         box = d.get_content_area()
-        box.set_border_width(12)
+        set_margins(box, 12)
         box.set_spacing(8)
         warn = Gtk.Label(xalign=0, wrap=True)
         warn.set_markup(f"<b>Everything on {GLib.markup_escape_text(label)} ({dev}, {fmt_size(total)}) will be erased.</b>\nThis cannot be undone.")
-        box.pack_start(warn, False, False, 0)
-        box.pack_start(Gtk.Label(label="File system:", xalign=0), False, False, 0)
+        put(box, warn, False, False, 0)
+        put(box, Gtk.Label(label="File system:", xalign=0), False, False, 0)
         combo = Gtk.ComboBoxText()
         avail = [(k, desc) for k, desc, _pkg in FORMAT_CHOICES if mkfs_available(k)]
         for k, desc in avail:
             combo.append(k, desc)
         if avail:
             combo.set_active(0)
-        box.pack_start(combo, False, False, 0)
+        put(box, combo, False, False, 0)
         missing = [f"{desc.split(' — ')[0]} (package: {pkg})" for k, desc, pkg in FORMAT_CHOICES if not mkfs_available(k)]
         if missing:
             ml = Gtk.Label(xalign=0, wrap=True)
             ml.set_markup("<small>Not available until installed: " + GLib.markup_escape_text(", ".join(missing)) + "</small>")
-            box.pack_start(ml, False, False, 0)
-        box.pack_start(Gtk.Label(label="Volume label:", xalign=0), False, False, 0)
+            put(box, ml, False, False, 0)
+        put(box, Gtk.Label(label="Volume label:", xalign=0), False, False, 0)
         name = Gtk.Entry(text=re.sub(r"[^A-Za-z0-9_ -]", "", label)[:32] or "USB", activates_default=True)
-        box.pack_start(name, False, False, 0)
+        put(box, name, False, False, 0)
         quick = Gtk.CheckButton(label="Quick format (don't overwrite existing data)", active=True)
-        box.pack_start(quick, False, False, 0)
+        put(box, quick, False, False, 0)
         if total > 64 << 30:
-            box.pack_start(Gtk.Label(label=f"This drive is large. Type its current name ({label}) to confirm:", xalign=0, wrap=True), False, False, 0)
+            put(box, Gtk.Label(label=f"This drive is large. Type its current name ({label}) to confirm:", xalign=0, wrap=True), False, False, 0)
             confirm = Gtk.Entry()
-            box.pack_start(confirm, False, False, 0)
+            put(box, confirm, False, False, 0)
         else:
             confirm = None
         d.set_default_response(Gtk.ResponseType.OK)
-        d.show_all()
+        show_all(d)
         while True:
-            r = d.run()
+            r = run_dialog(d)
             if r != Gtk.ResponseType.OK:
                 d.destroy()
                 return
@@ -913,10 +912,10 @@ class MainWindow(Gtk.ApplicationWindow):
         fstype, vol_label, erase = combo.get_active_id(), name.get_text().strip(), not quick.get_active()
         d.destroy()
         prog = Gtk.Dialog(title="Formatting", transient_for=self, modal=True)
-        pb = Gtk.ProgressBar(text=f"Formatting {dev} as {fstype}…", show_text=True, margin=16)
-        prog.get_content_area().pack_start(pb, False, False, 0)
+        pb = with_margins(Gtk.ProgressBar(text=f"Formatting {dev} as {fstype}…", show_text=True), 16)
+        put(prog.get_content_area(), pb, False, False, 0)
         prog.set_default_size(380, -1)
-        prog.show_all()
+        show_all(prog)
         pulse = GLib.timeout_add(100, lambda: (pb.pulse(), True)[1])
 
         def done(err):
@@ -978,19 +977,20 @@ class MainWindow(Gtk.ApplicationWindow):
     def _build_side(self):
         """Right-hand side: Preview on top, a Quick-view properties card below, in a resizable vertical paned."""
         outer = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        outer.get_style_context().add_class("sidepane")
+        css_class(outer, "sidepane")
         self.side_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL)
         self.side_paned.set_wide_handle(False)
-        outer.pack_start(self.side_paned, True, True, 0)
+        put(outer, self.side_paned, True, True, 0)
 
         # ---- preview
-        pv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=6)
+        pv = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 6)
         self.preview_box = pv
         self.preview_caption = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.preview_caption.get_style_context().add_class("dim-label")
-        pv.pack_start(self.preview_caption, False, False, 0)
+        css_class(self.preview_caption, "dim-label")
+        put(pv, self.preview_caption, False, False, 0)
         self.preview_stack = Gtk.Stack()
-        self.preview_stack.set_homogeneous(False)           # minimum = the visible child's, not the biggest child's
+        if not GTK4:                                        # GTK 4 has only the two calls below
+            self.preview_stack.set_homogeneous(False)       # minimum = the visible child's, not the biggest child's
         self.preview_stack.set_hhomogeneous(False)
         self.preview_stack.set_vhomogeneous(False)
         # Transitions are done by snapshot: when a new preview lands, a picture of what the pane showed a
@@ -1002,18 +1002,22 @@ class MainWindow(Gtk.ApplicationWindow):
         self.preview_overlay = Gtk.Overlay()
         self._snap_surface = None
         self._snap_alpha = 0.0
+        # No snapshot until the pane has been painted on screen at least once (see _take_snapshot)
+        self._pv_painted = False
+        self._pv_arming = False
+        on_draw_over(self.preview_stack, self._pv_drawn)
+        on_event(self, "unmap-event", self._pv_unpainted)
         # always shown (and therefore realised and allocated from the start): a widget first shown at the
         # moment of a fade is not allocated until the next layout pass and misses the first frames
         self.snap_area = Gtk.DrawingArea()
-        self.snap_area.set_has_window(False)        # no GdkWindow of its own → it can never intercept input
-        self.snap_area.set_can_focus(False)
-        self.snap_area.set_app_paintable(True)
-        self.snap_area.connect("draw", self._draw_snapshot)
+        see_through(self.snap_area)                 # input goes to the preview underneath
+        on_draw(self.snap_area, self._draw_snapshot)
         self.preview_overlay.add_overlay(self.snap_area)
-        self.preview_overlay.set_overlay_pass_through(self.snap_area, True)
+        if not GTK4:
+            self.preview_overlay.set_overlay_pass_through(self.snap_area, True)
         self.preview_image = FitImage()
-        self.preview_image.add_events(Gdk.EventMask.BUTTON_PRESS_MASK)
-        self.preview_image.connect("button-press-event", self._preview_image_click)
+        add_event_mask(self.preview_image, EVMASK.BUTTON_PRESS_MASK)
+        on_event(self.preview_image, "button-press-event", self._preview_image_click)
         if GtkSource is not None:
             self.preview_text = GtkSource.View.new_with_buffer(GtkSource.Buffer())
             self.preview_text.set_show_line_numbers(True)
@@ -1031,43 +1035,43 @@ class MainWindow(Gtk.ApplicationWindow):
         self.preview_text.set_cursor_visible(False)
         self.preview_text.set_wrap_mode(Gtk.WrapMode.NONE)
         self.preview_text.set_left_margin(6)
-        self.preview_text.connect("key-press-event", self._edit_key)
+        on_event(self.preview_text, "key-press-event", self._edit_key)
         tsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        tsw.add(self.preview_text)
+        set_child(tsw, self.preview_text)
         # quick-edit toolbar: Edit toggle · find · prev/next · Save · Revert
         tb = Gtk.Box(spacing=4)
-        tb.get_style_context().add_class("edit-toolbar")
+        css_class(tb, "edit-toolbar")
         self.edit_toggle = Gtk.ToggleButton(label="Edit")
         self.edit_toggle.set_tooltip_text("Edit this text file in place (Ctrl+S saves)")
         self.edit_toggle.connect("toggled", self._edit_toggled)
-        tb.pack_start(self.edit_toggle, False, False, 0)
+        put(tb, self.edit_toggle, False, False, 0)
         self.edit_badge = Gtk.Label(label="READ-ONLY")
-        self.edit_badge.get_style_context().add_class("edit-badge")
-        tb.pack_start(self.edit_badge, False, False, 2)
+        css_class(self.edit_badge, "edit-badge")
+        put(tb, self.edit_badge, False, False, 2)
         self.find_entry = Gtk.SearchEntry(placeholder_text="Find in file", width_chars=14, hexpand=True)
         self.find_entry.connect("search-changed", lambda e: self._find(1, from_start=True))
         self.find_entry.connect("activate", lambda e: self._find(1))
-        self.find_entry.connect("key-press-event", lambda w, ev: (self._find(-1) or True) if ev.keyval == Gdk.KEY_Return and ev.state & Gdk.ModifierType.SHIFT_MASK else False)
-        tb.pack_start(self.find_entry, True, True, 0)
+        on_event(self.find_entry, "key-press-event", lambda w, ev: (self._find(-1) or True) if ev.keyval == Gdk.KEY_Return and ev.state & Gdk.ModifierType.SHIFT_MASK else False)
+        put(tb, self.find_entry, True, True, 0)
         for icon, d, tip in (("go-up-symbolic", -1, "Previous match (Shift+Enter)"), ("go-down-symbolic", 1, "Next match (Enter)")):
-            b = Gtk.Button.new_from_icon_name(icon, Gtk.IconSize.MENU)
-            b.set_relief(Gtk.ReliefStyle.NONE)
+            b = icon_button(icon, "menu")
+            flat_button(b)
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda w, dd=d: self._find(dd))
-            tb.pack_start(b, False, False, 0)
+            put(tb, b, False, False, 0)
         self.find_count = Gtk.Label()
-        self.find_count.get_style_context().add_class("dim-label")
-        tb.pack_start(self.find_count, False, False, 4)
+        css_class(self.find_count, "dim-label")
+        put(tb, self.find_count, False, False, 4)
         self.btn_save = Gtk.Button(label="Save", sensitive=False)
         self.btn_save.set_tooltip_text("Save (Ctrl+S)")
         self.btn_save.connect("clicked", lambda b: self.save_edit())
         self.btn_revert = Gtk.Button(label="Revert", sensitive=False)
         self.btn_revert.connect("clicked", lambda b: self.revert_edit())
-        tb.pack_end(self.btn_save, False, False, 0)
-        tb.pack_end(self.btn_revert, False, False, 0)
+        put_end(tb, self.btn_save, False, False, 0)
+        put_end(tb, self.btn_revert, False, False, 0)
         psw = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        psw.pack_start(clip_width(tb), False, False, 0)
-        psw.pack_start(tsw, True, True, 0)
+        put(psw, clip_width(tb), False, False, 0)
+        put(psw, tsw, True, True, 0)
         self.edit_path: Optional[str] = None
         self.edit_entry: Optional[Entry] = None
         self.edit_dirty = False
@@ -1077,14 +1081,14 @@ class MainWindow(Gtk.ApplicationWindow):
         self.find_cur_tag = buf.create_tag("findcur", background="#ff8c00", foreground="#000000")
         buf.connect("changed", self._edit_changed)
         self.preview_info = Gtk.Label(justify=Gtk.Justification.CENTER, wrap=True)
-        self.preview_info.get_style_context().add_class("dim-label")
+        css_class(self.preview_info, "dim-label")
         self.preview_big_icon = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, valign=Gtk.Align.CENTER)
         self.preview_icon_img = FitImage(128)
         self.preview_icon_img.set_size_request(-1, 48)
         self.preview_icon_lab = Gtk.Label(justify=Gtk.Justification.CENTER, wrap=True)
-        self.preview_icon_lab.get_style_context().add_class("dim-label")
-        self.preview_big_icon.pack_start(self.preview_icon_img, True, True, 0)
-        self.preview_big_icon.pack_start(self.preview_icon_lab, False, False, 0)
+        css_class(self.preview_icon_lab, "dim-label")
+        put(self.preview_big_icon, self.preview_icon_img, True, True, 0)
+        put(self.preview_big_icon, self.preview_icon_lab, False, False, 0)
         self.preview_folder = Gtk.ListStore(GObject.TYPE_PYOBJECT, str)     # entry, size text
         ftv = Gtk.TreeView(model=self.preview_folder, headers_visible=False)
         ftv.set_activate_on_single_click(False)
@@ -1096,8 +1100,8 @@ class MainWindow(Gtk.ApplicationWindow):
         fpix.set_fixed_size(22, 22)
         ftxt.set_fixed_size(-1, 24)
         fsize_fixed = 24
-        fcol.pack_start(fpix, False)
-        fcol.pack_start(ftxt, True)
+        put(fcol, fpix, False)
+        put(fcol, ftxt, True)
         fcol.set_expand(True)
         fcol.set_sizing(Gtk.TreeViewColumnSizing.FIXED)
         fcol.set_cell_data_func(fpix, lambda c, cell, m, it, d=None: cell.set_property("pixbuf", ICONS.pixbuf(m[it][0].icon, 16, m[it][0])), None)
@@ -1114,42 +1118,42 @@ class MainWindow(Gtk.ApplicationWindow):
         # (rows of an archive listing have no path of their own: nothing to open)
         ftv.connect("row-activated", lambda t, p, c: self.preview_folder[p][0].path and self.activate_entry(self.preview_folder[p][0]))
         fsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        fsw.add(ftv)
+        set_child(fsw, ftv)
         self.model_view = None            # created on the first model preview (GL context setup is ~300 ms)
         mbox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         self.model_box = mbox
         mbar = Gtk.Box(spacing=6)
         self.model_count = Gtk.Label(xalign=0, hexpand=True)
-        self.model_count.get_style_context().add_class("dim-label")
-        mbar.pack_start(self.model_count, True, True, 4)
+        css_class(self.model_count, "dim-label")
+        put(mbar, self.model_count, True, True, 4)
         self.model_full_toggle = Gtk.ToggleButton(label="All triangles")
         self.model_full_toggle.set_tooltip_text("Override the 500,000-face preview cap and load every triangle.\n"
                                                 "Heavy meshes orbit slowly in the software renderer.")
-        self.model_full_toggle.get_style_context().add_class("flat")
+        css_class(self.model_full_toggle, "flat")
         self.model_full_toggle.connect("toggled", self._toggle_model_full)
-        mbar.pack_end(self.model_full_toggle, False, False, 0)
+        put_end(mbar, self.model_full_toggle, False, False, 0)
         self.model_bd_btn = Gtk.Button(label="Breakdown")
         self.model_bd_btn.set_tooltip_text("Show what's in this scene: outliner, references, materials, settings")
-        self.model_bd_btn.get_style_context().add_class("flat")
+        css_class(self.model_bd_btn, "flat")
         self.model_bd_btn.connect("clicked", lambda b: self._switch_blend_view("breakdown"))
-        self.model_bd_btn.set_no_show_all(True)
-        mbar.pack_end(self.model_bd_btn, False, False, 0)
+        start_hidden(self.model_bd_btn, True)
+        put_end(mbar, self.model_bd_btn, False, False, 0)
         self.seq_button = Gtk.Button(label="Preview as sequence")
         self.seq_button.set_tooltip_text("Play the selected caches as frames of one sequence, in name order")
-        self.seq_button.get_style_context().add_class("flat")
+        css_class(self.seq_button, "flat")
         self.seq_button.connect("clicked", self._seq_button_clicked)
-        self.seq_button.set_no_show_all(True)
-        mbar.pack_end(self.seq_button, False, False, 0)
-        mbox.pack_start(clip_width(mbar), False, False, 0)
+        start_hidden(self.seq_button, True)
+        put_end(mbar, self.seq_button, False, False, 0)
+        put(mbox, clip_width(mbar), False, False, 0)
         self.model_slot = Gtk.Box()
-        mbox.pack_start(self.model_slot, True, True, 0)
+        put(mbox, self.model_slot, True, True, 0)
         # time slider for a selected sequence of caches (several .vdb / .bgeo frames selected together)
         sbar = Gtk.Box(spacing=4)
-        self.seq_play = Gtk.Button.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON)
-        self.seq_play.get_style_context().add_class("flat")
+        self.seq_play = icon_button("media-playback-start-symbolic", "button")
+        css_class(self.seq_play, "flat")
         self.seq_play.set_tooltip_text("Play / pause (Space in the viewer; ← → step a frame)")
         self.seq_play.connect("clicked", lambda b: self._seq_toggle_play())
-        sbar.pack_start(self.seq_play, False, False, 0)
+        put(sbar, self.seq_play, False, False, 0)
         self.seq_scale = Gtk.Scale.new_with_range(Gtk.Orientation.HORIZONTAL, 0, 1, 1)
         self.seq_scale.set_draw_value(False)
         self.seq_scale.set_digits(0)
@@ -1159,63 +1163,63 @@ class MainWindow(Gtk.ApplicationWindow):
         self.seq_scale.set_show_fill_level(True)
         self.seq_scale.set_restrict_to_fill_level(False)
         self.seq_scale.connect("value-changed", self._seq_scrub)
-        sbar.pack_start(self.seq_scale, True, True, 0)
+        put(sbar, self.seq_scale, True, True, 0)
         # Fixed width: the slider must not shift as frame numbers change length during playback (tabular
         # digits). The file name lives in its own row above the viewer, so it never squeezes the slider.
         self.seq_counter = Gtk.Label(xalign=1)
         self.seq_counter.set_width_chars(9)
         self.seq_counter.set_max_width_chars(9)
         self.seq_counter.set_attributes(_tabular_digits())
-        sbar.pack_start(self.seq_counter, False, False, 0)
+        put(sbar, self.seq_counter, False, False, 0)
         self.seq_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
-        self.seq_label.get_style_context().add_class("dim-label")
+        css_class(self.seq_label, "dim-label")
         self.seq_label.set_margin_start(4)
-        self.seq_label.set_no_show_all(True)
+        start_hidden(self.seq_label, True)
         self.seq_fps = Gtk.SpinButton.new_with_range(1, 60, 1)
         self.seq_fps.set_width_chars(2)
         self.seq_fps.set_value(float(self.cfg.get("seq_fps", 24)))
         self.seq_fps.set_tooltip_text("Playback speed (frames per second)")
         self.seq_fps.connect("value-changed", self._seq_fps_changed)
-        sbar.pack_start(self.seq_fps, False, False, 0)
-        sbar.pack_start(Gtk.Label(label="fps"), False, False, 0)
-        sbar.show_all()
-        sbar.set_no_show_all(True)
+        put(sbar, self.seq_fps, False, False, 0)
+        put(sbar, Gtk.Label(label="fps"), False, False, 0)
+        show_all(sbar)
+        start_hidden(sbar, True)
         sbar.hide()
         self.seq_bar = sbar
         self._seq = None
         self.connect("notify::is-active", self._seq_focus_changed)
-        mbox.pack_start(sbar, False, False, 0)
-        mbox.pack_start(self.seq_label, False, False, 0)
-        mbox.reorder_child(self.seq_label, 1)            # current frame's file name: between the bar and the viewer
+        put(mbox, sbar, False, False, 0)
+        put(mbox, self.seq_label, False, False, 0)
+        move_child(mbox, self.seq_label, 1)            # current frame's file name: between the bar and the viewer
         mhint = Gtk.Label(wrap=True, lines=2, ellipsize=Pango.EllipsizeMode.END, justify=Gtk.Justification.CENTER, max_width_chars=30)
         mhint.set_markup("<small>Drag to orbit · middle-drag to pan · wheel to zoom\ndouble-click resets · W wireframe · S flat / smooth</small>")
         mhint.set_tooltip_text("Left drag: orbit\nMiddle drag: pan\nWheel or Alt + right drag: zoom\nDouble-click: reset the view\nW: wireframe\nS: flat / smooth shading")
-        mhint.get_style_context().add_class("dim-label")
-        mbox.pack_start(mhint, False, False, 0)
+        css_class(mhint, "dim-label")
+        put(mbox, mhint, False, False, 0)
         self.preview_stack.add_named(mbox, "model")
         self.preview_stack.add_named(self._build_breakdown_page(), "breakdown")
         # image page = the picture plus (PDFs only) a page stepper underneath
         ibox = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-        ibox.pack_start(self.preview_image, True, True, 0)
+        put(ibox, self.preview_image, True, True, 0)
         self.pdf_bar = Gtk.Box(spacing=6, halign=Gtk.Align.CENTER)
-        self.pdf_prev = Gtk.Button.new_from_icon_name("go-previous-symbolic", Gtk.IconSize.MENU)
-        self.pdf_next = Gtk.Button.new_from_icon_name("go-next-symbolic", Gtk.IconSize.MENU)
+        self.pdf_prev = icon_button("go-previous-symbolic", "menu")
+        self.pdf_next = icon_button("go-next-symbolic", "menu")
         self.pdf_label = Gtk.Label()
-        self.pdf_label.get_style_context().add_class("dim-label")
+        css_class(self.pdf_label, "dim-label")
         for b, d, tip in ((self.pdf_prev, -1, "Previous page (or scroll up over the page)"), (self.pdf_next, 1, "Next page (or scroll down over the page)")):
-            b.get_style_context().add_class("flat")
+            css_class(b, "flat")
             b.set_tooltip_text(tip)
             b.connect("clicked", lambda w, d=d: self._pdf_go(d))
-        self.pdf_bar.pack_start(self.pdf_prev, False, False, 0)
-        self.pdf_bar.pack_start(self.pdf_label, False, False, 0)
-        self.pdf_bar.pack_start(self.pdf_next, False, False, 0)
-        self.pdf_bar.show_all()
-        self.pdf_bar.set_no_show_all(True)
+        put(self.pdf_bar, self.pdf_prev, False, False, 0)
+        put(self.pdf_bar, self.pdf_label, False, False, 0)
+        put(self.pdf_bar, self.pdf_next, False, False, 0)
+        show_all(self.pdf_bar)
+        start_hidden(self.pdf_bar, True)
         self.pdf_bar.hide()
-        ibox.pack_start(self.pdf_bar, False, False, 0)
+        put(ibox, self.pdf_bar, False, False, 0)
         self._pdf = None                  # {'entry', 'page', 'pages'} while a multi-page PDF is on screen
-        self.preview_image.add_events(Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.SMOOTH_SCROLL_MASK)
-        self.preview_image.connect("scroll-event", self._pdf_scroll)
+        add_event_mask(self.preview_image, EVMASK.SCROLL_MASK | EVMASK.SMOOTH_SCROLL_MASK)
+        on_event(self.preview_image, "scroll-event", self._pdf_scroll)
         self.preview_stack.add_named(ibox, "image")
         self.video = VideoPreview() if gst_sink_available() else None
         if self.video is not None:
@@ -1223,44 +1227,50 @@ class MainWindow(Gtk.ApplicationWindow):
         if self.video is not None:
             self.preview_stack.add_named(self.video, "video")
         self.preview_stack.add_named(psw, "text")
+        self.preview_info.set_text("Select a file to preview")      # what a new window opens on
         self.preview_stack.add_named(self.preview_info, "info")
         self.preview_stack.add_named(self.preview_big_icon, "icon")
         self.preview_stack.add_named(fsw, "folder")
-        self.preview_overlay.add(self.preview_stack)
-        pv.pack_start(self.preview_overlay, True, True, 0)
+        set_child(self.preview_overlay, self.preview_stack)
+        put(pv, self.preview_overlay, True, True, 0)
         # shrink=True on both halves: the divider can be dragged until either the preview or the quick view
         # is almost closed, regardless of what the current content would like as its minimum size
-        self.side_paned.pack1(pv, True, False)
+        pane_first(self.side_paned, pv, True, False)
 
         # ---- quick view (properties card)
-        qv = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6, margin=8)
+        qv = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=6), 8)
         self.details_box = qv
         head = Gtk.Box(spacing=8)
         self.qv_icon = Gtk.Image()
-        head.pack_start(self.qv_icon, False, False, 0)
+        put(head, self.qv_icon, False, False, 0)
         tb = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
         self.details_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, selectable=True)
+        # Bold through an attribute that covers the whole label, not <b> markup: with markup, GTK 4 drew only
+        # the first few letters of a middle-ellipsised name in bold.
+        bold = Pango.AttrList()
+        bold.insert(Pango.attr_weight_new(Pango.Weight.BOLD))
+        self.details_title.set_attributes(bold)
         self.qv_subtitle = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.qv_subtitle.get_style_context().add_class("dim-label")
-        tb.pack_start(self.details_title, False, False, 0)
-        tb.pack_start(self.qv_subtitle, False, False, 0)
-        head.pack_start(tb, True, True, 0)
-        qv.pack_start(head, False, False, 0)
+        css_class(self.qv_subtitle, "dim-label")
+        put(tb, self.details_title, False, False, 0)
+        put(tb, self.qv_subtitle, False, False, 0)
+        put(head, tb, True, True, 0)
+        put(qv, head, False, False, 0)
         self.details_grid = Gtk.Grid(column_spacing=10, row_spacing=3)
         qsw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
         qsw.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        qsw.add(self.details_grid)
-        qv.pack_start(qsw, True, True, 0)
+        set_child(qsw, self.details_grid)
+        put(qv, qsw, True, True, 0)
         act = Gtk.Box(spacing=4)
-        act.get_style_context().add_class("linked")
+        css_class(act, "linked")
         for lab, cb in (("Open", lambda: self.activate_entry(self.tab.current_entry() if self.tab else None)),
                         ("Open with…", self.open_with), ("Properties…", self.properties)):
             b = Gtk.Button(label=lab)
             b.connect("clicked", lambda w, c=cb: c())
-            act.pack_start(b, True, True, 0)
+            put(act, b, True, True, 0)
         self.qv_actions = act
-        qv.pack_end(act, False, False, 0)
-        self.side_paned.pack2(qv, False, False)
+        put_end(qv, act, False, False, 0)
+        pane_second(self.side_paned, qv, False, False)
         outer.set_size_request(180, -1)                       # floor only; the splitter sets the real width
         return outer
 
@@ -1314,14 +1324,14 @@ class MainWindow(Gtk.ApplicationWindow):
         win = Gtk.Window(title="Quick look", transient_for=self, destroy_with_parent=True)
         win.set_default_size(*[max(320, int(v)) for v in (self.cfg.get("quicklook_size") or [900, 680])[:2]])
         holder = Gtk.Box(orientation=Gtk.Orientation.VERTICAL)
-        holder.get_style_context().add_class("sidepane")
-        win.add(holder)
-        self.side_paned.remove(self.preview_box)
-        holder.pack_start(self.preview_box, True, True, 0)
+        css_class(holder, "sidepane")
+        set_child(win, holder)
+        take_out(self.side_paned, self.preview_box)
+        put(holder, self.preview_box, True, True, 0)
         self._ql, self._ql_size = win, None
-        win.connect("key-press-event", self._ql_key)
-        win.connect("delete-event", lambda *a: (self._ql_close(), True)[1])
-        win.connect("size-allocate", self._ql_resized)
+        on_event(win, "key-press-event", self._ql_key)
+        on_event(win, "delete-event", lambda *a: (self._ql_close(), True)[1])
+        on_resize(win, lambda: self._ql_resized(win, win.get_allocation()))
         holder.show()
         self._ql_moving = True
         self._apply_panes()
@@ -1330,6 +1340,8 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _path_under_pointer(self, t: FolderView):
         view = t.view
+        if not hasattr(view, "get_bin_window"):          # GTK 4 has no such windows: the keyboard cursor is used
+            return None
         outer, inner = view.get_window(), view.get_bin_window()       # the visible area / the scrolled canvas
         if outer is None or inner is None or not view.get_mapped():
             return None
@@ -1350,10 +1362,10 @@ class MainWindow(Gtk.ApplicationWindow):
         win, self._ql = self._ql, None
         if win is None:
             return
-        self.cfg["quicklook_size"] = list(win.get_size())
+        self.cfg["quicklook_size"] = list(window_size(win))
         self._drop_snapshot()
-        self.preview_box.get_parent().remove(self.preview_box)
-        self.side_paned.pack1(self.preview_box, True, False)
+        take_out(self.preview_box.get_parent(), self.preview_box)
+        pane_first(self.side_paned, self.preview_box, True, False)
         win.destroy()
         self._ql_moving = True
         self._apply_panes()
@@ -1594,7 +1606,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self._show_preview("folder")             # content arrived: fade it in
                     self._preview_dir_sizes(gen, [k for k in kids if k.is_dir], fpath)
                     return False
-                GLib.timeout_add(250, lambda: (gen == self._side_gen and threading.Thread(target=flist, daemon=True).start(), False)[1])
+                GLib.timeout_add(250, lambda: (gen == self._side_gen and bg(flist), False)[1])
                 return
             self.preview_folder.clear()
             self._set_caption(e.name)
@@ -1623,7 +1635,7 @@ class MainWindow(Gtk.ApplicationWindow):
             def minfo():
                 rows = describe_media(path)
                 GLib.idle_add(lambda: (gen == self._side_gen and [self._qv_add(k, v) for k, v in rows], False)[1])
-            threading.Thread(target=minfo, daemon=True).start()
+            bg(minfo)
             return
         w = max(120, self._pv_width() - 24)
         h = max(120, self.preview_box.get_allocated_height() - 24)
@@ -1652,13 +1664,13 @@ class MainWindow(Gtk.ApplicationWindow):
                 if gen != self._side_gen:
                     return False
                 self.pdf_bar.hide()
-                self.preview_image.set_from_pixbuf(pb)
+                image_set_pixbuf(self.preview_image, pb)
                 self._show_preview("image")
                 if dims:
                     e.extra_dims = dims
                     self._qv_set("Dimensions", f"{dims[0]} × {dims[1]} px")
                 return False
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
             return
         if e.path and e.ext.lower() in SHADER_PREVIEW_EXTS and (e.size or 0) <= (64 << 20) and shader_preview_kind(e.path):
             self._load_breakdown(e, gen, shader=True)
@@ -1682,7 +1694,7 @@ class MainWindow(Gtk.ApplicationWindow):
                        or ct.startswith(("video/", "audio/", "application/pdf"))):
             self._placeholder("Loading preview…", gen)
             path = e.path
-            threading.Thread(target=lambda: GLib.idle_add(self._extended_done, gen, e, generate_preview(path, ct, w, h)), daemon=True).start()
+            bg(lambda: GLib.idle_add(self._extended_done, gen, e, generate_preview(path, ct, w, h)))
             return
         if (ct.startswith("text/") or ct in ("application/json", "application/xml", "application/x-shellscript", "application/javascript", "application/x-yaml", "application/x-desktop")) and e.path:
             try:
@@ -1733,11 +1745,11 @@ class MainWindow(Gtk.ApplicationWindow):
                 self._set_caption(cap + "  ·  click to pause")
             self._show_preview("image")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return True
 
     def _preview_image_click(self, w, event):
-        if event.button == 1 and event.type == Gdk.EventType.BUTTON_PRESS and self.preview_image.animating:
+        if event.button == 1 and event.type == EV_PRESS and self.preview_image.animating:
             self.preview_image.toggle_animation()
             return True
         return False
@@ -1782,7 +1794,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         fb = 0
                     self.preview_caption.set_text(txt + f"  ·  total {fmt_size(fb + sum(res.values()))}")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     # ---- quick text edit
     def _load_text(self, path: str, data: bytes, complete: bool):
@@ -1838,10 +1850,10 @@ class MainWindow(Gtk.ApplicationWindow):
         self._prompting = True
         d = Gtk.MessageDialog(transient_for=self, modal=True, message_type=Gtk.MessageType.QUESTION,
                               text=f"Save changes to {os.path.basename(self.edit_path)}?")
-        d.format_secondary_text("Your edits in the preview pane haven't been saved.")
+        dialog_secondary(d, "Your edits in the preview pane haven't been saved.")
         d.add_buttons("_Discard", 2, "_Keep editing", Gtk.ResponseType.CANCEL, "_Save", 1)
         d.set_default_response(1)
-        r = d.run()
+        r = run_dialog(d)
         d.destroy()
         self._prompting = False
         if r == 1:
@@ -2051,7 +2063,7 @@ class MainWindow(Gtk.ApplicationWindow):
             img = res["raw"]
             pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
             self.pdf_bar.hide()
-            self.preview_image.set_from_pixbuf(pb)
+            image_set_pixbuf(self.preview_image, pb)
             self._show_preview("image")
         elif "png" in res:
             try:
@@ -2063,7 +2075,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     self.pdf_prev.set_sensitive(self._pdf["page"] > 1)
                     self.pdf_next.set_sensitive(self._pdf["page"] < pages)
                 self.pdf_bar.set_visible(pages > 1)
-                self.preview_image.set_from_pixbuf(pb)
+                image_set_pixbuf(self.preview_image, pb)
                 self._show_preview("image")
             except GLib.Error:
                 self._preview_as_icon(e, "No preview available")
@@ -2127,7 +2139,7 @@ class MainWindow(Gtk.ApplicationWindow):
         def done(conv):
             try:
                 if conv and req == self._pdf_req and gen == self._side_gen:
-                    self.preview_image.set_from_pixbuf(GdkPixbuf.Pixbuf.new_from_file(conv[0]))
+                    image_set_pixbuf(self.preview_image, GdkPixbuf.Pixbuf.new_from_file(conv[0]))
             except GLib.Error:
                 pass
             finally:
@@ -2137,7 +2149,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         pass
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _pdf_scroll(self, w, event):
         if not self._pdf or not self.pdf_bar.get_visible():
@@ -2165,15 +2177,15 @@ class MainWindow(Gtk.ApplicationWindow):
         g = self.details_grid
         i = len(labs)
         kl = Gtk.Label(label=key, xalign=1, yalign=0)
-        kl.get_style_context().add_class("dim-label")
+        css_class(kl, "dim-label")
         vl = Gtk.Label(label=value or "—", xalign=0, wrap=True, selectable=True, hexpand=True)
-        vl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+        label_wrap_mode(vl, Pango.WrapMode.WORD_CHAR)
         vl.set_max_width_chars(34)
         g.attach(kl, 0, i, 1, 1)
         g.attach(vl, 1, i, 1, 1)
         labs[key] = vl
         self._qv_labels = labs
-        g.show_all()
+        show_all(g)
 
     def _make_model_view(self):
         """GLModelView when hardware acceleration is on and PyOpenGL imports, otherwise the software viewer."""
@@ -2183,7 +2195,7 @@ class MainWindow(Gtk.ApplicationWindow):
             v.on_cache_failed = self._gl_cache_failed
         else:
             v = ModelView()
-        v.connect("key-press-event", self._model_key)
+        on_event(v, "key-press-event", self._model_key)
         return v
 
     def _gl_cache_failed(self, m: dict, msg: str):
@@ -2224,15 +2236,15 @@ class MainWindow(Gtk.ApplicationWindow):
         want_soft = software or not (self.cfg.get("gl_preview", True) and HAVE_GL)
         cur = self.model_view
         if cur is not None and isinstance(cur, ModelView) != want_soft:
-            self.model_slot.remove(cur)
+            take_out(self.model_slot, cur)
             cur = None
         if cur is None:
             if want_soft:
                 cur = ModelView()
-                cur.connect("key-press-event", self._model_key)
+                on_event(cur, "key-press-event", self._model_key)
             else:
                 cur = self._make_model_view()
-            self.model_slot.pack_start(cur, True, True, 0)
+            put(self.model_slot, cur, True, True, 0)
             cur.show()
             self.model_view = cur
         return cur
@@ -2244,9 +2256,9 @@ class MainWindow(Gtk.ApplicationWindow):
         old = self.model_view
         m = old.model if old is not None else None
         if old is not None:
-            self.model_slot.remove(old)
+            take_out(self.model_slot, old)
         new = self._make_model_view()
-        self.model_slot.pack_start(new, True, True, 0)
+        put(self.model_slot, new, True, True, 0)
         new.show()
         self.model_view = new
         if m is not None:
@@ -2307,7 +2319,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 mv.set_model(m)
                 self._show_preview("model")
             return False
-        threading.Thread(target=mwork, daemon=True).start()
+        bg(mwork)
 
     def _toggle_model_full(self, btn):
         e = getattr(self, "_model_entry", None)
@@ -2326,27 +2338,27 @@ class MainWindow(Gtk.ApplicationWindow):
         box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         head = Gtk.Box(spacing=6)
         self.bd_title = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.bd_title.get_style_context().add_class("dim-label")
-        head.pack_start(self.bd_title, True, True, 4)
-        self.bd_copy = Gtk.Button.new_from_icon_name("edit-copy-symbolic", Gtk.IconSize.BUTTON)
+        css_class(self.bd_title, "dim-label")
+        put(head, self.bd_title, True, True, 4)
+        self.bd_copy = icon_button("edit-copy-symbolic", "button")
         self.bd_copy.set_tooltip_text("Copy the breakdown as text")
-        self.bd_copy.get_style_context().add_class("flat")
+        css_class(self.bd_copy, "flat")
         self.bd_copy.connect("clicked", self._bd_copy_all)
-        head.pack_end(self.bd_copy, False, False, 0)
+        put_end(head, self.bd_copy, False, False, 0)
         self.bd_3d = Gtk.Button(label="3D view")
         self.bd_3d.set_tooltip_text("Preview the geometry instead (starts Blender in the background)")
-        self.bd_3d.get_style_context().add_class("flat")
+        css_class(self.bd_3d, "flat")
         self.bd_3d.connect("clicked", lambda b: self._switch_blend_view("3d"))
-        self.bd_3d.set_no_show_all(True)
-        head.pack_end(self.bd_3d, False, False, 0)
+        start_hidden(self.bd_3d, True)
+        put_end(head, self.bd_3d, False, False, 0)
         self.bd_code_btn = Gtk.ToggleButton(label="Code")
         self.bd_code_btn.set_tooltip_text("Show the source instead of the breakdown")
-        self.bd_code_btn.get_style_context().add_class("flat")
+        css_class(self.bd_code_btn, "flat")
         self.bd_code_btn.set_active(bool(self.cfg.get("bd_code")))
         self.bd_code_btn.connect("toggled", self._bd_code_toggled)
-        self.bd_code_btn.set_no_show_all(True)
-        head.pack_end(self.bd_code_btn, False, False, 0)
-        box.pack_start(clip_width(head), False, False, 0)
+        start_hidden(self.bd_code_btn, True)
+        put_end(head, self.bd_code_btn, False, False, 0)
+        put(box, clip_width(head), False, False, 0)
         # top half: stored preview / material ball / light pattern / live GLSL; bottom half: tree or code
         self.bd_paned = Gtk.Paned(orientation=Gtk.Orientation.VERTICAL, wide_handle=False)
         self.bd_paned.connect("notify::position", self._bd_pane_moved)
@@ -2356,37 +2368,37 @@ class MainWindow(Gtk.ApplicationWindow):
         self.bd_image = FitImage()
         self.bd_media_stack.add_named(self.bd_image, "image")
         self.bd_glsl: Optional[GLSLView] = None             # created on first use (needs a GL context)
-        media.pack_start(self.bd_media_stack, True, True, 0)
+        put(media, self.bd_media_stack, True, True, 0)
         cap = Gtk.Box(spacing=4)
         self.bd_media_label = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END)
-        self.bd_media_label.get_style_context().add_class("dim-label")
-        cap.pack_start(self.bd_media_label, True, True, 4)
-        self.bd_play = Gtk.Button.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.MENU)
-        self.bd_play.set_relief(Gtk.ReliefStyle.NONE)
+        css_class(self.bd_media_label, "dim-label")
+        put(cap, self.bd_media_label, True, True, 4)
+        self.bd_play = icon_button("media-playback-pause-symbolic", "menu")
+        flat_button(self.bd_play)
         self.bd_play.set_tooltip_text("Pause / play (double-click the picture to restart the clock)")
         self.bd_play.connect("clicked", self._bd_glsl_toggle)
-        self.bd_play.set_no_show_all(True)
-        cap.pack_end(self.bd_play, False, False, 0)
-        media.pack_start(clip_width(cap), False, False, 0)
-        media.show_all()
-        media.set_no_show_all(True)
+        start_hidden(self.bd_play, True)
+        put_end(cap, self.bd_play, False, False, 0)
+        put(media, clip_width(cap), False, False, 0)
+        show_all(media)
+        start_hidden(media, True)
         media.hide()
         self.bd_media = media
-        self.bd_paned.pack1(media, True, False)
+        pane_first(self.bd_paned, media, True, False)
         lower = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4)
         self.bd_err = Gtk.Label(xalign=0, wrap=True, selectable=True)
-        self.bd_err.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
-        self.bd_err.get_style_context().add_class("bd-error")
-        self.bd_err.set_no_show_all(True)
-        lower.pack_start(self.bd_err, False, False, 0)
+        label_wrap_mode(self.bd_err, Pango.WrapMode.WORD_CHAR)
+        css_class(self.bd_err, "bd-error")
+        start_hidden(self.bd_err, True)
+        put(lower, self.bd_err, False, False, 0)
         self.bd_filter = Gtk.SearchEntry()
         self.bd_filter.set_placeholder_text("Filter names, types and paths")
         self.bd_filter.connect("search-changed", self._bd_refilter)
-        lower.pack_start(self.bd_filter, False, False, 0)
+        put(lower, self.bd_filter, False, False, 0)
         self.bd_notes = Gtk.Label(xalign=0, wrap=True)
-        self.bd_notes.get_style_context().add_class("dim-label")
-        self.bd_notes.set_no_show_all(True)
-        lower.pack_start(self.bd_notes, False, False, 0)
+        css_class(self.bd_notes, "dim-label")
+        start_hidden(self.bd_notes, True)
+        put(lower, self.bd_notes, False, False, 0)
         # name, info, path, colour, visible, tooltip, key (material:N rows)
         self.bd_store = Gtk.TreeStore(str, str, str, str, bool, str, str)
         self.bd_model = self.bd_store.filter_new()
@@ -2404,11 +2416,11 @@ class MainWindow(Gtk.ApplicationWindow):
             c.set_cell_data_func(r, self._bd_cell, col)
             tv.append_column(c)
         tv.connect("row-activated", self._bd_activate)
-        tv.connect("button-press-event", self._bd_button)
+        on_event(tv, "button-press-event", self._bd_button)
         tv.get_selection().connect("changed", self._bd_selection)
         self.bd_view = tv
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.add(tv)
+        set_child(sw, tv)
         if GtkSource is not None:
             self.bd_code = GtkSource.View.new_with_buffer(GtkSource.Buffer())
             self.bd_code.set_show_line_numbers(True)
@@ -2419,15 +2431,15 @@ class MainWindow(Gtk.ApplicationWindow):
         self.bd_code.set_editable(False)
         self.bd_code.set_left_margin(6)
         csw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        csw.add(self.bd_code)
+        set_child(csw, self.bd_code)
         self.bd_lower = Gtk.Stack()
         self.bd_lower.add_named(sw, "tree")
         self.bd_lower.add_named(csw, "code")
-        lower.pack_start(self.bd_lower, True, True, 0)
-        self.bd_paned.pack2(lower, True, False)
-        self.bd_paned.connect("size-allocate", lambda w, a: self._bd_place_pane())
-        box.pack_start(self.bd_paned, True, True, 0)
-        box.show_all()
+        put(lower, self.bd_lower, True, True, 0)
+        pane_second(self.bd_paned, lower, True, False)
+        on_resize(self.bd_paned, self._bd_place_pane)
+        put(box, self.bd_paned, True, True, 0)
+        show_all(box)
         return box
 
     def _bd_cell(self, col, cell, model, it, idx):
@@ -2483,7 +2495,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self._bd_set_media(res)
             self._show_preview("breakdown")
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _bd_text_fallback(self, e: Entry) -> bool:
         """A shader file the reader choked on still previews as plain text."""
@@ -2547,7 +2559,7 @@ class MainWindow(Gtk.ApplicationWindow):
             self.bd_glsl.load(glsl["source"], glsl["style"])
             self.bd_media_label.set_text({"shadertoy": "Shadertoy shader", "sandbox": "Fragment shader"}.get(glsl["style"], "Shader")
                                          + " · live")
-            self.bd_play.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic", Gtk.IconSize.MENU))
+            button_image(self.bd_play, icon_image("media-playback-pause-symbolic", "menu"))
             self.bd_play.show()
             self._bd_show_media(True)
             return
@@ -2559,7 +2571,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _bd_show_image(self, img, label: str):
         pb = GdkPixbuf.Pixbuf.new_from_bytes(GLib.Bytes.new(img.rgb), GdkPixbuf.Colorspace.RGB, False, 8, img.w, img.h, img.w * 3)
-        self.bd_image.set_from_pixbuf(pb)
+        image_set_pixbuf(self.bd_image, pb)
         self.bd_media_stack.set_visible_child_name("image")
         self.bd_media_label.set_text(label)
         self.bd_media_label.set_tooltip_text(None)
@@ -2616,8 +2628,8 @@ class MainWindow(Gtk.ApplicationWindow):
         if v is None:
             return
         v.set_playing(not v.playing)
-        btn.set_image(Gtk.Image.new_from_icon_name("media-playback-pause-symbolic" if v.playing else "media-playback-start-symbolic",
-                                                   Gtk.IconSize.MENU))
+        button_image(btn, icon_image("media-playback-pause-symbolic" if v.playing else "media-playback-start-symbolic",
+                                                   "menu"))
 
     def _bd_selection(self, sel):
         """Picking a row in a breakdown: a material → its ball / stored preview; an outliner object → its
@@ -2651,7 +2663,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 if alive() and img is not None:
                     self._bd_show_image(img, name + (" · stored preview" if mat.get("_image") is not None else " · material ball"))
                 return False
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
         elif key.startswith("object:"):
             e = getattr(self, "_bd_entry", None)
             if e is None:
@@ -2692,7 +2704,7 @@ class MainWindow(Gtk.ApplicationWindow):
                         self.bd_media_label.set_text(f"{name} · {mdl.get('label', '')} · {msg}")
                     else:
                         self._bd_status(f"{name} · {msg}")
-                    threading.Thread(target=mwork, daemon=True).start()
+                    bg(mwork)
                 elif not ok:
                     self._bd_status(f"{name} · {mdl.get('error', 'no geometry') if mdl else 'no geometry'}")
                 return False
@@ -2706,7 +2718,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     return False
                 self._bd_show_model(mdl, f"{name} · {mdl.get('label', '')} · via Maya", mdl.get("notes") or [])
                 return False
-            threading.Thread(target=owork, daemon=True).start()
+            bg(owork)
         elif path and os.path.splitext(path)[1].lower() in SCENE_IMAGE_EXTS:
             name = os.path.basename(path)
 
@@ -2749,7 +2761,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     size = f" · {dims[1]}"
                 tile = "" if real == path else f" · tile {os.path.basename(real)}"
                 if isinstance(img, GdkPixbuf.Pixbuf):
-                    self.bd_image.set_from_pixbuf(img)
+                    image_set_pixbuf(self.bd_image, img)
                     self.bd_media_stack.set_visible_child_name("image")
                     self.bd_media_label.set_text(name + size + tile)
                     self.bd_play.hide()
@@ -2759,14 +2771,14 @@ class MainWindow(Gtk.ApplicationWindow):
                 else:
                     self._bd_show_image(img, name + size + tile)
                 return False
-            threading.Thread(target=twork, daemon=True).start()
+            bg(twork)
 
     def _bd_status(self, text: str):
         """A one-line message in the picture half (shown even when nothing has been pictured yet)."""
         self.bd_media_label.set_text(text)
         self.bd_media_label.set_tooltip_text(text)
         if not self.bd_media.get_visible():
-            self.bd_image.set_from_pixbuf(None)
+            image_set_pixbuf(self.bd_image, None)
             self.bd_media_stack.set_visible_child_name("image")
             self.bd_play.hide()
             self._bd_show_media(True, 60)
@@ -2776,7 +2788,7 @@ class MainWindow(Gtk.ApplicationWindow):
         mv = getattr(self, "bd_model_view", None)
         want_soft = not (self.cfg.get("gl_preview", True) and HAVE_GL) or getattr(self, "_bd_gl_broken", False)
         if mv is not None and isinstance(mv, ModelView) != want_soft:
-            self.bd_media_stack.remove(mv)
+            take_out(self.bd_media_stack, mv)
             mv = None
         if mv is None:
             if want_soft:
@@ -2904,25 +2916,17 @@ class MainWindow(Gtk.ApplicationWindow):
         tv.get_selection().select_path(hit[0])
         it = self.bd_model.get_iter(hit[0])
         name, path = self.bd_model.get_value(it, 0), self.bd_model.get_value(it, 2)
-        menu = Gtk.Menu()
-        cb = Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD)
-        items = [("Copy name", lambda *_: cb.set_text(name, -1))]
+        items = [("Copy name", lambda: set_clipboard_text(name))]
         if path:
-            items = [("Show in folder", lambda *_: self._bd_reveal(path)), ("Copy path", lambda *_: cb.set_text(path, -1))] + items
-        for label, fn in items:
-            mi = Gtk.MenuItem(label=label)
-            mi.connect("activate", fn)
-            menu.append(mi)
-        menu.show_all()
-        menu.attach_to_widget(tv, None)
-        menu.popup_at_pointer(event)
+            items = [("Show in folder", lambda: self._bd_reveal(path)), ("Copy path", lambda: set_clipboard_text(path))] + items
+        popup_menu(build_menu(items), tv, event)
         return True
 
     def _bd_copy_all(self, btn):
         res = getattr(self, "_bd_res", None)
         if res:
             e = getattr(self, "_bd_entry", None)
-            Gtk.Clipboard.get(Gdk.SELECTION_CLIPBOARD).set_text(breakdown_text(res, f"{e.path if e else ''}\n{res.get('kind', '')}"), -1)
+            set_clipboard_text(breakdown_text(res, f"{e.path if e else ''}\n{res.get('kind', '')}"))
             self.flash("Breakdown copied")
 
     def _switch_blend_view(self, which: str):
@@ -2987,7 +2991,7 @@ class MainWindow(Gtk.ApplicationWindow):
             fut.cancel()
         self.seq_bar.hide()
         self.seq_label.hide()
-        self.seq_play.set_image(Gtk.Image.new_from_icon_name("media-playback-start-symbolic", Gtk.IconSize.BUTTON))
+        button_image(self.seq_play, icon_image("media-playback-start-symbolic", "button"))
 
     def _seq_request(self, i: int):
         s = self._seq
@@ -3150,7 +3154,7 @@ class MainWindow(Gtk.ApplicationWindow):
         if on:
             s["timer"] = GLib.timeout_add(max(15, int(1000 / self.seq_fps.get_value())), self._seq_tick)
         icon = "media-playback-pause-symbolic" if on else "media-playback-start-symbolic"
-        self.seq_play.set_image(Gtk.Image.new_from_icon_name(icon, Gtk.IconSize.BUTTON))
+        button_image(self.seq_play, icon_image(icon, "button"))
 
     def _seq_tick(self):
         s = self._seq
@@ -3225,6 +3229,11 @@ class MainWindow(Gtk.ApplicationWindow):
         the next item loads."""
         if not self._preview_on() or not self.preview_stack.get_realized() or getattr(self, "_ql_moving", False):
             return
+        if not self._pv_painted:
+            # Nothing of ours is on screen yet (the window is just starting up, or is minimised). Reading the
+            # window's pixels now fails without an error and hands back uninitialised memory, which then sat
+            # in the pane for a moment at startup as coloured garbage. There is nothing to fade from anyway.
+            return
         if self._ql is not None:
             # No crossfade in the quick look window. Reading pixels back from that window aborts inside cairo
             # ("cairo_surface_mark_dirty_rectangle: ! _cairo_surface_has_mime_data"), which takes the app down.
@@ -3292,6 +3301,22 @@ class MainWindow(Gtk.ApplicationWindow):
             bench(f"snapshot failed: {ex}")
             self._snap_surface = None
 
+    def _pv_drawn(self, *_a):
+        """The preview pane was drawn: once that frame is finished its pixels can be read back."""
+        if not self._pv_painted and not self._pv_arming:
+            self._pv_arming = True
+
+            def ready():
+                self._pv_arming = False
+                self._pv_painted = self.get_mapped()
+                return False
+            GLib.idle_add(ready, priority=GLib.PRIORITY_LOW)
+        return False
+
+    def _pv_unpainted(self, *_a):
+        self._pv_painted = False
+        return False
+
     def _drop_snapshot(self):
         """Discard a held snapshot without a fade (the content under it is unchanged)."""
         self._snap_surface = None
@@ -3335,7 +3360,7 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _preview_as_icon(self, e: Entry, note: str):
         pb = ICONS.pixbuf(e.icon, 128, e)
-        self.preview_icon_img.set_from_pixbuf(pb)
+        image_set_pixbuf(self.preview_icon_img, pb)
         self.preview_icon_lab.set_text(note)
         self._show_preview("icon")
 
@@ -3347,16 +3372,16 @@ class MainWindow(Gtk.ApplicationWindow):
 
     def _update_details(self, sel: List[Entry]):
         g = self.details_grid
-        for c in g.get_children():
-            g.remove(c)
+        for c in child_widgets(g):
+            take_out(g, c)
         self._qv_labels = {}
         t = self.tab
         gen = self._side_gen
         self.qv_actions.set_sensitive(bool(sel))
         f_long = "%A, %B %d, %Y  %H:%M"
         if not sel:
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(Gio.ThemedIcon.new("folder"), 32))
-            self.details_title.set_markup(f"<b>{GLib.markup_escape_text(self.display_path(t.path))}</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(Gio.ThemedIcon.new("folder"), 32))
+            self.details_title.set_text(self.display_path(t.path))
             nd = sum(1 for e in t.entries if e.is_dir)
             self.qv_subtitle.set_text(f"{len(t.entries) - nd} files, {nd} folders")
             rows = [("Location", pretty_path(t.path) if t.path not in VIRTUAL else self.display_path(t.path))]
@@ -3371,11 +3396,11 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         txt = "unavailable"
                     GLib.idle_add(lambda: (gen == self._side_gen and self._qv_set("Disk", txt), False)[1])
-                threading.Thread(target=dwork, daemon=True).start()
+                bg(dwork)
         elif len(sel) > 1:
             nd = sum(1 for e in sel if e.is_dir)
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(Gio.ThemedIcon.new("edit-select-all"), 32))
-            self.details_title.set_markup(f"<b>{len(sel)} items selected</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(Gio.ThemedIcon.new("edit-select-all"), 32))
+            self.details_title.set_text(f"{len(sel)} items selected")
             self.qv_subtitle.set_text(f"{len(sel) - nd} files, {nd} folders")
             total = sum(e.size or 0 for e in sel if not e.is_dir)
             rows = [("Size", fmt_size(total) + ("  (files only)" if nd else "")),
@@ -3385,8 +3410,8 @@ class MainWindow(Gtk.ApplicationWindow):
                 rows.append(("Types", ", ".join(exts[:8]) + ("…" if len(exts) > 8 else "")))
         else:
             e = sel[0]
-            self.qv_icon.set_from_pixbuf(ICONS.pixbuf(e.icon, 32, e))
-            self.details_title.set_markup(f"<b>{GLib.markup_escape_text(e.name)}</b>")
+            image_set_pixbuf(self.qv_icon, ICONS.pixbuf(e.icon, 32, e))
+            self.details_title.set_text(e.name)
             self.qv_subtitle.set_text(e.type)
             rows = []
             if e.is_dir:
@@ -3425,7 +3450,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 def runnable():
                     if script_runner(spath):
                         GLib.idle_add(lambda: (gen == self._side_gen and self._qv_add("Runnable", "yes"), False)[1])
-                threading.Thread(target=runnable, daemon=True).start()
+                bg(runnable)
             # background facts: folder size / contents, text line count
             path = e.path
             if e.is_dir and path:
@@ -3440,7 +3465,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     if not cancel.is_set():
                         GLib.idle_add(lambda: (gen == self._side_gen and (self._qv_set("Contains", f"{f:,} files, {d:,} folders"), self._qv_set("Size", fmt_size(b) + f"  ({b:,} bytes)"))) and False)
                 # same 250 ms debounce as the folder preview: a double-click must not start a size walk
-                GLib.timeout_add(250, lambda: (gen == self._side_gen and not cancel.is_set() and threading.Thread(target=work, daemon=True).start(), False)[1])
+                GLib.timeout_add(250, lambda: (gen == self._side_gen and not cancel.is_set() and bg(work), False)[1])
             elif (e.content_type or "").startswith("text/") and path and (e.size or 0) < 8 << 20:
                 def work_lines():
                     try:
@@ -3449,17 +3474,17 @@ class MainWindow(Gtk.ApplicationWindow):
                     except OSError:
                         n = 0
                     GLib.idle_add(lambda: (gen == self._side_gen and self._qv_set("Lines", f"{n:,}")) and False)
-                threading.Thread(target=work_lines, daemon=True).start()
+                bg(work_lines)
         for i, (k, v) in enumerate(rows):
             kl = Gtk.Label(label=k, xalign=1, yalign=0)
-            kl.get_style_context().add_class("dim-label")
+            css_class(kl, "dim-label")
             vl = Gtk.Label(label=v or "—", xalign=0, wrap=True, selectable=True, hexpand=True)
-            vl.set_line_wrap_mode(Pango.WrapMode.WORD_CHAR)
+            label_wrap_mode(vl, Pango.WrapMode.WORD_CHAR)
             vl.set_max_width_chars(34)
             g.attach(kl, 0, i, 1, 1)
             g.attach(vl, 1, i, 1, 1)
             self._qv_labels[k] = vl
-        g.show_all()
+        show_all(g)
 
     # ------------------------------------------------------------------ tabs & panes
     @property
@@ -3475,22 +3500,22 @@ class MainWindow(Gtk.ApplicationWindow):
     def new_tab(self, path: str, switch: bool = True) -> FolderView:
         pg = Page(self, path)
         lab = Gtk.Box(spacing=2)
-        lab.pack_start(pg.label, True, True, 0)
-        close = Gtk.Button.new_from_icon_name("window-close-symbolic", Gtk.IconSize.MENU)
-        close.set_relief(Gtk.ReliefStyle.NONE)
+        put(lab, pg.label, True, True, 0)
+        close = icon_button("window-close-symbolic", "menu")
+        flat_button(close)
         close.set_focus_on_click(False)
-        close.get_style_context().add_class("tab-close")
+        css_class(close, "tab-close")
         close.connect("clicked", lambda b: pg.win.close_tab(pg))
-        lab.pack_start(close, False, False, 0)
-        lab.show_all()
-        ev = Gtk.EventBox()
-        ev.add(lab)
-        ev.connect("button-press-event", lambda w, e: pg.win._on_tab_label_button(w, e, pg))
-        ev.show_all()
-        n = self.notebook.append_page(pg, ev)
+        put(lab, close, False, False, 0)
+        show_all(lab)
+        ev = event_box()
+        set_child(ev, lab)
+        on_event(ev, "button-press-event", lambda w, e: pg.win._on_tab_label_button(w, e, pg))
+        show_all(ev)
+        n = self.notebook.append_page(pg, fixed_width(ev))
         self.notebook.set_tab_reorderable(pg, True)
         self.notebook.set_tab_detachable(pg, True)
-        pg.show_all()
+        show_all(pg)
         pg._update_headers()
         if switch:
             self.notebook.set_current_page(n)
@@ -3510,8 +3535,7 @@ class MainWindow(Gtk.ApplicationWindow):
                     ("Close other tabs", lambda: [self.close_tab(p) for p in self._pages() if p is not pg]),
                     ("_Close tab", lambda: self.close_tab(pg))]
             m = build_menu(spec)
-            m.attach_to_widget(w, None)
-            m.popup_at_pointer(event)
+            popup_menu(m, w, event)
             return True
         return False
 
@@ -3522,7 +3546,7 @@ class MainWindow(Gtk.ApplicationWindow):
         win = self.app.new_window("")
         tab_label = self.notebook.get_tab_label(pg)
         self.notebook.detach_tab(pg)
-        n = win.notebook.append_page(pg, tab_label)
+        n = win.notebook.append_page(pg, fixed_width(tab_label))
         win.notebook.set_tab_reorderable(pg, True)
         win.notebook.set_tab_detachable(pg, True)
         pg.win = win
@@ -3835,7 +3859,7 @@ class MainWindow(Gtk.ApplicationWindow):
         w = d.get_widget()
         w.set_show_other(True)
         w.set_show_default(True)
-        if d.run() == Gtk.ResponseType.OK:
+        if run_dialog(d) == Gtk.ResponseType.OK:
             app = d.get_app_info()
             if app:
                 try:
@@ -4003,7 +4027,7 @@ class MainWindow(Gtk.ApplicationWindow):
                 except OSError:
                     e.type = "unavailable"
             GLib.idle_add(lambda: (t and t.path == THISPC and (touch_all(t.store), t.pcview.refresh())) or False)
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
         return out
 
     def _place_folder_drives(self, out: List[Entry], sources: List[Entry]) -> List[Entry]:
@@ -4172,7 +4196,7 @@ class MainWindow(Gtk.ApplicationWindow):
     def on_view_key(self, view, event, t: FolderView):
         key = event.keyval
         mods = event.state & Gtk.accelerator_get_default_mod_mask()
-        ctrl, shift, alt = bool(mods & Gdk.ModifierType.CONTROL_MASK), bool(mods & Gdk.ModifierType.SHIFT_MASK), bool(mods & Gdk.ModifierType.MOD1_MASK)
+        ctrl, shift, alt = bool(mods & Gdk.ModifierType.CONTROL_MASK), bool(mods & Gdk.ModifierType.SHIFT_MASK), bool(mods & ALT_MASK)
         cb = self._list_keys.get((Gdk.keyval_to_lower(key), int(mods)))       # Space, Delete, F2… (Preferences → Shortcuts)
         if cb is not None:
             cb()
@@ -4197,6 +4221,9 @@ class MainWindow(Gtk.ApplicationWindow):
             return True
         if view is t.icons and not mods and event.string and event.string.isprintable():
             self._icon_typeahead(t, event.string)
+            return True
+        if GTK4 and view is t.tree and not mods and event.string and event.string.isprintable() and event.string != " ":
+            t.tree.typeahead(event.string)          # the tree view's own type-to-find, which the GTK 4 list lacks
             return True
         return False
 
@@ -4238,10 +4265,21 @@ class MainWindow(Gtk.ApplicationWindow):
         self._report_path = path
         self.report_label.set_text(text or ("Something went wrong: " + CRASH.summary_of(path)))
         self.report_label.set_tooltip_text(CRASH.summary_of(path))
+        self.report_dismiss.set_visible(len(CRASH.pending()) > 1)
         self.report_bar.set_revealed(True)
 
     def _on_report_bar(self, bar, response):
         bar.set_revealed(False)
+        if response == 2:                    # Dismiss all: none of the waiting reports is offered again
+            waiting = CRASH.pending()
+            for path in waiting:
+                CRASH.archive(path, "dismissed")
+            self._report_path = None
+            for w in self.get_application().get_windows():
+                if w is not self and hasattr(w, "report_bar"):
+                    w.report_bar.set_revealed(False)
+            self.flash(f"{len(waiting)} error report{'s' if len(waiting) != 1 else ''} dismissed")
+            return
         if response == 1 and self._report_path:
             path, self._report_path = self._report_path, None
             if os.path.exists(path):
@@ -4256,7 +4294,7 @@ class MainWindow(Gtk.ApplicationWindow):
             return True        # keep the window open
         if getattr(self, "video", None) is not None:
             self.video.stop()
-        self.cfg["window"] = list(self.get_size())
+        self.cfg["window"] = list(window_size(self))
         self.cfg["nav_width"] = self.paned.get_position()
         self._remember_side_width()
         self._remember_side_split()

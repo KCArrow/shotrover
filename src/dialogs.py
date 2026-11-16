@@ -7,8 +7,8 @@ def message(parent, title: str, text: str, kind=Gtk.MessageType.INFO, buttons=Gt
         return Gtk.ResponseType.OK
     d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=kind, buttons=buttons, text=title)
     if text:
-        d.format_secondary_text(text)
-    r = d.run()
+        dialog_secondary(d, text)
+    r = run_dialog(d)
     d.destroy()
     return r
 
@@ -16,9 +16,9 @@ def message(parent, title: str, text: str, kind=Gtk.MessageType.INFO, buttons=Gt
 def ask_yes_no(parent, title: str, text: str, default_no: bool = False) -> bool:
     d = Gtk.MessageDialog(transient_for=parent, modal=True, message_type=Gtk.MessageType.QUESTION,
                           buttons=Gtk.ButtonsType.YES_NO, text=title)
-    d.format_secondary_text(text)
+    dialog_secondary(d, text)
     d.set_default_response(Gtk.ResponseType.NO if default_no else Gtk.ResponseType.YES)
-    r = d.run()
+    r = run_dialog(d)
     d.destroy()
     return r == Gtk.ResponseType.YES
 
@@ -29,15 +29,15 @@ def ask_text(parent, title: str, label: str, value: str = "", select_stem: bool 
     d.set_default_response(Gtk.ResponseType.OK)
     box = d.get_content_area()
     box.set_spacing(6)
-    box.set_border_width(12)
-    box.pack_start(Gtk.Label(label=label, xalign=0), False, False, 0)
+    set_margins(box, 12)
+    put(box, Gtk.Label(label=label, xalign=0), False, False, 0)
     entry = Gtk.Entry(text=value, activates_default=True, width_chars=50)
-    box.pack_start(entry, False, False, 0)
-    d.show_all()
+    put(box, entry, False, False, 0)
+    show_all(d)
     if select_stem and value:
         stem = os.path.splitext(value)[0]
         entry.select_region(0, len(stem))
-    r = d.run()
+    r = run_dialog(d)
     txt = entry.get_text()
     d.destroy()
     return txt if r == Gtk.ResponseType.OK else None
@@ -59,30 +59,30 @@ class FolderPicker(Gtk.Dialog):
         self.show_hidden = bool(cfg.get("show_hidden"))
         box = self.get_content_area()
         box.set_spacing(6)
-        box.set_border_width(10)
+        set_margins(box, 10)
         self.entry = Gtk.Entry(text=start or HOME, activates_default=True)
         self.entry.set_tooltip_text("Type or paste a path, or pick a folder below")
-        box.pack_start(self.entry, False, False, 0)
+        put(box, self.entry, False, False, 0)
         self.store = Gtk.TreeStore(str, str, str, bool)          # label, path, icon name, loaded
         self.tv = Gtk.TreeView(model=self.store, headers_visible=False, enable_search=True, search_column=0)
         col = Gtk.TreeViewColumn()
         ri = Gtk.CellRendererPixbuf()
         rt = Gtk.CellRendererText(ellipsize=Pango.EllipsizeMode.END)
-        col.pack_start(ri, False)
-        col.pack_start(rt, True)
+        put(col, ri, False)
+        put(col, rt, True)
         col.add_attribute(ri, "icon-name", 2)
         col.add_attribute(rt, "text", 0)
         self.tv.append_column(col)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-        sw.set_shadow_type(Gtk.ShadowType.IN)
-        sw.add(self.tv)
-        box.pack_start(sw, True, True, 0)
+        set_frame(sw, True)
+        set_child(sw, self.tv)
+        put(box, sw, True, True, 0)
         self.tv.connect("row-expanded", self._expanded)
         self.tv.connect("row-activated", lambda tv, path, c: tv.collapse_row(path) if tv.row_expanded(path) else tv.expand_row(path, False))
         self.tv.get_selection().connect("changed", self._selected)
         self._reveal_target: Optional[str] = None
         self._roots()
-        self.show_all()
+        show_all(self)
         if start and os.path.isdir(start):
             self._reveal(os.path.abspath(start))
 
@@ -143,7 +143,7 @@ class FolderPicker(Gtk.Dialog):
                 self._add(pit, n, os.path.join(folder, n), "folder")
             self._continue_reveal(pit)
             return False
-        threading.Thread(target=work, daemon=True).start()
+        bg(work)
 
     def _selected(self, sel):
         model, it = sel.get_selected()
@@ -194,7 +194,7 @@ class FolderPicker(Gtk.Dialog):
     # ---- run
     def choose(self) -> Optional[str]:
         while True:
-            r = self.run()
+            r = run_dialog(self)
             path = os.path.abspath(os.path.expanduser(self.entry.get_text().strip())) if self.entry.get_text().strip() else ""
             if r == 1:                                           # New folder inside the current one
                 base = path if os.path.isdir(path) else HOME
@@ -251,12 +251,12 @@ def conflict_dialog(parent, src: str, dst: str) -> Tuple[Optional[str], bool]:
     d.add_buttons("_Replace", 1, "_Skip", 2, "_Keep both", 3, "_Cancel", Gtk.ResponseType.CANCEL)
     d.set_default_response(1)
     box = d.get_content_area()
-    box.set_border_width(12)
+    set_margins(box, 12)
     box.set_spacing(8)
     lab = Gtk.Label(xalign=0, wrap=True)
     lab.set_markup(f"The destination already has a {what} named <b>{GLib.markup_escape_text(os.path.basename(dst))}</b>."
                    + ("\nMerging folders replaces files with the same name." if both_dirs else ""))
-    box.pack_start(lab, False, False, 0)
+    put(box, lab, False, False, 0)
     grid = Gtk.Grid(column_spacing=12, row_spacing=4)
     for i, (title, p) in enumerate((("Source", src), ("Destination", dst))):
         try:
@@ -266,11 +266,11 @@ def conflict_dialog(parent, src: str, dst: str) -> Tuple[Optional[str], bool]:
             info = "?"
         grid.attach(Gtk.Label(label=title + ":", xalign=0), 0, i, 1, 1)
         grid.attach(Gtk.Label(label=info, xalign=0), 1, i, 1, 1)
-    box.pack_start(grid, False, False, 0)
+    put(box, grid, False, False, 0)
     chk = Gtk.CheckButton(label="Do this for all conflicts")
-    box.pack_start(chk, False, False, 0)
-    d.show_all()
-    r = d.run()
+    put(box, chk, False, False, 0)
+    show_all(d)
+    r = run_dialog(d)
     all_ = chk.get_active()
     d.destroy()
     return {1: "replace", 2: "skip", 3: "keep"}.get(r), all_
@@ -280,59 +280,62 @@ class ProgressDialog(Gtk.Window):
     """Windows 11-style file-operation window: percent, bar, speed graph, items/time remaining, Pause, Cancel."""
 
     def __init__(self, parent, op, title: str):
-        super().__init__(title=title, transient_for=parent, type_hint=Gdk.WindowTypeHint.DIALOG)
+        super().__init__(title=title, transient_for=parent)
+        if not GTK4:
+            self.set_type_hint(Gdk.WindowTypeHint.DIALOG)
         self.op = op
         self.set_default_size(520, -1)
         self.set_resizable(False)
-        self.set_position(Gtk.WindowPosition.CENTER_ON_PARENT)
+        center_on_parent(self)
         self.last_t, self.last_done = time.time(), 0
         self.rate = 0.0
         self.expanded = True
-        v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8, margin=16)
-        self.add(v)
+        v = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=8), 16)
+        set_child(self, v)
         self.head = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE)
         self.head.set_markup(f"<span size='large'>{GLib.markup_escape_text(title)}</span>")
-        v.pack_start(self.head, False, False, 0)
+        put(v, self.head, False, False, 0)
         self.pct = Gtk.Label(xalign=0)
         self.pct.set_markup("<span size='x-large' weight='bold'>0%</span> complete")
-        v.pack_start(self.pct, False, False, 0)
+        put(v, self.pct, False, False, 0)
         self.bar = Gtk.ProgressBar()
-        v.pack_start(self.bar, False, False, 0)
+        put(v, self.bar, False, False, 0)
         self.graph = Gtk.DrawingArea()
         self.graph.set_size_request(-1, 70)
-        self.graph.connect("draw", self._draw_graph)
-        v.pack_start(self.graph, False, False, 0)
+        on_draw(self.graph, self._draw_graph)
+        put(v, self.graph, False, False, 0)
         self.details = Gtk.Grid(column_spacing=12, row_spacing=3)
         self.rows = {}
         for i, key in enumerate(("Name", "Speed", "Items remaining", "Time remaining")):
             k = Gtk.Label(label=key + ":", xalign=0)
-            k.get_style_context().add_class("dim-label")
+            css_class(k, "dim-label")
             val = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, hexpand=True)
             self.details.attach(k, 0, i, 1, 1)
             self.details.attach(val, 1, i, 1, 1)
             self.rows[key] = val
-        v.pack_start(self.details, False, False, 0)
+        put(v, self.details, False, False, 0)
         hb = Gtk.Box(spacing=6)
-        self.more = Gtk.Button(label="Fewer details", relief=Gtk.ReliefStyle.NONE)
+        self.more = Gtk.Button(label="Fewer details")
+        flat_button(self.more)
         self.more.connect("clicked", self._toggle)
-        hb.pack_start(self.more, False, False, 0)
+        put(hb, self.more, False, False, 0)
         self.btn_cancel = Gtk.Button(label="Cancel")
         self.btn_cancel.connect("clicked", lambda b: op.cancel.cancel())
-        hb.pack_end(self.btn_cancel, False, False, 0)
+        put_end(hb, self.btn_cancel, False, False, 0)
         self.btn_pause = Gtk.Button(label="Pause")
         self.btn_pause.connect("clicked", self._pause)
-        hb.pack_end(self.btn_pause, False, False, 0)
-        v.pack_start(hb, False, False, 0)
-        self.connect("delete-event", lambda w, e: (op.cancel.cancel(), True)[1])
+        put_end(hb, self.btn_pause, False, False, 0)
+        put(v, hb, False, False, 0)
+        on_event(self, "delete-event", lambda w, e: (op.cancel.cancel(), True)[1])
         self.timer = GLib.timeout_add(150, self.tick)
-        self.show_all()
+        show_all(self)
 
     def _toggle(self, b):
         self.expanded = not self.expanded
         self.details.set_visible(self.expanded)
         self.graph.set_visible(self.expanded)
         self.more.set_label("Fewer details" if self.expanded else "More details")
-        self.resize(520, 1)
+        resize_window(self, 520, 1)
 
     def _pause(self, b):
         op = self.op
@@ -346,7 +349,7 @@ class ProgressDialog(Gtk.Window):
     def _draw_graph(self, w, cr):
         a = w.get_allocation()
         sc = w.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.06)
         cr.rectangle(0, 0, a.width, a.height)
         cr.fill()
@@ -420,7 +423,7 @@ class PropertiesDialog(Gtk.Dialog):
         self.set_default_size(480, -1)
         self.cancel = threading.Event()
         nb = Gtk.Notebook()
-        self.get_content_area().pack_start(nb, True, True, 0)
+        put(self.get_content_area(), nb, True, True, 0)
         try:
             self.st = os.lstat(e.path)
         except OSError:
@@ -430,10 +433,10 @@ class PropertiesDialog(Gtk.Dialog):
         nb.append_page(self._details(), Gtk.Label(label="Details"))
         self.connect("response", self._response)
         self.connect("destroy", lambda *_: self.cancel.set())
-        self.show_all()
+        show_all(self)
 
     def _grid(self):
-        g = Gtk.Grid(column_spacing=12, row_spacing=6, border_width=12)
+        g = with_margins(Gtk.Grid(column_spacing=12, row_spacing=6), 12, inner=True)
         return g
 
     def _row(self, g, r, key, widget):
@@ -449,10 +452,10 @@ class PropertiesDialog(Gtk.Dialog):
         g = self._grid()
         hb = Gtk.Box(spacing=8)
         pb = ICONS.pixbuf(e.icon or Gio.ThemedIcon.new("text-x-generic"), 48, e)
-        img = Gtk.Image.new_from_pixbuf(pb) if pb is not None else Gtk.Image.new_from_gicon(e.icon or Gio.ThemedIcon.new("text-x-generic"), Gtk.IconSize.DIALOG)
-        hb.pack_start(img, False, False, 0)
+        img = image_from_pixbuf(pb) if pb is not None else icon_image(e.icon or Gio.ThemedIcon.new("text-x-generic"), "dialog")
+        put(hb, img, False, False, 0)
         self.name_entry = Gtk.Entry(text=e.name, hexpand=True)
-        hb.pack_start(self.name_entry, True, True, 0)
+        put(hb, self.name_entry, True, True, 0)
         g.attach(hb, 0, 0, 2, 1)
         g.attach(Gtk.Separator(), 0, 1, 2, 1)
         r = 2
@@ -466,7 +469,7 @@ class PropertiesDialog(Gtk.Dialog):
         self._row(g, r, "Size on disk:", f"{fmt_size(blocks)} ({blocks:,} bytes)"); r += 1
         if e.is_dir:
             self.contains_lab = self._row(g, r, "Contains:", "calculating…"); r += 1
-            threading.Thread(target=self._calc, daemon=True).start()
+            bg(self._calc)
         g.attach(Gtk.Separator(), 0, r, 2, 1); r += 1
         f = "%A, %B %d, %Y, %H:%M:%S"
         self._row(g, r, "Created:", fmt_date(e.ctime, f) or fmt_date(st.st_ctime if st else 0, f) + "  (inode change)"); r += 1
@@ -520,7 +523,7 @@ class PropertiesDialog(Gtk.Dialog):
         g.attach(pg, 1, 3, 1, 1)
         self.mode_lab = self._row(g, 4, "Mode:", f"{_stat.filemode(st.st_mode) if st else ''}  ({oct(mode)})")
         note = Gtk.Label(label="Changing the owner requires root (use chown in a terminal).", xalign=0)
-        note.get_style_context().add_class("dim-label")
+        css_class(note, "dim-label")
         g.attach(note, 0, 5, 2, 1)
         return g
 
@@ -552,7 +555,7 @@ class PropertiesDialog(Gtk.Dialog):
                 except OSError:
                     digest = "unavailable"
                 GLib.idle_add(lambda: (lab.set_text(digest), False)[1])
-            threading.Thread(target=work, daemon=True).start()
+            bg(work)
         return g
 
     def _apply(self):
@@ -601,7 +604,7 @@ class MultiPropertiesDialog(Gtk.Dialog):
         super().__init__(title=f"{len(sel)} Items Properties", transient_for=parent, modal=True)
         self.add_button("_OK", Gtk.ResponseType.OK)
         self.cancel = threading.Event()
-        g = Gtk.Grid(column_spacing=12, row_spacing=6, border_width=12)
+        g = with_margins(Gtk.Grid(column_spacing=12, row_spacing=6), 12, inner=True)
         nf = sum(1 for e in sel if not e.is_dir)
         g.attach(Gtk.Label(label="Type:", xalign=1), 0, 0, 1, 1)
         g.attach(Gtk.Label(label=f"Multiple Types ({nf} Files, {len(sel) - nf} Folders)", xalign=0), 1, 0, 1, 1)
@@ -613,10 +616,10 @@ class MultiPropertiesDialog(Gtk.Dialog):
         g.attach(Gtk.Label(label="Contains:", xalign=1), 0, 3, 1, 1)
         self.cont_lab = Gtk.Label(label="…", xalign=0)
         g.attach(self.cont_lab, 1, 3, 1, 1)
-        self.get_content_area().pack_start(g, True, True, 0)
+        put(self.get_content_area(), g, True, True, 0)
         self.connect("response", lambda *_: (self.cancel.set(), self.destroy()))
-        self.show_all()
-        threading.Thread(target=self._calc, args=(sel,), daemon=True).start()
+        show_all(self)
+        bg(lambda: self._calc(sel))
 
     def _calc(self, sel):
         f = d = b = 0
@@ -639,7 +642,7 @@ class OptionsDialog(Gtk.Dialog):
         self.add_buttons("Restore _Defaults", 10, "_Cancel", Gtk.ResponseType.CANCEL, "_OK", Gtk.ResponseType.OK)
         self.set_default_response(Gtk.ResponseType.OK)
         nb = Gtk.Notebook()
-        self.get_content_area().pack_start(nb, True, True, 0)
+        put(self.get_content_area(), nb, True, True, 0)
         self.w: Dict[str, Gtk.Widget] = {}
         nb.append_page(self._general(), Gtk.Label(label="General"))
         nb.append_page(self._view(), Gtk.Label(label="View"))
@@ -647,34 +650,34 @@ class OptionsDialog(Gtk.Dialog):
         nb.append_page(self._dependencies(), Gtk.Label(label="Optional"))
         nb.append_page(self._shortcuts(), Gtk.Label(label="Shortcuts"))
         self.set_default_size(720, 560)
-        self.show_all()
+        show_all(self)
         nb.set_current_page(page)
         self.connect("response", self._response)
 
     @staticmethod
     def _vbox():
-        return Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, border_width=12)
+        return with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 12, inner=True)
 
     @staticmethod
     def _heading(box, text):
         l = Gtk.Label(xalign=0)
         l.set_markup(f"<b>{text}</b>")
         l.set_margin_top(8)
-        box.pack_start(l, False, False, 0)
+        put(box, l, False, False, 0)
 
     def _radios(self, box, key, options):
         group = None
         for value, label in options:
-            rb = Gtk.RadioButton.new_with_label_from_widget(group, label)
+            rb = radio_button(group, label)
             group = group or rb
             rb.set_active(self.cfg[key] == value)
             rb.value = value
-            box.pack_start(rb, False, False, 0)
+            put(box, rb, False, False, 0)
             self.w.setdefault("radio:" + key, []).append(rb)
 
     def _check(self, box, key, label):
         cb = Gtk.CheckButton(label=label, active=bool(self.cfg[key]))
-        box.pack_start(cb, False, False, 0)
+        put(box, cb, False, False, 0)
         self.w[key] = cb
 
     def _general(self):
@@ -690,18 +693,18 @@ class OptionsDialog(Gtk.Dialog):
                                            ("open", "Double-click opens the archive with the default application")])
         self._heading(b, "Performance")
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="CPU cores reserved for the interface:"), False, False, 0)
+        put(row, Gtk.Label(label="CPU cores reserved for the interface:"), False, False, 0)
         self.cores_spin = Gtk.SpinButton.new_with_range(0, max(0, os.cpu_count() or 0), 1)
         self.cores_spin.set_value(int(self.cfg.get("ui_cores", 2)))
         self.cores_spin.set_tooltip_text("Preview decoding, 3D rendering and thumbnails run on the other cores so the window never stalls.\n0 disables pinning. Takes effect after a restart.")
-        row.pack_start(self.cores_spin, False, False, 0)
-        b.pack_start(row, False, False, 0)
+        put(row, self.cores_spin, False, False, 0)
+        put(b, row, False, False, 0)
         self._heading(b, "Privacy")
         self._check(b, "show_recent", "Show recently used files in Quick access")
         self._check(b, "show_frequent", "Show frequently used folders in Quick access")
         btn = Gtk.Button(label="Clear Shotrover history", halign=Gtk.Align.START)
         btn.connect("clicked", lambda *_: (self.cfg["recent"].clear(), self.cfg["frequent"].clear()))
-        b.pack_start(btn, False, False, 4)
+        put(b, btn, False, False, 4)
         return b
 
     def _view(self):
@@ -723,13 +726,13 @@ class OptionsDialog(Gtk.Dialog):
         for key, title, options in (("icons", "Icons", (("shotrover", "Shotrover icons"), ("system", "System icons (your desktop's icon theme)"))),
                                     ("theme", "Colours", (("system", "Follow my desktop"), ("light", "Light"), ("dark", "Dark")))):
             col = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
-            col.pack_start(Gtk.Label(label=title, xalign=0), False, False, 0)
+            put(col, Gtk.Label(label=title, xalign=0), False, False, 0)
             self._radios(col, key, options)
-            row.pack_start(col, False, False, 0)
-        b.pack_start(row, False, False, 0)
+            put(row, col, False, False, 0)
+        put(b, row, False, False, 0)
         self._heading(b, "Date format (strftime)")
         e = Gtk.Entry(text=self.cfg["date_format"])
-        b.pack_start(e, False, False, 0)
+        put(b, e, False, False, 0)
         self.w["date_format"] = e
         return b
 
@@ -744,8 +747,8 @@ class OptionsDialog(Gtk.Dialog):
         info.set_markup("<small>Folders you open paint instantly from the index while the real listing loads, and name searches "
                         "answer from it immediately. The index is AES-256 encrypted and authenticated; its key is kept in your desktop "
                         "keyring (or a private key file), never next to the index. Plaintext exists only in Shotrover's memory.</small>")
-        b.pack_start(info, False, False, 0)
-        b.pack_start(Gtk.Label(label="Folders to index:", xalign=0), False, False, 0)
+        put(b, info, False, False, 0)
+        put(b, Gtk.Label(label="Folders to index:", xalign=0), False, False, 0)
         self.roots_store = Gtk.ListStore(str)
         for r in self.cfg.get("index_roots", [HOME]):
             self.roots_store.append([r])
@@ -755,40 +758,40 @@ class OptionsDialog(Gtk.Dialog):
         rcol.set_cell_data_func(rcell, lambda c, cell, m, it, d=None: cell.set_property("text", pretty_path(m[it][0])), None)
         tv.append_column(rcol)
         sw = Gtk.ScrolledWindow(min_content_height=90)
-        sw.add(tv)
-        b.pack_start(sw, False, False, 0)
+        set_child(sw, tv)
+        put(b, sw, False, False, 0)
         row = Gtk.Box(spacing=6)
         add = Gtk.Button(label="Add folder…")
         rem = Gtk.Button(label="Remove")
         add.connect("clicked", lambda w: self._root_add())
         rem.connect("clicked", lambda w: self._root_remove(tv))
-        row.pack_start(add, False, False, 0)
-        row.pack_start(rem, False, False, 0)
-        b.pack_start(row, False, False, 0)
+        put(row, add, False, False, 0)
+        put(row, rem, False, False, 0)
+        put(b, row, False, False, 0)
         self._check(b, "index_network", "Include network shares (slow to crawl; off by default)")
         self._check(b, "index_hidden", "Include hidden files and folders")
         row2 = Gtk.Box(spacing=6)
-        row2.pack_start(Gtk.Label(label="Re-check every"), False, False, 0)
+        put(row2, Gtk.Label(label="Re-check every"), False, False, 0)
         self.index_interval = Gtk.SpinButton.new_with_range(1, 168, 1)
         self.index_interval.set_value(int(self.cfg.get("index_interval_h", 6)))
-        row2.pack_start(self.index_interval, False, False, 0)
-        row2.pack_start(Gtk.Label(label="hours (only changed folders are re-read)"), False, False, 0)
-        b.pack_start(row2, False, False, 0)
+        put(row2, self.index_interval, False, False, 0)
+        put(row2, Gtk.Label(label="hours (only changed folders are re-read)"), False, False, 0)
+        put(b, row2, False, False, 0)
         row3 = Gtk.Box(spacing=6)
         upd = Gtk.Button(label="Update now")
         full = Gtk.Button(label="Rebuild from scratch")
         wipe = Gtk.Button(label="Delete index and key")
-        wipe.get_style_context().add_class("destructive-action")
+        css_class(wipe, "destructive-action")
         upd.connect("clicked", lambda w: self._index_action("update"))
         full.connect("clicked", lambda w: self._index_action("full"))
         wipe.connect("clicked", lambda w: self._index_action("wipe"))
         for w_ in (upd, full):
-            row3.pack_start(w_, False, False, 0)
-        row3.pack_end(wipe, False, False, 0)
-        b.pack_start(row3, False, False, 0)
+            put(row3, w_, False, False, 0)
+        put_end(row3, wipe, False, False, 0)
+        put(b, row3, False, False, 0)
         self.index_status = Gtk.Label(xalign=0, wrap=True)
-        self.index_status.get_style_context().add_class("dim-label")
-        b.pack_start(self.index_status, False, False, 0)
+        css_class(self.index_status, "dim-label")
+        put(b, self.index_status, False, False, 0)
         self._index_status_refresh()
         GLib.timeout_add(1500, self._index_status_tick)
         return b
@@ -836,7 +839,7 @@ class OptionsDialog(Gtk.Dialog):
     def _pick_rv(self, btn):
         d = Gtk.FileChooserDialog(title="Locate the rv executable", transient_for=self, action=Gtk.FileChooserAction.OPEN)
         d.add_buttons("_Cancel", Gtk.ResponseType.CANCEL, "_Select", Gtk.ResponseType.OK)
-        if d.run() == Gtk.ResponseType.OK:
+        if run_dialog(d) == Gtk.ResponseType.OK:
             self.rv_entry.set_text(d.get_filename() or "")
         d.destroy()
 
@@ -850,65 +853,79 @@ class OptionsDialog(Gtk.Dialog):
         self.gl_check.set_sensitive(HAVE_GL)
         if not HAVE_GL:
             self.gl_check.set_tooltip_text("PyOpenGL is not installed — tick it in the list below")
-        outer.pack_start(self.gl_check, False, False, 0)
+        put(outer, self.gl_check, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
         note.set_text("Needs the PyOpenGL add-on, which is installed." if HAVE_GL else
                       "Needs the PyOpenGL add-on, which is not installed: tick PyOpenGL in the list below and "
                       "install it, then restart Shotrover.")
-        note.get_style_context().add_class("dim-label")
-        outer.pack_start(note, False, False, 0)
+        css_class(note, "dim-label")
+        put(outer, note, False, False, 0)
+        self._heading(outer, "Interface")
+        have4 = gtk4_installed()
+        self.gtk4_check = Gtk.CheckButton(label="Use GTK 4 (experimental) — smoother window resizing; applies after a restart",
+                                          active=self.cfg.get("toolkit") == "gtk4")
+        self.gtk4_check.set_sensitive(have4)
+        put(outer, self.gtk4_check, False, False, 0)
+        note = Gtk.Label(xalign=0, wrap=True, max_width_chars=80, margin_start=24)
+        forced = os.environ.get("SHOTROVER_GTK") in ("3", "4")
+        note.set_text(("GTK 4 is not installed." if not have4 else
+                       f"GTK 4 did not start ({GTK4_FAILED}), so this was switched off." if GTK4_FAILED else
+                       f"Running on GTK {'4' if GTK4 else '3'}" + (", set by SHOTROVER_GTK." if forced else ".")) +
+                      " If GTK 4 cannot start, Shotrover goes back to GTK 3 by itself.")
+        css_class(note, "dim-label")
+        put(outer, note, False, False, 0)
         self._heading(outer, "OpenRV")
         self._check(outer, "rv_enabled", "Enable OpenRV (right-click → Open in RV, Ctrl+Shift+R)")
         row = Gtk.Box(spacing=6)
-        row.pack_start(Gtk.Label(label="RV executable:"), False, False, 0)
+        put(row, Gtk.Label(label="RV executable:"), False, False, 0)
         self.rv_entry = Gtk.Entry(text=self.cfg.get("rv_path", ""), hexpand=True, placeholder_text="auto-detect (rv on PATH, $RV_HOME, /opt/rv*, ~/OpenRV*)")
-        row.pack_start(self.rv_entry, True, True, 0)
+        put(row, self.rv_entry, True, True, 0)
         browse = Gtk.Button(label="Browse…")
         browse.connect("clicked", self._pick_rv)
-        row.pack_start(browse, False, False, 0)
-        outer.pack_start(row, False, False, 0)
+        put(row, browse, False, False, 0)
+        put(outer, row, False, False, 0)
         self.rv_status = Gtk.Label(xalign=0, wrap=True)
-        self.rv_status.get_style_context().add_class("dim-label")
-        outer.pack_start(self.rv_status, False, False, 0)
+        css_class(self.rv_status, "dim-label")
+        put(outer, self.rv_status, False, False, 0)
         self.rv_entry.connect("changed", lambda e: self._rv_detect())
         self._rv_detect()
         self._heading(outer, "Optional tools")
         self.dep_status = Gtk.Label(label="Checking what's installed…", xalign=0)
-        outer.pack_start(self.dep_status, False, False, 0)
+        put(outer, self.dep_status, False, False, 0)
         self.dep_grid = Gtk.Grid(column_spacing=12, row_spacing=3)
         sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, min_content_height=220)
-        sw.add(self.dep_grid)
-        outer.pack_start(sw, True, True, 0)
+        set_child(sw, self.dep_grid)
+        put(outer, sw, True, True, 0)
         row = Gtk.Box(spacing=6)
         self.dep_install = Gtk.Button(label="Install selected in terminal…", sensitive=False)
-        self.dep_install.get_style_context().add_class("suggested-action")
+        css_class(self.dep_install, "suggested-action")
         self.dep_install.connect("clicked", lambda b: self._dep_install())
         self.dep_copy = Gtk.Button(label="Copy commands", sensitive=False)
         self.dep_copy.connect("clicked", lambda b: self._dep_copy())
         refresh = Gtk.Button(label="Re-check")
         refresh.connect("clicked", lambda b: self._dep_refresh())
-        row.pack_start(self.dep_install, False, False, 0)
-        row.pack_start(self.dep_copy, False, False, 0)
-        row.pack_end(refresh, False, False, 0)
-        outer.pack_start(row, False, False, 0)
+        put(row, self.dep_install, False, False, 0)
+        put(row, self.dep_copy, False, False, 0)
+        put_end(row, refresh, False, False, 0)
+        put(outer, row, False, False, 0)
         note = Gtk.Label(xalign=0, wrap=True)
         note.set_markup("<small>Commands run in a terminal window so you can see them and enter your sudo password. "
                         "The commands match your distribution. Restart Shotrover afterwards.</small>")
-        outer.pack_start(note, False, False, 0)
+        put(outer, note, False, False, 0)
         exp = Gtk.Expander(label="Diagnostics (renderer, importers, converters, interpreters)")
         self.diag_view = Gtk.TextView(editable=False, monospace=True)
         dsw = Gtk.ScrolledWindow(min_content_height=200)
-        dsw.add(self.diag_view)
-        exp.add(dsw)
+        set_child(dsw, self.diag_view)
+        set_child(exp, dsw)
         exp.connect("notify::expanded", lambda e, p: e.get_expanded() and self._diag_load())
-        outer.pack_start(exp, False, False, 0)
+        put(outer, exp, False, False, 0)
         self.dep_checks: List[Tuple[Gtk.CheckButton, dict]] = []
         self._dep_refresh()
         return outer
 
     def _dep_refresh(self):
-        for c in self.dep_grid.get_children():
-            self.dep_grid.remove(c)
+        for c in child_widgets(self.dep_grid):
+            take_out(self.dep_grid, c)
         self.dep_checks = []
         self.dep_status.set_text("Checking what's installed…")
         self.dep_install.set_sensitive(False)
@@ -927,20 +944,20 @@ class OptionsDialog(Gtk.Dialog):
                 st = Gtk.Label(xalign=0)
                 if gone:
                     st.set_text("not available")
-                    st.get_style_context().add_class("dim-label")
+                    css_class(st, "dim-label")
                     st.set_tooltip_text(gone)
                 else:
                     st.set_markup(f"<span foreground='{COL_OK}'>installed</span>" if dep["found"] else f"<span foreground='{COL_DANGER}'>missing</span>")
                 self.dep_grid.attach(st, 2, i, 1, 1)
                 g = Gtk.Label(label=dep["gives"] + (" — " + gone if gone else ""), xalign=0, wrap=True, hexpand=True)
-                g.get_style_context().add_class("dim-label")
+                css_class(g, "dim-label")
                 self.dep_grid.attach(g, 3, i, 1, 1)
                 self.dep_checks.append((cb, dep))
-            self.dep_grid.show_all()
+            show_all(self.dep_grid)
             self.dep_install.set_sensitive(True)
             self.dep_copy.set_sensitive(True)
             return False
-        threading.Thread(target=lambda: GLib.idle_add(fill, optional_deps()), daemon=True).start()
+        bg(lambda: GLib.idle_add(fill, optional_deps()))
 
     def _dep_chosen(self):
         return [dep for cb, dep in self.dep_checks if cb.get_active() and dep["found"] is None]
@@ -966,7 +983,7 @@ class OptionsDialog(Gtk.Dialog):
 
     def _diag_load(self):
         self.diag_view.get_buffer().set_text("Checking…")
-        threading.Thread(target=lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False), daemon=True).start()
+        bg(lambda: GLib.idle_add(lambda: self.diag_view.get_buffer().set_text(preview_tool_report()) or False))
 
     # ---- Shortcuts page
     def _shortcuts(self):
@@ -974,7 +991,7 @@ class OptionsDialog(Gtk.Dialog):
         hint = Gtk.Label(xalign=0, wrap=True)
         hint.set_text("Click a shortcut, then press the new keys. Backspace removes it, Esc leaves it as it was. "
                       "An action with several shortcuts keeps only the one you set.")
-        b.pack_start(hint, False, False, 0)
+        put(b, hint, False, False, 0)
         self.sc = {a[0]: shortcut_accels(self.cfg, a[0]) for a in SHORTCUT_ACTIONS}
         self.sc_store = Gtk.ListStore(str, str, str, str)          # action id, name, first shortcut, the others
         tv = Gtk.TreeView(model=self.sc_store)
@@ -987,7 +1004,7 @@ class OptionsDialog(Gtk.Dialog):
         col = Gtk.TreeViewColumn("Shortcut", r)
 
         def show(column, cell, model, it, data=None):
-            key, mods = Gtk.accelerator_parse(model[it][2] or "")
+            key, mods = accel_parse(model[it][2] or "")
             cell.set_property("accel-key", key)
             cell.set_property("accel-mods", mods)
         col.set_cell_data_func(r, show)
@@ -995,19 +1012,20 @@ class OptionsDialog(Gtk.Dialog):
         tv.append_column(col)
         tv.append_column(Gtk.TreeViewColumn("Also", Gtk.CellRendererText(), text=3))
         self.sc_view = tv
-        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True, shadow_type=Gtk.ShadowType.IN)
-        sw.add(tv)
-        b.pack_start(sw, True, True, 0)
+        sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
+        set_frame(sw, True)
+        set_child(sw, tv)
+        put(b, sw, True, True, 0)
         row = Gtk.Box(spacing=6)
         one = Gtk.Button(label="Reset selected")
         one.connect("clicked", lambda w: self._sc_reset(False))
         every = Gtk.Button(label="Reset all shortcuts")
         every.connect("clicked", lambda w: self._sc_reset(True))
-        row.pack_start(one, False, False, 0)
-        row.pack_start(every, False, False, 0)
+        put(row, one, False, False, 0)
+        put(row, every, False, False, 0)
         self.sc_note = Gtk.Label(xalign=0, wrap=True)
-        row.pack_start(self.sc_note, True, True, 6)
-        b.pack_start(row, False, False, 0)
+        put(row, self.sc_note, True, True, 6)
+        put(b, row, False, False, 0)
         self._sc_fill()
         return b
 
@@ -1066,6 +1084,8 @@ class OptionsDialog(Gtk.Dialog):
             cfg["shortcuts"] = {aid: accels for aid, accels in self.sc.items() if accels != SHORTCUT_DEFAULTS[aid]}
         if hasattr(self, "gl_check"):
             cfg["gl_preview"] = self.gl_check.get_active()
+        if hasattr(self, "gtk4_check"):
+            cfg["toolkit"] = "gtk4" if self.gtk4_check.get_active() else "gtk3"
         if hasattr(self, "rv_entry"):
             cfg["rv_path"] = self.rv_entry.get_text().strip()
         if hasattr(self, "cores_spin"):
@@ -1128,20 +1148,21 @@ def show_shortcuts(parent):
     for i, t in enumerate(("Key", "Action")):
         tv.append_column(Gtk.TreeViewColumn(t, Gtk.CellRendererText(), text=i))
     sw = Gtk.ScrolledWindow(hexpand=True, vexpand=True)
-    sw.add(tv)
+    set_child(sw, tv)
     box = d.get_content_area()
-    box.pack_start(sw, True, True, 0)
-    note = Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0, margin=8)
-    note.get_style_context().add_class("dim-label")
-    box.pack_start(note, False, False, 0)
-    d.show_all()
-    d.run()
+    put(box, sw, True, True, 0)
+    note = with_margins(Gtk.Label(label="Change shortcuts in File → Preferences → Shortcuts.", xalign=0), 8)
+    css_class(note, "dim-label")
+    put(box, note, False, False, 0)
+    show_all(d)
+    run_dialog(d)
     d.destroy()
 
 
 def show_about(parent):
     d = Gtk.AboutDialog(transient_for=parent, modal=True, program_name=APP_FULL_NAME, version=VERSION,
-                        comments="A fast, Windows-Explorer-style file manager for Linux.\nGTK 3 · PyGObject · GIO",
+                        comments="A fast, Windows-Explorer-style file manager for Linux.\n"
+                                 f"GTK {Gtk.get_major_version()}.{Gtk.get_minor_version()}.{Gtk.get_micro_version()} · PyGObject · GIO",
                         website="https://github.com/KCArrow/shotrover",
                         copyright="© 2026 Kalib Arrowsmith", license_type=Gtk.License.CUSTOM,
                         license="PolyForm Noncommercial License 1.0.0\n\nFree for individuals, freelancers and noncommercial organizations. "
@@ -1149,8 +1170,8 @@ def show_about(parent):
                                 "at https://github.com/KCArrow/shotrover", wrap_license=True)
     logo = app_icon(128)
     if logo is not None:
-        d.set_logo(logo)
+        about_logo(d, logo)
     else:
         d.set_logo_icon_name("system-file-manager")
-    d.run()
+    run_dialog(d)
     d.destroy()

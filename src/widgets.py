@@ -33,7 +33,7 @@ def clip_width(widget: Gtk.Widget) -> Gtk.Widget:
     sw = Gtk.ScrolledWindow()
     sw.set_policy(Gtk.PolicyType.EXTERNAL, Gtk.PolicyType.NEVER)
     sw.set_propagate_natural_height(True)
-    sw.add(widget)
+    set_child(sw, widget)
     return sw
 
 
@@ -47,7 +47,7 @@ class FitImage(Gtk.DrawingArea):
         self.pixbuf = None
         self.max_size = max_size              # 0 = natural size cap is the pixbuf itself
         self.set_size_request(1, 1)
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
         # animated GIF / WebP: a GdkPixbufAnimation iterator advanced on its own frame delays
         self._anim_iter = None
         self._anim_timer = 0
@@ -65,10 +65,10 @@ class FitImage(Gtk.DrawingArea):
         Frames advance only while the widget is mapped and the window is active."""
         self._anim_stop()
         if anim is None:
-            self.set_from_pixbuf(None)
+            image_set_pixbuf(self, None)
             return
         if anim.is_static_image():
-            self.set_from_pixbuf(anim.get_static_image())
+            image_set_pixbuf(self, anim.get_static_image())
             return
         self._anim_iter = anim.get_iter(None)
         self.anim_paused = False
@@ -112,7 +112,7 @@ class FitImage(Gtk.DrawingArea):
         it = self._anim_iter
         if it is None:
             return False
-        top = self.get_toplevel()
+        top = toplevel(self)
         if isinstance(top, Gtk.Window) and not top.is_active():
             self._anim_timer = GLib.timeout_add(250, self._anim_tick)     # window in the background: idle
             return False
@@ -153,7 +153,7 @@ def cairo_filter_good():
 def enable_row_hover(tv: Gtk.TreeView):
     """Track the row under the pointer in tv.hover_path and repaint; cell data funcs read it via hover_bg()."""
     tv.hover_path = None
-    tv.add_events(Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
+    add_event_mask(tv, EVMASK.POINTER_MOTION_MASK | EVMASK.LEAVE_NOTIFY_MASK)
 
     def motion(w, event):
         hit = w.get_path_at_pos(int(event.x), int(event.y))
@@ -169,24 +169,29 @@ def enable_row_hover(tv: Gtk.TreeView):
             w.hover_path = None
             w.queue_draw()
         return False
-    tv.connect("motion-notify-event", motion)
-    tv.connect("leave-notify-event", leave)
+    on_event(tv, "motion-notify-event", motion)
+    on_event(tv, "leave-notify-event", leave)
 
 
 def hover_bg(tv: Gtk.TreeView, cell, path_or_iter_model, it):
-    """Apply/clear the subtle hover background on a renderer for the row being drawn."""
+    """Apply/clear the subtle hover background on a renderer for the row being drawn.
+    Runs for every visible cell of every frame, so it talks to GTK only when the renderer's state changes."""
     hp = getattr(tv, "hover_path", None)
     on = hp is not None and path_or_iter_model.get_path(it).compare(hp) == 0 and not tv.get_selection().iter_is_selected(it)
     if on:
-        fg = tv.get_style_context().get_color(Gtk.StateFlags.NORMAL)
-        cell.set_property("cell-background-rgba", Gdk.RGBA(fg.red, fg.green, fg.blue, 0.07))
-    cell.set_property("cell-background-set", on)
+        fg = style_fg(tv.get_style_context(), Gtk.StateFlags.NORMAL)
+        cell.set_property("cell-background-rgba", rgba(fg.red, fg.green, fg.blue, 0.07))
+    if on or getattr(cell, "_sr_hover", True):
+        cell.set_property("cell-background-set", on)
+        cell._sr_hover = on
 
 
 # --------------------------------------------------------------------------- soft grid lines for tree views
 def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
     """Draw our own separators after the rows: faint horizontal rules, and (optionally) vertical rules that
     fade out as they approach each horizontal rule so the crossings never form a visible '+'."""
+    # GTK 4: nothing can be painted over a tree view (on_draw_over does nothing there), and GTK's own grid
+    # lines make every row a pixel taller than under GTK 3, so the lists go without these faint rules.
     tv.set_grid_lines(Gtk.TreeViewGridLines.NONE)
 
     def draw(w, cr):
@@ -200,7 +205,7 @@ def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
         cols = [c for c in w.get_columns() if c.get_visible()]
         if not cols:
             return False
-        fg = w.get_style_context().get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(w.get_style_context(), Gtk.StateFlags.NORMAL)
         alloc = w.get_allocation()
         rows = []
         it = model.get_iter(start)
@@ -230,19 +235,28 @@ def enable_soft_grid(tv: Gtk.TreeView, columns: bool = True):
                 x, _ = w.convert_bin_window_to_widget_coords(r.x + r.width, 0)
                 xs.append(x - 0.5)
             fade = 7
-            for x in xs:
-                for y, h in rows:
-                    y0, y1 = y, y + h - 1
-                    if h <= 2 * fade + 2:
-                        continue
-                    pat = cairo_linear(x, y0, x, y1, fg, fade / h)
-                    cr.set_source(pat)
-                    cr.move_to(x, y0)
-                    cr.line_to(x, y1)
-                    cr.stroke()
+            # Rows of one height that follow each other share one repeating gradient and one stroke per
+            # column, instead of a gradient and a stroke for every cell on every frame.
+            runs = []
+            for y, h in rows:
+                if runs and runs[-1][1] == h and runs[-1][0] + runs[-1][1] * runs[-1][2] == y:
+                    runs[-1][2] += 1
+                else:
+                    runs.append([y, h, 1])
+            import cairo
+            for y, h, n in runs:
+                if h <= 2 * fade + 2:
+                    continue
+                pat = cairo_linear(0, y, 0, y + h, fg, fade / h)
+                pat.set_extend(cairo.EXTEND_REPEAT)
+                cr.set_source(pat)
+                for x in xs:
+                    cr.move_to(x, y)
+                    cr.line_to(x, y + h * n)
+                cr.stroke()
         cr.restore()
         return False
-    tv.connect_after("draw", draw)
+    on_draw_over(tv, draw)
 
 
 def cairo_linear(x0, y0, x1, y1, fg, frac):
@@ -256,7 +270,7 @@ def cairo_linear(x0, y0, x1, y1, fg, frac):
 
 
 # --------------------------------------------------------------------------- virtualized icon grid
-class IconGrid(Gtk.Layout):
+class IconGrid(ScrollCanvas):
     """A Nautilus-style icon view: only the tiles inside the viewport are laid out and painted, so a
     folder with 100k entries costs the same per frame as one with 100. Reads rows straight from the
     FolderView ListStore (col 0 Entry, col 2 pixbuf, col 3 markup). API mirrors the bits of
@@ -271,10 +285,10 @@ class IconGrid(Gtk.Layout):
         super().__init__()
         self.model: Optional[Gtk.ListStore] = None
         self.set_can_focus(True)
-        self.add_events(Gdk.EventMask.BUTTON_PRESS_MASK | Gdk.EventMask.BUTTON_RELEASE_MASK |
-                        Gdk.EventMask.POINTER_MOTION_MASK | Gdk.EventMask.KEY_PRESS_MASK |
-                        Gdk.EventMask.SCROLL_MASK | Gdk.EventMask.LEAVE_NOTIFY_MASK)
-        self.get_style_context().add_class("icongrid")
+        add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
+                        EVMASK.POINTER_MOTION_MASK | EVMASK.KEY_PRESS_MASK |
+                        EVMASK.SCROLL_MASK | EVMASK.LEAVE_NOTIFY_MASK)
+        css_class(self, "icongrid")
         # geometry
         self.icon_size = 48
         self.horizontal = False
@@ -298,19 +312,32 @@ class IconGrid(Gtk.Layout):
         self.provider: Optional[Callable] = None     # entry -> (pixbuf, markup); used when model cols 2/3 are None
         self.muted = False                           # inactive split pane: grey icons, dimmer text
         self._cache: Dict[int, Tuple[object, str]] = {}
-        self._layout_cache: Dict[int, Pango.Layout] = {}
-        self.connect("draw", self._draw)
-        self.connect("size-allocate", lambda w, a: self._relayout())
-        self.connect("button-press-event", self._press)
-        self.connect("button-release-event", self._release)
-        self.connect("motion-notify-event", self._motion)
-        self.connect("leave-notify-event", lambda w, e: self._set_prelight(-1))
-        self.connect("key-press-event", self._key)
-        self.connect("focus-in-event", lambda w, e: self.queue_draw() or False)
-        self.connect("focus-out-event", lambda w, e: self.queue_draw() or False)
-        self.connect("drag-begin", self._drag_begin)
-        self.connect("grab-broken-event", lambda w, e: self._reset_press())
-        self.connect("grab-notify", lambda w, was_grabbed: None if was_grabbed else self._reset_press())
+        # Shaped text and converted icons are kept between frames: while the window is being resized the same
+        # tiles are redrawn on every frame, and wrapping each name and converting each pixbuf again took
+        # more than half of the frame.
+        self._layout_cache: dict = {}
+        self._surf_cache: dict = {}
+        self._surf_bytes = 0
+        if GTK4:
+            self.set_draw_func(lambda a, cr, w, h, *_: self._draw(a, cr))
+            for prop in ("gtk-font-name", "gtk-theme-name", "gtk-xft-dpi"):      # shaped text is cached
+                Gtk.Settings.get_default().connect("notify::" + prop, lambda *a: self.invalidate())
+        else:
+            self.connect("style-updated", lambda w: self._layout_cache.clear())      # font or theme changed
+            self.connect("draw", self._draw)
+        on_resize(self, self._relayout)
+        on_event(self, "button-press-event", self._press)
+        on_event(self, "button-release-event", self._release)
+        on_event(self, "motion-notify-event", self._motion)
+        on_event(self, "leave-notify-event", lambda w, e: self._set_prelight(-1))
+        on_event(self, "key-press-event", self._key)
+        on_event(self, "focus-in-event", lambda w, e: self.queue_draw() or False)
+        on_event(self, "focus-out-event", lambda w, e: self.queue_draw() or False)
+        if not GTK4:                       # GTK 4: file_drag_source() puts a Gtk.DragSource on the grid instead
+            self.connect("drag-begin", self._drag_begin)
+        if not GTK4:
+            on_event(self, "grab-broken-event", lambda w, e: self._reset_press())
+            self.connect("grab-notify", lambda w, was_grabbed: None if was_grabbed else self._reset_press())
         self.set_model(model)
 
     def _reset_press(self):
@@ -357,7 +384,23 @@ class IconGrid(Gtk.Layout):
         self._cache.pop(p.get_indices()[0], None)
         self.queue_draw()
 
+    def _drop_surfaces(self):
+        self._surf_cache.clear()
+        self._surf_bytes = 0
+
+    def _icon_surface(self, pb):
+        surf = self._surf_cache.get(pb)
+        if surf is None:
+            size = pb.get_width() * pb.get_height() * 4
+            if self._surf_bytes + size > (48 << 20):
+                self._drop_surfaces()
+            surf = pixbuf_surface(pb)
+            self._surf_cache[pb] = surf
+            self._surf_bytes += size
+        return surf
+
     def invalidate(self):
+        self._drop_surfaces()
         self._cache.clear()
         self.queue_draw()
 
@@ -380,6 +423,7 @@ class IconGrid(Gtk.Layout):
         self.selected = {i for i in self.selected if i < n}
         if self.cursor >= n:
             self.cursor = n - 1
+        self._drop_surfaces()
         self._cache.clear()
         self._relayout()
 
@@ -389,6 +433,7 @@ class IconGrid(Gtk.Layout):
         self.icon_size, self.horizontal, self.single_click = icon_size, horizontal, single_click
         probe = self.create_pango_layout("Xg")
         line = probe.get_pixel_size()[1] + 1
+        self.line_h, self.extra_lines = line, extra_lines
         if horizontal:
             self.text_lines = (3 + extra_lines) if icon_size >= 48 else 1
             self.tile_w = item_width
@@ -398,6 +443,7 @@ class IconGrid(Gtk.Layout):
             self.tile_w = max(90, item_width)
             self.tile_h = icon_size + 10 + self.text_lines * line + 10
         self._layout_cache.clear()
+        self._drop_surfaces()
         self._cache.clear()
         self._relayout()
 
@@ -450,11 +496,11 @@ class IconGrid(Gtk.Layout):
     def _draw_tiles(self, cr):
         n = self._n()
         sc = self.get_style_context()
-        fg = sc.get_color(Gtk.StateFlags.NORMAL)
+        fg = style_fg(sc, Gtk.StateFlags.NORMAL)
         ok, sel = sc.lookup_color("theme_selected_bg_color")
-        sel = sel if ok else Gdk.RGBA(0.2, 0.5, 0.9, 1)
+        sel = sel if ok else rgba(0.2, 0.5, 0.9, 1)
         ok, selfg = sc.lookup_color("theme_selected_fg_color")
-        selfg = selfg if ok else Gdk.RGBA(1, 1, 1, 1)
+        selfg = selfg if ok else rgba(1, 1, 1, 1)
         focused = self.has_focus()
         a, b = self._visible_range()
         pad = 6
@@ -500,7 +546,7 @@ class IconGrid(Gtk.Layout):
                 if self.muted:
                     pb = ICONS.desaturated(pb)
                 ox, oy = (size - pb.get_width()) // 2, (size - pb.get_height()) // 2
-                Gdk.cairo_set_source_pixbuf(cr, pb, ix + ox, iy + oy)
+                cr.set_source_surface(self._icon_surface(pb), ix + ox, iy + oy)
                 cr.paint()
             lay = self._text_layout(cr, i, markup, tw_text)
             if is_sel:
@@ -528,13 +574,25 @@ class IconGrid(Gtk.Layout):
         return False
 
     def _text_layout(self, cr, i, markup, width):
+        key = (markup, width, self.text_lines, self.horizontal)
+        lay = self._layout_cache.get(key)
+        if lay is not None:
+            return lay
+        if len(self._layout_cache) > 4000:
+            self._layout_cache.clear()
         lay = self.create_pango_layout("")        # widget's own Pango context: same font as the rest of the UI
         lay.set_markup(markup or "", -1)
         lay.set_width(max(10, int(width * Pango.SCALE)))
         lay.set_wrap(Pango.WrapMode.WORD_CHAR)
         lay.set_ellipsize(Pango.EllipsizeMode.END)
-        lay.set_height(-self.text_lines)
+        # A negative height is a line limit for EACH paragraph, and a tile with a second paragraph (where the
+        # file is) would get twice the lines the tile has room for and run into the tile below. So: the name
+        # keeps its usual lines, and if the whole text is still too tall, cut it at the tile's text height.
+        lay.set_height(-max(1, self.text_lines - getattr(self, "extra_lines", 0)))
+        if lay.get_line_count() > self.text_lines:
+            lay.set_height(self.text_lines * getattr(self, "line_h", 18) * Pango.SCALE)
         lay.set_alignment(Pango.Alignment.LEFT if self.horizontal else Pango.Alignment.CENTER)
+        self._layout_cache[key] = lay
         return lay
 
     # ---- selection API (Gtk.IconView-compatible subset)
@@ -628,7 +686,7 @@ class IconGrid(Gtk.Layout):
         if DEBUG_INPUT:
             input_log(f"grid: {event.type.value_nick} button={event.button} item={i} shift={shift} ctrl={ctrl} "
                       f"anchor={self.anchor} cursor={self.cursor} selected={len(self.selected)} t={event.time}")
-        if event.type != Gdk.EventType.BUTTON_PRESS:
+        if event.type != EV_PRESS:
             # GDK's own 2/3-click events are ignored: GDK keeps counting clicks across a folder change, so the
             # first click of a quick double-click right after opening a folder became the THIRD click of the
             # double-click that opened it, and the real double-click was lost. We pair clicks ourselves below.
@@ -781,7 +839,7 @@ def _rounded(cr, x, y, w, h, r):
 def draw_capacity_bar(cr, sc: Gtk.StyleContext, x: float, y: float, w: float, h: float, frac: Optional[float]):
     """A used-space pill: faint track, fill in the theme's accent (the danger colour past 90 %). The fill is
     never narrower than the bar is tall, so a nearly empty drive shows a round dot rather than a sliver."""
-    fg = sc.get_color(Gtk.StateFlags.NORMAL)
+    fg = style_fg(sc, Gtk.StateFlags.NORMAL)
     r = h / 2.0
     _rounded(cr, x, y, w, h, r)
     cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.14)
@@ -828,10 +886,19 @@ class UsageRenderer(Gtk.CellRenderer):
         lay = widget.create_pango_layout(self.text or "")
         tw, th = lay.get_pixel_size()
         if cell_area.width - bar_w - 3 * pad >= tw:
-            fg = sc.get_color(Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
+            fg = style_fg(sc, Gtk.StateFlags.SELECTED if flags & Gtk.CellRendererState.SELECTED else Gtk.StateFlags.NORMAL)
             cr.set_source_rgba(fg.red, fg.green, fg.blue, 0.75)
             cr.move_to(cell_area.x + pad + bar_w + pad + 2, cell_area.y + (cell_area.height - th) / 2.0)
             PangoCairo.show_layout(cr, lay)
+
+
+    def do_snapshot(self, snapshot, widget, background_area, cell_area, flags):
+        """GTK 4 draws cells through a snapshot, not a cairo context: paint the same picture into a cairo
+        node covering the cell."""
+        from gi.repository import Graphene
+        r = Graphene.Rect()
+        r.init(cell_area.x, cell_area.y, cell_area.width, cell_area.height)
+        self.do_render(snapshot.append_cairo(r), widget, background_area, cell_area, flags)
 
 
 # --------------------------------------------------------------------------- This PC: Windows-style tile view
@@ -842,7 +909,7 @@ class DriveBar(Gtk.DrawingArea):
         super().__init__()
         self.frac = None
         self.set_size_request(120, 10)
-        self.connect("draw", self._draw)
+        on_draw(self, self._draw)
 
     def set_fraction(self, frac):
         self.frac = frac
@@ -868,8 +935,8 @@ class PCView(Gtk.ScrolledWindow):
     def __init__(self):
         super().__init__(hexpand=True, vexpand=True)
         self.set_policy(Gtk.PolicyType.NEVER, Gtk.PolicyType.AUTOMATIC)
-        self.box = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4, margin=12)
-        self.add(self.box)
+        self.box = with_margins(Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=4), 12)
+        set_child(self, self.box)
         self.flows: List[Gtk.FlowBox] = []
         self.tiles: Dict[int, Tuple[Gtk.FlowBoxChild, Entry, Optional[DriveBar], Optional[Gtk.Label]]] = {}
         self.single_click = False
@@ -879,8 +946,8 @@ class PCView(Gtk.ScrolledWindow):
     # ---- build
     def set_entries(self, ents: List[Entry], single_click: bool):
         self.single_click = single_click
-        for c in self.box.get_children():
-            self.box.remove(c)
+        for c in child_widgets(self.box):
+            take_out(self.box, c)
         self.flows, self.tiles = [], {}
         sections: List[Tuple[str, List[Entry]]] = []
         for e in ents:
@@ -899,44 +966,44 @@ class PCView(Gtk.ScrolledWindow):
             fb.set_activate_on_single_click(single_click)
             fb.connect("selected-children-changed", self._sel_changed)
             fb.connect("child-activated", lambda f, ch: self.emit("item-activated", self.tiles[id(ch)][1]))
-            fb.connect("button-press-event", self._press)
+            on_event(fb, "button-press-event", self._press)
             for e in items:
                 ch = Gtk.FlowBoxChild()
                 tile, bar, info = self._make_tile(e)
-                ch.add(tile)
-                fb.add(ch)
+                set_child(ch, tile)
+                fb.insert(ch, -1)
                 self.tiles[id(ch)] = (ch, e, bar, info)
-            exp.add(fb)
+            set_child(exp, fb)
             self.flows.append(fb)
-            self.box.pack_start(exp, False, False, 0)
+            put(self.box, exp, False, False, 0)
             sep = Gtk.Separator()
-            self.box.pack_start(sep, False, False, 2)
-        self.box.show_all()
+            put(self.box, sep, False, False, 2)
+        show_all(self.box)
         self.refresh()
 
     def _make_tile(self, e: Entry):
         is_drive = e.section not in ("Folders",) and (getattr(e, "drive_kind", "") or e.usage is not None)
-        h = Gtk.Box(spacing=10, margin=6)
-        img = Gtk.Image.new_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else Gtk.Image.new_from_icon_name("folder", Gtk.IconSize.DIALOG)
+        h = with_margins(Gtk.Box(spacing=10), 6)
+        img = image_from_pixbuf(ICONS.pixbuf(e.icon, 48, e)) if e.icon else icon_image("folder", "dialog")
         img.set_valign(Gtk.Align.START)
-        h.pack_start(img, False, False, 0)
+        put(h, img, False, False, 0)
         v = Gtk.Box(orientation=Gtk.Orientation.VERTICAL, spacing=2)
         name = Gtk.Label(label=e.name, xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=26)
-        v.pack_start(name, False, False, 0)
+        put(v, name, False, False, 0)
         bar = info = None
         if is_drive:
             bar = DriveBar()
-            v.pack_start(bar, False, False, 2)
+            put(v, bar, False, False, 2)
             info = Gtk.Label(xalign=0, ellipsize=Pango.EllipsizeMode.END, max_width_chars=28)
-            info.get_style_context().add_class("dim-label")
-            v.pack_start(info, False, False, 0)
+            css_class(info, "dim-label")
+            put(v, info, False, False, 0)
             h.set_size_request(250, -1)
         else:
             sub = Gtk.Label(label=pretty_path(e.location or ""), xalign=0, ellipsize=Pango.EllipsizeMode.MIDDLE, max_width_chars=26)
-            sub.get_style_context().add_class("dim-label")
-            v.pack_start(sub, False, False, 0)
+            css_class(sub, "dim-label")
+            put(v, sub, False, False, 0)
             h.set_size_request(200, -1)
-        h.pack_start(v, True, True, 0)
+        put(h, v, True, True, 0)
         if getattr(e, "drive_kind", "") == "unmounted":
             h.set_opacity(0.55)
         return h, bar, info
@@ -956,7 +1023,7 @@ class PCView(Gtk.ScrolledWindow):
             return
         self._suppress = True
         for other in self.flows:            # one selection across all sections (plain click only)
-            if other is not fb and not (Gtk.get_current_event_state()[1] & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)):
+            if other is not fb and not (current_modifiers() & (Gdk.ModifierType.CONTROL_MASK | Gdk.ModifierType.SHIFT_MASK)):
                 other.unselect_all()
         self._suppress = False
         self.emit("selection-changed")
@@ -986,7 +1053,7 @@ class PCView(Gtk.ScrolledWindow):
         self._suppress = True
         for fb in self.flows:
             fb.unselect_all()
-            for ch in fb.get_children():
+            for ch in child_widgets(fb):
                 if self.tiles[id(ch)][1].name in names:
                     fb.select_child(ch)
         self._suppress = False
@@ -1027,10 +1094,11 @@ class FileClipboard:
     MAX_IMAGE = 40 << 20             # bigger pictures are offered as files only
 
     def __init__(self):
-        self.w = Gtk.Invisible()
-        self.w.connect("selection-get", self._get)
-        self.w.connect("selection-clear-event", self._lost)
-        self.sel = Gdk.SELECTION_CLIPBOARD
+        if not GTK4:                       # GTK 3 owns the selection through an invisible widget
+            self.w = Gtk.Invisible()
+            self.w.connect("selection-get", self._get)
+            on_event(self.w, "selection-clear-event", self._lost)
+            self.sel = Gdk.SELECTION_CLIPBOARD
         self.mode, self.paths, self.uris = "copy", [], []
         self.image_path: Optional[str] = None
         self._png: Optional[bytes] = None
@@ -1057,6 +1125,14 @@ class FileClipboard:
         self.uris = [Gio.File.new_for_path(p).get_uri() for p in paths]
         self._png = None
         targets = self.targets_for(paths)
+        if GTK4:                           # one content provider per format, offered together
+            try:
+                provs = [Gdk.ContentProvider.new_for_bytes(t, GLib.Bytes.new(self.payload(t) or b"")) for t in targets]
+                Gdk.Display.get_default().get_clipboard().set_content(Gdk.ContentProvider.new_union(provs))
+                return True
+            except Exception as ex:
+                bench(f"clipboard: offering the files failed: {ex}")
+                return False
         try:
             Gtk.selection_clear_targets(self.w, self.sel)
             for i, t in enumerate(targets):
@@ -1115,3 +1191,436 @@ def file_clipboard() -> FileClipboard:
     if _FILE_CLIPBOARD is None:
         _FILE_CLIPBOARD = FileClipboard()
     return _FILE_CLIPBOARD
+
+
+# --------------------------------------------------------------------------- the Details list under GTK 4
+# Gtk.TreeView repaints every visible cell from scratch on every frame, through a Python call per cell, and
+# builds a new text layout each time: about twice the cost of Gtk.ColumnView, which keeps one small widget per
+# visible cell and only fills it in when a row scrolls into view. DetailsList wraps a ColumnView and answers
+# the handful of TreeView calls FolderView makes (selection, cursor, row under a point, columns), in tree
+# paths, so the folder view is the same code under both toolkits. It mirrors the rows of the Gtk.ListStore
+# the icon layouts also read.
+if GTK4:
+    class _DRow(GObject.Object):
+        """One row: an Entry, or the text of a group heading."""
+
+        def __init__(self, v):
+            super().__init__()
+            self.v = v
+
+    def _tpath(i: int):
+        return Gtk.TreePath.new_from_indices([i])
+
+    class _DSelection:
+        """The part of Gtk.TreeSelection the folder view uses, over the list's Gtk.MultiSelection."""
+
+        def __init__(self, owner):
+            self.o = owner
+            self._cbs: dict = {}
+            self._next = 1
+
+        def set_mode(self, mode):
+            pass
+
+        def connect(self, name, cb, *args):
+            self._next += 1
+            self._cbs[self._next] = (cb, args)
+            return self._next
+
+        def disconnect(self, hid):
+            self._cbs.pop(hid, None)
+
+        def handler_is_connected(self, hid) -> bool:
+            return hid in self._cbs
+
+        def changed(self):
+            for cb, args in list(self._cbs.values()):
+                cb(self, *args)
+
+        def select_path(self, path):
+            i = path.get_indices()[0]
+            if self.o.is_entry(i):                       # group headings are never selected
+                self.o.sel.select_item(i, False)
+
+        def unselect_path(self, path):
+            self.o.sel.unselect_item(path.get_indices()[0])
+
+        def path_is_selected(self, path) -> bool:
+            return self.o.sel.is_selected(path.get_indices()[0])
+
+        def select_all(self):
+            o = self.o
+            o.sel.select_all()
+            if o._heads:                                 # group headings stay out of it
+                for i in range(o.rows.get_n_items()):
+                    if not isinstance(o.rows.get_item(i).v, Entry):
+                        o.sel.unselect_item(i)
+
+        def unselect_all(self):
+            self.o.sel.unselect_all()
+
+        def get_selected_rows(self):
+            return self.o.store, [_tpath(i) for i in self.o.selected_indices()]
+
+        def count_selected_rows(self) -> int:
+            return len(self.o.selected_indices())
+
+    class DetailsList:
+        """See the comment above. `fv` is the FolderView: it makes and fills the cells (_cell_make4,
+        _cell_fill4), because what a cell shows is the folder view's business."""
+
+        def __init__(self, fv):
+            self.cv = None                               # first: __getattr__ falls back on it
+            self.fv = fv
+            self.rows = Gio.ListStore(item_type=_DRow)
+            self.sel = Gtk.MultiSelection(model=self.rows)
+            self.cv = Gtk.ColumnView(model=self.sel)
+            self.cv.set_enable_rubberband(True)
+            css_class(self.cv, "sr-details")
+            self.selection = _DSelection(self)
+            self.store = None                            # the Gtk.ListStore being mirrored, None while detached
+            self._store_ids: list = []
+            self.active = True                           # False while an icon layout shows: nothing is mirrored
+            self._stale = False
+            self._cells: dict = {}                       # cell -> column key, for the cells showing a row right now
+            self._of_child: dict = {}                    # a cell's widget -> the cell (to find the row under a point)
+            self._columns: list = []
+            self._cursor: Optional[int] = None
+            self._on_activate: list = []
+            self._last_act = (None, 0.0)
+            self._refresh_id = None
+            self._sorting = False
+            self._sort_key = None
+            self._typed = ("", 0.0)
+            self._heads = False                          # some rows are group headings
+            self._specs = None                           # what set_columns was last asked for
+            self._columns_id = None
+            self.sel.connect("selection-changed", self._sel_changed)
+            self.cv.connect("activate", lambda v, pos: self._activated(pos))
+            rows = Gtk.SignalListItemFactory()
+            rows.connect("bind", self._row_bind)
+            self.cv.set_row_factory(rows)
+            self.cv.get_sorter().connect("changed", self._sorter_changed)
+
+        def __getattr__(self, name):                     # everything else is the widget's own
+            cv = self.__dict__.get("cv")
+            if cv is None:
+                raise AttributeError(name)
+            return getattr(cv, name)
+
+        # ---- controllers: ours must see a click or a key before the rows do. A row takes Space and Enter for
+        # itself and selects on any press; the folder view decides first (quick look, the context menu, its own
+        # pairing of double clicks) and lets the rest through.
+        def add_controller(self, controller):
+            # (the drag source too: a row claims the press, and a claimed press never reaches a later phase)
+            if isinstance(controller, (Gtk.GestureClick, Gtk.EventControllerKey, Gtk.DragSource)):
+                controller.set_propagation_phase(Gtk.PropagationPhase.CAPTURE)
+            self.cv.add_controller(controller)
+
+        # ---- rows
+        def is_entry(self, i: int) -> bool:
+            row = self.rows.get_item(i) if 0 <= i < self.rows.get_n_items() else None
+            return row is not None and isinstance(row.v, Entry)
+
+        def _row_bind(self, factory, row):
+            item = row.get_item()
+            real = item is not None and isinstance(item.v, Entry)
+            row.set_selectable(real)
+            row.set_activatable(real)
+
+        def get_model(self):
+            return self.store
+
+        def set_model(self, store):
+            if self.store is not None:
+                for h in self._store_ids:
+                    self.store.disconnect(h)
+            self._store_ids = []
+            self.store = store
+            if store is None:
+                return                                   # what is shown stays until the new rows are attached
+            self._store_ids = [store.connect("row-inserted", self._inserted)]
+            self._resync()
+
+        def set_active(self, on: bool):
+            was, self.active = self.active, bool(on)
+            if self.active and not was and self._stale and self.store is not None:
+                self._resync()
+
+        def _resync(self):
+            if not self.active:
+                self._stale = True
+                return
+            self._stale = False
+            store, items = self.store, []
+            it = store.get_iter_first()
+            while it is not None:
+                items.append(_DRow(store.get_value(it, 0)))
+                it = store.iter_next(it)
+            self._heads = any(not isinstance(r.v, Entry) for r in items)
+            had = self.sel.get_selection().get_size() > 0
+            self.rows.splice(0, self.rows.get_n_items(), items)
+            self._cursor = None
+            if had:
+                self.selection.changed()
+
+        def _inserted(self, store, path, it):
+            if not self.active:
+                self._stale = True
+                return
+            row = _DRow(store.get_value(it, 0))
+            if not isinstance(row.v, Entry):
+                self._heads = True
+            self.rows.insert(path.get_indices()[0], row)
+
+        # ---- selection and cursor
+        def get_selection(self):
+            return self.selection
+
+        def selected_indices(self) -> List[int]:
+            bits = self.sel.get_selection()
+            out = []
+            for k in range(bits.get_size()):
+                i = bits.get_nth(k)
+                if self.is_entry(i):
+                    out.append(i)
+            return out
+
+        @property
+        def selected(self):                              # what file_drag_source asks a list for
+            return set(self.selected_indices())
+
+        def _sel_changed(self, model, position, n_items):
+            self.selection.changed()
+            if any(key == "_chk" for key in self._cells.values()):
+                self.refresh()
+
+        def _has_focus(self) -> bool:
+            root = self.cv.get_root()
+            f = root.get_focus() if root is not None else None
+            return f is not None and (f is self.cv or f.is_ancestor(self.cv))
+
+        def contains(self, widget) -> bool:
+            return widget is not None and (widget is self.cv or widget.is_ancestor(self.cv))
+
+        def set_cursor(self, path, column=None, start_editing=False):
+            """Like the tree view: the row becomes the only selected one and is scrolled into view."""
+            i = path.get_indices()[0]
+            if not 0 <= i < self.rows.get_n_items():
+                return
+            self._cursor = i
+            flags = Gtk.ListScrollFlags.SELECT
+            if self._has_focus():                        # never take the keyboard from the address bar or a dialog
+                flags |= Gtk.ListScrollFlags.FOCUS
+            self.cv.scroll_to(i, None, flags, None)
+
+        def get_cursor(self):
+            root = self.cv.get_root()
+            f = root.get_focus() if root is not None else None
+            if f is not None and f is not self.cv and f.is_ancestor(self.cv):
+                pos = self._pos_of(f)
+                if pos is not None:
+                    self._cursor = pos
+            ok = self._cursor is not None and 0 <= self._cursor < self.rows.get_n_items()
+            return (_tpath(self._cursor) if ok else None), None
+
+        def scroll_to_cell(self, path, *a):
+            i = path.get_indices()[0]
+            if 0 <= i < self.rows.get_n_items():
+                self.cv.scroll_to(i, None, Gtk.ListScrollFlags.NONE, None)
+
+        def grab_focus(self):
+            if self._cursor is not None and 0 <= self._cursor < self.rows.get_n_items():
+                self.cv.scroll_to(self._cursor, None, Gtk.ListScrollFlags.FOCUS, None)
+                return True
+            return self.cv.grab_focus()
+
+        # ---- the row under a point (coordinates relative to the list widget, header included)
+        def _pos_of(self, widget) -> Optional[int]:
+            w = widget
+            while w is not None and w is not self.cv:
+                for cand in (w, w.get_first_child()):
+                    if cand is None:
+                        continue
+                    cell = self._of_child.get(cand)
+                    if cell is None and cand is not w:
+                        inner = cand.get_first_child()
+                        cell = self._of_child.get(inner) if inner is not None else None
+                    if cell is not None:
+                        pos = cell.get_position()
+                        return pos if 0 <= pos < self.rows.get_n_items() else None
+                w = w.get_parent()
+            return None
+
+        def _index_at(self, x, y) -> Optional[int]:
+            hit = self.cv.pick(x, y, Gtk.PickFlags.DEFAULT)
+            return self._pos_of(hit) if hit is not None else None
+
+        def get_path_at_pos(self, x, y):
+            i = self._index_at(x, y)
+            if i is None:
+                return None
+            self._cursor = i
+            return _tpath(i), None, 0, 0
+
+        def get_dest_row_at_pos(self, x, y):
+            i = self._index_at(x, y)
+            return (_tpath(i), None) if i is not None else None
+
+        # ---- activation (double click, Enter)
+        def connect(self, name, cb, *args):
+            if name == "row-activated":
+                self._on_activate.append((cb, args))
+                return 0
+            return self.cv.connect(name, cb, *args)
+
+        def set_activate_on_single_click(self, on):
+            self.cv.set_single_click_activate(bool(on))
+
+        def row_activated(self, path, column=None):
+            self._activated(path.get_indices()[0])
+
+        def _activated(self, pos: int):
+            now = time.monotonic()
+            if self._last_act[0] == pos and now - self._last_act[1] < 0.15:
+                return                                   # the list's own double click on top of ours
+            self._last_act = (pos, now)
+            self._cursor = pos
+
+            def run():                                   # not inside the click or key that asked for it: opening
+                for cb, args in self._on_activate:       # a folder can rebuild the columns, and GTK hangs when a
+                    cb(self, _tpath(pos), None, *args)   # column is removed while one of its cells handles an event
+                return False
+            GLib.idle_add(run)
+
+        # ---- columns
+        def get_columns(self):
+            return list(self._columns)
+
+        def set_columns(self, specs, sort_key, sort_desc):
+            """specs: [(key, title, width or 0, expand, clickable)]. Replaces every column, unless they are
+            the ones already there (nearly every folder change): widths the user set then stay too.
+            Columns that exist are replaced a moment later, never inside the caller: GTK hangs when a column
+            is removed while one of its cells is handling the click or key that led here."""
+            want = (tuple(specs), sort_key, bool(sort_desc))
+            if want == self._specs:
+                return
+            self._specs = want
+            if not self._columns:
+                self._apply_columns()
+            elif self._columns_id is None:
+                self._columns_id = GLib.idle_add(self._apply_columns, priority=GLib.PRIORITY_HIGH)
+
+        def _apply_columns(self):
+            self._columns_id = None
+            specs, sort_key, sort_desc = self._specs
+            self._sorting = True
+            try:
+                for c in self._columns:
+                    self.cv.remove_column(c)
+                self._columns = []
+                marked = None
+                for key, title, width, expand, clickable in specs:
+                    fac = Gtk.SignalListItemFactory()
+                    fac.connect("setup", self._cell_setup, key)
+                    fac.connect("bind", self._cell_bind, key)
+                    fac.connect("unbind", self._cell_unbind)
+                    fac.connect("teardown", self._cell_teardown)
+                    col = Gtk.ColumnViewColumn(title=title, factory=fac)
+                    col.key = key
+                    col.set_resizable(key != "_chk")
+                    col.set_expand(bool(expand))
+                    if width and not expand:
+                        col.set_fixed_width(width)
+                    if clickable:
+                        col.set_sorter(Gtk.StringSorter.new(None))      # sorts nothing: it makes the header a button
+                        if key == sort_key:
+                            marked = col
+                    self.cv.append_column(col)
+                    self._columns.append(col)
+                self._sort_key = sort_key if marked is not None else None
+                self.cv.sort_by_column(marked, Gtk.SortType.DESCENDING if sort_desc else Gtk.SortType.ASCENDING)
+            finally:
+                self._sorting = False
+            return False
+
+        def _sorter_changed(self, sorter, change):
+            """A header was clicked. The folder view sorts (off the main thread) and rebuilds the columns, which
+            puts the arrow where it belongs; that must not happen inside the click."""
+            if self._sorting:
+                return
+            col = sorter.get_primary_sort_column()
+            key = getattr(col, "key", None) if col is not None else self._sort_key
+            if key:
+                GLib.idle_add(lambda: (self.fv.win.sort_by(key), False)[1])
+
+        def fit_columns(self):
+            for c in self._columns:
+                if not c.get_expand() and c.key != "_chk":
+                    c.set_fixed_width(-1)
+
+        # ---- cells
+        def _cell_setup(self, factory, cell, key):
+            child = self.fv._cell_make4(key)
+            cell.set_child(child)
+            self._of_child[child] = cell
+
+        def _cell_bind(self, factory, cell, key):
+            self._cells[cell] = key
+            self.fv._cell_fill4(cell, key)
+
+        def _cell_unbind(self, factory, cell):
+            self._cells.pop(cell, None)
+
+        def _cell_teardown(self, factory, cell):
+            self._cells.pop(cell, None)
+            child = cell.get_child()
+            if child is not None:
+                self._of_child.pop(child, None)
+
+        def cell_of(self, child):
+            return self._of_child.get(child)
+
+        def refresh(self):
+            """Fill in every visible cell again, once, after whatever is going on (the tree view's queue_draw)."""
+            if self._refresh_id is None:
+                def run():
+                    self._refresh_id = None
+                    for cell, key in list(self._cells.items()):
+                        self.fv._cell_fill4(cell, key)
+                    return False
+                self._refresh_id = GLib.idle_add(run)
+
+        def queue_draw(self):
+            self.refresh()
+
+        # ---- renaming in place
+        def edit_name(self, path, text: str, select_len: int, on_done, retry: bool = True):
+            i = path.get_indices()[0]
+            for cell, key in self._cells.items():
+                if key == "name" and cell.get_position() == i:
+                    label = cell.get_child().get_last_child()
+                    ok, r = label.compute_bounds(self.cv)
+                    if ok:
+                        return edit_over4(self.cv, r.get_x(), r.get_y(), r.get_width(), r.get_height(), text, select_len,
+                                          on_done, self.selection)
+            if retry:                                    # the row is not on screen: bring it there, then once more
+                self.scroll_to_cell(path)
+                GLib.timeout_add(60, lambda: (self.edit_name(path, text, select_len, on_done, False), False)[1])
+            else:
+                on_done(None)
+
+        # ---- typing a name jumps to it (the tree view's interactive search)
+        def typeahead(self, ch: str):
+            now = time.monotonic()
+            text = (self._typed[0] if now - self._typed[1] < 1.0 else "") + ch.lower()
+            self._typed = (text, now)
+            n = self.rows.get_n_items()
+            start = (self._cursor or 0) + (1 if len(text) == 1 else 0)
+            for k in range(n):
+                i = (start + k) % n
+                v = self.rows.get_item(i).v
+                if isinstance(v, Entry) and v.name.lower().startswith(text):
+                    self.set_cursor(_tpath(i))
+                    return
+

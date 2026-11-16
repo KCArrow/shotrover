@@ -833,15 +833,26 @@ class PathCache:
         self._pending: set = set()
         self._lock = threading.Lock()
         self.on_change: Optional[Callable] = None               # called (idle) when a verdict flips
+        # A few long-lived workers take the paths from a queue. There used to be one new thread per path, and
+        # the navigation pane asks about a couple of hundred paths in one go: Thread.start() waits for the new
+        # thread to report in, which costs a hand-over of the interpreter lock each time, and the window sat
+        # dead for two seconds or more whenever the pane was rebuilt while anything else was working.
+        import queue as _queue
+        self._q = _queue.Queue()
+        self._workers = 0
+        self._idle = 0
+        self._busy: Dict[int, float] = {}                         # worker id → when its current stat began
 
-    def _schedule(self, path: str):
-        with self._lock:
-            if path in self._pending:
-                return
-            self._pending.add(path)
-
-        def work():
-            pin_worker()
+    def _worker(self):
+        pin_worker()
+        me = threading.get_ident()
+        while True:
+            with self._lock:
+                self._idle += 1
+            path = self._q.get()
+            with self._lock:
+                self._idle -= 1
+                self._busy[me] = time.monotonic()
             try:
                 st = os.stat(path)
                 ex, isd = True, _stat.S_ISDIR(st.st_mode)
@@ -851,11 +862,25 @@ class PathCache:
                 old = self._v.get(path)
                 self._v[path] = (ex, isd, time.monotonic())
                 self._pending.discard(path)
-            if old is not None and old[:2] != (ex, isd) and self.on_change:
+                self._busy.pop(me, None)
+            if self.on_change and ((old is not None and old[:2] != (ex, isd)) or (old is None and not ex)):
                 GLib.idle_add(lambda: (self.on_change(), False)[1])
-            elif old is None and not ex and self.on_change:
-                GLib.idle_add(lambda: (self.on_change(), False)[1])
-        threading.Thread(target=work, daemon=True).start()
+
+    def _schedule(self, path: str):
+        with self._lock:
+            if path in self._pending:
+                return
+            self._pending.add(path)
+            # 4 workers in the normal case. One that has been inside a stat for 2 s is on a dead mount and
+            # does not count, so the others' paths are never held up behind it (up to 32 threads in all).
+            now = time.monotonic()
+            stuck = sum(1 for t in self._busy.values() if now - t > 2.0)
+            spawn = self._idle == 0 and self._workers - stuck < 4 and self._workers < 32
+            if spawn:
+                self._workers += 1
+        self._q.put(path)
+        if spawn:
+            threading.Thread(target=self._worker, daemon=True).start()
 
     def _get(self, path: str) -> Tuple[bool, bool]:
         with self._lock:
@@ -941,10 +966,67 @@ def install_thread_pinning():
     threading.Thread = PinnedThread
 
 
+# Background jobs for the interface. Thread.start() does not return until the new thread has reported in,
+# which takes two hand-overs of the interpreter lock: while another Python thread is busy (listing a big
+# folder, say) that is tens to hundreds of milliseconds, and it was being paid on the GTK thread for every
+# selection. bg() hands the job to threads that already exist.
+_BG_LOCK = threading.Lock()
+_BG = {"q": None, "n": 0, "idle": 0, "queued": 0}
+
+
+def _bg_worker():
+    pin_worker()
+    while True:
+        with _BG_LOCK:
+            _BG["idle"] += 1
+        fn = _BG["q"].get()
+        with _BG_LOCK:
+            _BG["idle"] -= 1
+            _BG["queued"] -= 1
+        try:
+            fn()
+        except BaseException:                 # report it the way a thread of its own would have
+            try:
+                threading.excepthook(threading.ExceptHookArgs(sys.exc_info() + (threading.current_thread(),)))
+            except Exception:
+                pass
+
+
+def _bg_grow(n: int):
+    for _ in range(n):
+        threading.Thread(target=_bg_worker, daemon=True).start()
+
+
+def bg(fn):
+    """Run fn() on a background thread; returns at once. In place of threading.Thread(target=fn).start()
+    for anything started from the GTK thread. A job may run for as long as it likes: when every worker is
+    busy another is added (64 at most; beyond that jobs wait their turn)."""
+    with _BG_LOCK:
+        if _BG["q"] is None:
+            import queue
+            _BG["q"] = queue.Queue()
+        grow = _BG["idle"] <= _BG["queued"] and _BG["n"] < 64
+        if grow:
+            _BG["n"] += 1
+        _BG["queued"] += 1
+    _BG["q"].put(fn)
+    if grow:
+        _bg_grow(1)
+
+
 def warm_workers():
     """Fork the decoder pool (and the 3D render worker) right after startup, while RSS is a few tens of MB.
     os.fork() copies the page tables with the GIL held, so forking later — with a 5M-face mesh and thumbnail
     caches resident — would freeze the interface for a noticeable fraction of a second."""
+    try:                                    # a few bg() threads, started here and not on the GTK thread
+        with _BG_LOCK:
+            if _BG["q"] is None:
+                import queue
+                _BG["q"] = queue.Queue()
+            _BG["n"] += 6
+        _bg_grow(6)
+    except Exception:
+        pass
     try:
         run_heavy(int, 0)
     except Exception:
