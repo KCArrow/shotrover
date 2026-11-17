@@ -284,7 +284,7 @@ class IconGrid(ScrollCanvas):
     def __init__(self, model: Gtk.ListStore):
         super().__init__()
         self.model: Optional[Gtk.ListStore] = None
-        self.set_can_focus(True)
+        takes_keys(self)
         add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
                         EVMASK.POINTER_MOTION_MASK | EVMASK.KEY_PRESS_MASK |
                         EVMASK.SCROLL_MASK | EVMASK.LEAVE_NOTIFY_MASK)

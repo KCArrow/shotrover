@@ -1008,6 +1008,16 @@ def move_child(box, child, position: int):
     box.reorder_child_after(child, others[position - 1] if position > 0 and others else None)
 
 
+def takes_keys(widget):
+    """Let a custom widget hold the keyboard focus. GTK 3: can-focus. GTK 4 renamed that property to
+    "focusable" and kept the name can-focus for something else (may focus pass into this widget at all,
+    true by default), so set_can_focus(True) there changes nothing and the widget never receives a key."""
+    if GTK4:
+        widget.set_focusable(True)
+    else:
+        widget.set_can_focus(True)
+
+
 def on_menu_key(widget, callback):
     """Run callback() when the keyboard asks for the widget's context menu (the Menu key, Shift+F10)."""
     if not GTK4:

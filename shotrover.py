@@ -6864,6 +6864,16 @@ def move_child(box, child, position: int):
     box.reorder_child_after(child, others[position - 1] if position > 0 and others else None)
 
 
+def takes_keys(widget):
+    """Let a custom widget hold the keyboard focus. GTK 3: can-focus. GTK 4 renamed that property to
+    "focusable" and kept the name can-focus for something else (may focus pass into this widget at all,
+    true by default), so set_can_focus(True) there changes nothing and the widget never receives a key."""
+    if GTK4:
+        widget.set_focusable(True)
+    else:
+        widget.set_can_focus(True)
+
+
 def on_menu_key(widget, callback):
     """Run callback() when the keyboard asks for the widget's context menu (the Menu key, Shift+F10)."""
     if not GTK4:
@@ -10055,7 +10065,7 @@ class IconGrid(ScrollCanvas):
     def __init__(self, model: Gtk.ListStore):
         super().__init__()
         self.model: Optional[Gtk.ListStore] = None
-        self.set_can_focus(True)
+        takes_keys(self)
         add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
                         EVMASK.POINTER_MOTION_MASK | EVMASK.KEY_PRESS_MASK |
                         EVMASK.SCROLL_MASK | EVMASK.LEAVE_NOTIFY_MASK)
@@ -12226,7 +12236,7 @@ class ModelNav:
         self.smooth = True
         self.thin = False
         self.drag = None            # (x, y, mode) mode: orbit | pan | zoom
-        self.set_can_focus(True)
+        takes_keys(self)
         add_event_mask(self, EVMASK.BUTTON_PRESS_MASK | EVMASK.BUTTON_RELEASE_MASK |
                         EVMASK.POINTER_MOTION_MASK | EVMASK.SCROLL_MASK | EVMASK.KEY_PRESS_MASK)
         on_event(self, "button-press-event", self._press)
@@ -13497,7 +13507,7 @@ class VideoPreview(Gtk.Box):
         import queue
         self._ops: "queue.Queue" = queue.Queue()
         threading.Thread(target=self._op_loop, daemon=True, name="shotrover-video-state").start()
-        self.set_can_focus(True)
+        takes_keys(self)
         on_event(self, "key-press-event", self._key)
 
     def _op_loop(self):

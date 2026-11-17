@@ -2,6 +2,8 @@
 
 ## 1.2.0 — 2026-11-15
 
+- Fixed (GTK 4 interface): in the icon layouts (Large icons, List, Tiles and the rest) the file list never took
+  the keyboard, so Delete, F2, the arrow keys and the other list keys did nothing there.
 - Fixed: with the file index switched on, the window stuttered badly for the first seconds after every start
   (while the index was read) and for as long as the index was being refreshed. The index now lives in a helper
   process of its own, so reading it and walking the disk no longer hold up the interface.
