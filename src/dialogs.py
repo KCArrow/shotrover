@@ -691,6 +691,8 @@ class OptionsDialog(Gtk.Dialog):
         self._heading(b, "Archives (zip, 7z, tar…)")
         self._radios(b, "archive_action", [("extract", "Double-click extracts to a folder beside the archive and opens it"),
                                            ("open", "Double-click opens the archive with the default application")])
+        self._heading(b, "Other applications")
+        self._check(b, "file_manager1", "Open \"Show in folder\" from other applications in Shotrover")
         self._heading(b, "Performance")
         row = Gtk.Box(spacing=6)
         put(row, Gtk.Label(label="CPU cores reserved for the interface:"), False, False, 0)

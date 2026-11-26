@@ -1320,6 +1320,9 @@ class ExplorerApp(Gtk.Application):
     def __init__(self):
         super().__init__(application_id=APP_ID, flags=Gio.ApplicationFlags.HANDLES_OPEN | Gio.ApplicationFlags.NON_UNIQUE)
         self.cfg = load_config()
+        self._fm_owner = 0                   # bus_own_name id for org.freedesktop.FileManager1 (0 = not asked for)
+        self._fm_reg = 0
+        self._fm_conn = None
         if GTK4_FAILED and self.cfg.get("toolkit") == "gtk4":      # do not try again at every start
             self.cfg["toolkit"] = "gtk3"
             save_config(self.cfg)
@@ -1342,6 +1345,112 @@ class ExplorerApp(Gtk.Application):
         ICONS.set_icon_set(self.cfg.get("icons", "shotrover"))
         GLib.timeout_add(400, lambda: (bg(warm_workers), False)[1])
         GLib.timeout_add(1500, self._index_startup)
+        self.fm_sync()
+
+    # ---- "Show in folder" from other applications
+    # Browsers, download lists and many other programs ask the session bus service org.freedesktop.FileManager1
+    # to show a file in its folder. Nautilus provides it on GNOME; while Shotrover runs it answers instead, and
+    # install.sh adds an activation file so the bus starts Shotrover (--file-manager-service) when it is not.
+    def fm_sync(self):
+        """Ask for, or give up, the service name, following the setting. Demo mode and tests never take it."""
+        want = bool(self.cfg.get("file_manager1", True)) and DEMO is None and STRESS is None
+        if DEMO is None and STRESS is None and getattr(self, "_fm_file", None) != want:
+            self._fm_file = want
+            exe = os.path.realpath(sys.argv[0]) if sys.argv and sys.argv[0] else ""
+            bg(lambda: fm_activation_file(want, exe))
+        if want and not self._fm_owner:
+            self._fm_owner = Gio.bus_own_name(Gio.BusType.SESSION, "org.freedesktop.FileManager1", Gio.BusNameOwnerFlags.REPLACE,
+                                              self._fm_bus, None, self._fm_lost)
+        elif not want and self._fm_owner:
+            Gio.bus_unown_name(self._fm_owner)
+            self._fm_owner = 0
+            if self._fm_reg and self._fm_conn is not None:
+                self._fm_conn.unregister_object(self._fm_reg)
+            self._fm_reg, self._fm_conn = 0, None
+
+    def _fm_bus(self, conn, name):
+        try:
+            iface = Gio.DBusNodeInfo.new_for_xml(FM_XML).interfaces[0]
+            self._fm_reg = conn.register_object("/org/freedesktop/FileManager1", iface, self._fm_call, None, None)
+            self._fm_conn = conn
+            _BUS_FDS.add(conn.get_stream().get_socket().get_fd())
+        except Exception as ex:
+            print("shotrover: show-in-folder service not available —", ex, file=sys.stderr)
+
+    def _fm_lost(self, conn, name):
+        """Another file manager holds the name (or there is no session bus): a service start has nothing to do."""
+        if FM_SERVICE and not self.get_windows():
+            self.quit()
+
+    def _fm_call(self, conn, sender, path, iface, method, params, invocation):
+        try:
+            uris, sid = params.unpack()
+        except Exception:
+            uris, sid = [], ""
+        invocation.return_value(None)        # the caller is not kept waiting for windows to open
+        paths = []
+        for u in uris:
+            p = u if u.startswith("/") else Gio.File.new_for_uri(u).get_path()
+            if p:
+                paths.append(p.rstrip("/") or "/")
+        if not paths:
+            return
+        if method == "ShowFolders":
+            for p in paths:
+                self._fm_window(p, [], sid)
+            return
+        groups: Dict[str, List[str]] = {}
+        for p in paths:
+            groups.setdefault(os.path.dirname(p) or "/", []).append(os.path.basename(p))
+        if method == "ShowItemProperties":
+            folder, names = next(iter(groups.items()))
+            w = self._fm_window(folder, names, sid)
+            full = [os.path.join(folder, n) for n in names]
+
+            def work():
+                ents = []
+                for f in full:
+                    try:
+                        ents.append(entry_for_path(f))
+                    except Exception:
+                        pass
+
+                def show():
+                    if ents and w.get_mapped():
+                        if len(ents) == 1:
+                            PropertiesDialog(w, ents[0], w.cfg, w.do_rename)
+                        else:
+                            MultiPropertiesDialog(w, ents)
+                    return False
+                GLib.idle_add(show)
+            bg(work)
+            return
+        for folder, names in groups.items():
+            self._fm_window(folder, names, sid)
+
+    def _fm_window(self, folder: str, names: List[str], sid: str):
+        w = self.new_window(folder)
+        if sid:
+            try:
+                w.set_startup_id(sid)        # lets the window manager raise it although another app asked
+            except Exception:
+                pass
+        if names:
+            tries = [0]
+
+            def pick():                      # once the listing holds the names (it is read in the background)
+                t = w.tab
+                if t is None or t.path != folder:
+                    tries[0] += 1
+                    return tries[0] < 80
+                have = {e.name for e in t.entries}
+                if all(n in have for n in names) or tries[0] >= 80:
+                    t.select_names([n for n in names if n in have])
+                    return False
+                tries[0] += 1
+                return True
+            GLib.timeout_add(100, pick)
+        return w
 
     def _index_startup(self):
         """Load the encrypted index off the main thread; then crawl (incrementally) if it is stale."""
@@ -1373,8 +1482,17 @@ class ExplorerApp(Gtk.Application):
             w.show_report_notice(path)
 
     def do_activate(self):
-        w = self.new_window(None)
         CRASH.on_report = self._on_report
+        if FM_SERVICE:
+            # started by the session bus to answer "show in folder": windows open as the requests come in. Stay
+            # up long enough for the first one; after that the last window closing ends the process as usual.
+            if not self.cfg.get("file_manager1", True):
+                self.quit()
+                return
+            self.hold()
+            GLib.timeout_add_seconds(30, lambda: (self.release(), False)[1])
+            return
+        w = self.new_window(None)
         pend = CRASH.pending()
         if pend:
             first = CRASH.previous[0] if CRASH.previous else pend[0]
@@ -1412,6 +1530,78 @@ class ExplorerApp(Gtk.Application):
             self._welcomed = True                    # once per run, on the first window, however it was opened
             GLib.timeout_add(350, lambda: (WelcomeDialog(w, self.cfg, w.apply_cfg), False)[1])
         return w
+
+
+FM_SERVICE = False         # started by the session bus as the "show in folder" service (--file-manager-service)
+FM_XML = """<node><interface name="org.freedesktop.FileManager1">
+  <method name="ShowFolders"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+  <method name="ShowItems"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+  <method name="ShowItemProperties"><arg type="as" name="URIs" direction="in"/><arg type="s" name="StartupId" direction="in"/></method>
+</interface></node>"""
+
+
+def fm_activation_file(on: bool, exe: str, home: Optional[str] = None) -> str:
+    """The file that lets the session bus start Shotrover for "show in folder" when it is not running. Written
+    only for the installed copy (a portable copy that moves would leave it pointing at nothing, and then every
+    request would fail), removed when the setting is switched off. A file that is not Shotrover's is left alone.
+    Returns what was done, for the self-test. Runs in a worker thread."""
+    home = home or os.path.expanduser("~")
+    data = os.environ.get("XDG_DATA_HOME") or os.path.join(home, ".local", "share")
+    f = os.path.join(data, "dbus-1", "services", "org.freedesktop.FileManager1.service")
+    inst = os.path.join(home, ".local", "bin", "shotrover")
+    try:
+        with open(f, encoding="utf-8") as fh:
+            old = fh.read()
+    except OSError:
+        old = None
+    if old is not None and "--file-manager-service" not in old:
+        return "not ours"
+    if on:
+        if not exe or not os.path.exists(inst) or os.path.realpath(inst) != exe:
+            return "not installed"
+        text = f"[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec={inst} --file-manager-service\n"
+        if old == text:
+            return "kept"
+        try:
+            os.makedirs(os.path.dirname(f), exist_ok=True)
+            with open(f, "w", encoding="utf-8") as fh:
+                fh.write(text)
+        except OSError:
+            return "failed"
+        done = "written"
+    else:
+        if old is None:
+            return "none"
+        try:
+            os.remove(f)
+        except OSError:
+            return "failed"
+        done = "removed"
+    if home == os.path.expanduser("~"):              # the self-test passes its own home: no bus for that
+        try:
+            Gio.bus_get_sync(Gio.BusType.SESSION, None).call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "ReloadConfig",
+                None, None, Gio.DBusCallFlags.NONE, 5000, None)
+        except Exception:
+            pass
+    return done
+
+
+_BUS_FDS: set = set()        # the session bus socket, once Shotrover holds a name on it
+
+
+def _drop_bus_in_child():
+    """Worker processes are forked copies and inherit the bus socket. While any of them kept it open the bus
+    took the application for alive: if it ended abnormally, the workers it left behind went on holding
+    "show in folder", and every request to it hung until the caller gave up. A worker never uses the bus."""
+    for fd in _BUS_FDS:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+
+os.register_at_fork(after_in_child=_drop_bus_in_child)
 
 
 def _probe_gl_child() -> int:
@@ -1611,6 +1801,9 @@ def main():
             return 0
         print("FAILED:", (m or {}).get("error", "no result"))
         return 1
+    if "--file-manager-service" in sys.argv[1:]:
+        sys.argv.remove("--file-manager-service")
+        globals()["FM_SERVICE"] = True
     if "--demo" in sys.argv[1:]:
         # shotrover --demo /path/to/ShotroverDemo : a fictional machine for screenshots (internal; not in the public docs)
         i = sys.argv.index("--demo")

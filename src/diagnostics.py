@@ -741,6 +741,33 @@ def run_selftest(bench: bool = False) -> int:
             finally:
                 g["INDEX_FILE"] = keep
 
+        @timed("show-in-folder activation file")
+        def test_fm_activation_file(self):
+            home = os.path.join(self.tmp, "fmhome")
+            inst = os.path.join(home, ".local", "bin", "shotrover")
+            os.makedirs(os.path.dirname(inst))
+            with open(inst, "w") as f:
+                f.write("#")
+            svc = os.path.join(home, ".local", "share", "dbus-1", "services", "org.freedesktop.FileManager1.service")
+            keep = os.environ.pop("XDG_DATA_HOME", None)
+            try:
+                self.assertEqual(fm_activation_file(True, "/somewhere/else/shotrover.py", home), "not installed")
+                self.assertFalse(os.path.exists(svc))
+                self.assertEqual(fm_activation_file(True, os.path.realpath(inst), home), "written")
+                with open(svc) as f:
+                    self.assertIn(inst + " --file-manager-service", f.read())
+                self.assertEqual(fm_activation_file(True, os.path.realpath(inst), home), "kept")
+                self.assertEqual(fm_activation_file(False, "", home), "removed")
+                self.assertFalse(os.path.exists(svc))
+                with open(svc, "w") as f:                # another file manager's: never touched
+                    f.write("[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=/usr/bin/other\n")
+                self.assertEqual(fm_activation_file(False, "", home), "not ours")
+                self.assertEqual(fm_activation_file(True, os.path.realpath(inst), home), "not ours")
+                self.assertTrue(os.path.exists(svc))
+            finally:
+                if keep is not None:
+                    os.environ["XDG_DATA_HOME"] = keep
+
         @timed("zip round trip (ArchiveOp)")
         def test_zip_roundtrip(self):
             src = os.path.join(self.tmp, "ziptest")

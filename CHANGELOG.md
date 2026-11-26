@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+- "Show in folder" from other applications (browsers, download lists and others) opens Shotrover instead of
+  Nautilus, with the file selected. Shotrover answers while it is running; the installed copy also lets the
+  desktop start it for these requests when it is not. Preferences → General → "Open "Show in folder" from
+  other applications in Shotrover" switches it off. Applications' own file dialogs ("Open…", "Save as…") are
+  unchanged: Linux gives no way to replace those.
+- Fixed: Shotrover's background worker processes kept its connection to the desktop's message bus open, so
+  after an abnormal exit they could go on holding names it had taken.
+
 ## 1.2.1 — 2026-11-16
 
 - Fixed (GTK 4 interface): in the icon layouts (Large icons, List, Tiles and the rest) the file list never took

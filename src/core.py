@@ -97,7 +97,7 @@ def _gtk4_guarded() -> bool:
             return False
     except (OSError, ValueError):
         pass
-    if any(a.startswith("--") for a in sys.argv[1:]):       # tests and probes: no watcher
+    if any(a.startswith("--") and a != "--file-manager-service" for a in sys.argv[1:]):      # tests and probes: no watcher
         return True
     try:
         os.makedirs(os.path.dirname(_GTK4_MARK), exist_ok=True)
@@ -435,7 +435,7 @@ VIRTUAL = (QUICK, THISPC, TRASH, NETWORK, RECENT)
 
 DEFAULT_CONFIG = {
     "open_to": "quick", "browse_in_new_tab": False, "single_click": False,
-    "show_recent": True, "show_frequent": True,
+    "show_recent": True, "show_frequent": True, "file_manager1": True,
     "show_hidden": False, "hide_extensions": False, "full_path_title": False, "folders_first": True,
     "confirm_delete": True, "checkboxes": False, "gl_preview": True, "toolkit": "gtk3", "seq_fps": 24, "blend_view": "breakdown", "gdk_backend": "", "rv_enabled": False, "rv_path": "", "ui_cores": 2, "archive_action": "extract", "index_enabled": False, "index_roots": [HOME], "index_network": False, "index_hidden": False, "index_interval_h": 6, "nav_pane": True, "preview_pane": False, "details_pane": False,
     "size_in_bytes": False, "date_format": "%Y-%m-%d %H:%M", "layout": "details",

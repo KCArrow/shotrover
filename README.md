@@ -61,7 +61,8 @@ shotrover ~/Pictures
   [Releases page](https://github.com/KCArrow/shotrover/releases), unzip it anywhere and run `./shotrover`.
   More in [Portable build](#portable-build).
 - **Straight from the source folder:** `python3 shotrover.py [folder…]`
-- **Make it your default file manager:** `xdg-mime default shotrover.desktop inode/directory`
+- **Make it your default file manager:** `xdg-mime default shotrover.desktop inode/directory`. The installed copy
+  also answers "Show in folder" from browsers and other applications (Preferences → General can switch that off).
 - **Uninstall:** `./install.sh --uninstall` (your settings in `~/.config/shotrover` are kept)
 
 </details>

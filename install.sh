@@ -4,8 +4,14 @@
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd)
 BIN="$HOME/.local/bin"; APPS="$HOME/.local/share/applications"; ICONS="$HOME/.local/share/icons/hicolor/scalable/apps"
+# lets other applications' "Show in folder" start Shotrover (Preferences → General can switch it off)
+FM1="${XDG_DATA_HOME:-$HOME/.local/share}/dbus-1/services/org.freedesktop.FileManager1.service"
+reload_bus() {
+  dbus-send --session --type=method_call --dest=org.freedesktop.DBus /org/freedesktop/DBus org.freedesktop.DBus.ReloadConfig 2>/dev/null || true
+}
 if [ "$1" = "--uninstall" ]; then
   rm -f "$BIN/shotrover" "$APPS/shotrover.desktop" "$ICONS/shotrover.svg"
+  if grep -q -- "--file-manager-service" "$FM1" 2>/dev/null; then rm -f "$FM1"; reload_bus; fi
   update-desktop-database "$APPS" 2>/dev/null || true
   echo "Removed. Settings/cache left in ~/.config/shotrover and ~/.cache/shotrover."
   exit 0
@@ -31,6 +37,13 @@ if [ -f "$APPS/kestrel.desktop" ] || [ -f "$BIN/kestrel" ]; then
   echo "Replaced the old Kestrel install (settings carry over on first start)."
 fi
 update-desktop-database "$APPS" 2>/dev/null || true
+if [ ! -f "$FM1" ] || grep -q -- "--file-manager-service" "$FM1"; then       # never replace another file manager's
+  if ! grep -q '"file_manager1": false' "${XDG_CONFIG_HOME:-$HOME/.config}/shotrover/config.json" 2>/dev/null; then
+    mkdir -p "$(dirname "$FM1")"
+    printf '[D-BUS Service]\nName=org.freedesktop.FileManager1\nExec=%s --file-manager-service\n' "$BIN/shotrover" > "$FM1"
+    reload_bus
+  fi
+fi
 echo "Installed: shotrover [folder]   (app menu: 'Shotrover')"
 echo "Default folder handler:  xdg-mime default shotrover.desktop inode/directory"
 case ":$PATH:" in *":$BIN:"*) ;; *) echo "Note: $BIN is not on your PATH yet.";; esac

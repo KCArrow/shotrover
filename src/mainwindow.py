@@ -4126,6 +4126,9 @@ class MainWindow(Gtk.ApplicationWindow):
         self.apply_cfg()
 
     def apply_cfg(self):
+        app = self.get_application()
+        if app is not None and hasattr(app, "fm_sync"):
+            app.fm_sync()
         want_gl = bool(self.cfg.get("gl_preview", True) and HAVE_GL)
         have_gl = isinstance(self.model_view, GLModelView) if self.model_view is not None else want_gl
         if want_gl != have_gl:
